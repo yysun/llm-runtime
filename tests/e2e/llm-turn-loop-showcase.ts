@@ -1,22 +1,21 @@
 /**
- * LLM Package Real Showcase Runner
+ * LLM Package Turn Loop Real Showcase Runner
  *
  * Purpose:
- * - Run a real end-to-end terminal showcase for the publishable `@agent-world/llm` package.
+ * - Run a real end-to-end terminal showcase for the generic `runTurnLoop(...)` API in `@agent-world/llm`.
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.
- * - Exercises package-owned built-ins, skill loading, MCP discovery/execution, and streaming.
+ * - Exercises `runTurnLoop(...)` across built-ins, MCP tool use, and streaming callbacks.
  * - Prints a terminal-friendly walkthrough with assertions for each scenario.
  *
  * Implementation notes:
- * - The runner manages its own tool loop around package-level `generate(...)` and `stream(...)`.
+ * - The runner uses the package turn loop directly instead of managing its own local loop.
  * - A temporary workspace provides deterministic files and skills without touching the repo.
  * - `--dry-run` validates setup without making real provider calls.
  *
  * Recent changes:
- * - 2026-03-27: Added the real e2e showcase runner for `@agent-world/llm`.
- * - 2026-03-27: Switched env loading to the repo-local `.env` file explicitly.
+ * - 2026-03-29: Added the real terminal showcase runner for `runTurnLoop(...)`.
  */
 
 import assert from 'node:assert/strict';
@@ -28,6 +27,7 @@ import {
   createLLMEnvironment,
   generate,
   resolveToolsAsync,
+  runTurnLoop,
   stream,
   type LLMChatMessage,
   type LLMEnvironment,
@@ -57,6 +57,13 @@ loadDotEnv({
   quiet: true,
 });
 
+type TurnLoopShowcaseState = {
+  messages: LLMChatMessage[];
+  toolNames: string[];
+  chunks: LLMStreamChunk[];
+  finalText: string;
+};
+
 function parseFlags(argv: string[]) {
   const flags = new Set(argv.slice(2));
   return {
@@ -67,7 +74,7 @@ function parseFlags(argv: string[]) {
 
 function printHelp() {
   console.log([
-    'Usage: npm run test:llm-showcase -- [--dry-run]',
+    'Usage: npm run test:llm-turn-loop-showcase -- [--dry-run]',
     '',
     'Options:',
     '  --dry-run    Validate setup, tools, skills, and MCP wiring without calling a live LLM.',
@@ -77,88 +84,117 @@ function printHelp() {
   ].join('\n'));
 }
 
-async function runToolLoop(
+async function runShowcaseScenario(
   scenario: ShowcaseScenario,
   workingDirectory: string,
   providerSelection: ShowcaseProviderSelection,
   environment: LLMEnvironment,
 ): Promise<ShowcaseScenarioResult> {
-  const messages: LLMChatMessage[] = [...scenario.messages];
-  const chunks: LLMStreamChunk[] = [];
-  const toolNames: string[] = [];
+  const initialState: TurnLoopShowcaseState = {
+    messages: [...scenario.messages],
+    toolNames: [],
+    chunks: [],
+    finalText: '',
+  };
 
-  for (let turn = 1; turn <= MAX_TOOL_TURNS; turn += 1) {
-    const response: LLMResponse = scenario.mode === 'stream'
-      ? await stream({
-        provider: providerSelection.provider,
-        model: providerSelection.model,
-        builtIns: scenario.builtIns,
-        messages,
-        temperature: 0,
-        environment,
-        context: {
-          workingDirectory,
-        },
-        onChunk: (chunk) => {
-          chunks.push(chunk);
-        },
-      })
-      : await generate({
-        provider: providerSelection.provider,
-        model: providerSelection.model,
-        builtIns: scenario.builtIns,
-        messages,
-        temperature: 0,
-        environment,
-        context: {
-          workingDirectory,
-        },
-      });
-
-    messages.push(response.assistantMessage);
-
-    if (response.type !== 'tool_calls' || !response.tool_calls?.length) {
-      return {
-        finalText: response.content,
-        toolNames,
-        chunks,
-        turns: turn,
-      };
-    }
-
-    const tools = await resolveToolsAsync({
-      environment,
-      builtIns: scenario.builtIns,
-    });
-    for (const toolCall of response.tool_calls) {
-      const tool = tools[toolCall.function.name];
-      assert(tool?.execute, `Missing executable tool: ${toolCall.function.name}`);
-
-      let parsedArgs: Record<string, unknown> = {};
-      try {
-        parsedArgs = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
-      } catch (error) {
-        throw new Error(`Invalid tool arguments for ${toolCall.function.name}: ${error instanceof Error ? error.message : String(error)}`);
+  const result = await runTurnLoop({
+    initialState,
+    emptyTextRetryLimit: 0,
+    buildMessages: async ({ state }) => state.messages,
+    callModel: async ({ messages, state }) => {
+      if (scenario.mode === 'stream') {
+        return await stream({
+          provider: providerSelection.provider,
+          model: providerSelection.model,
+          builtIns: scenario.builtIns,
+          messages,
+          temperature: 0,
+          environment,
+          context: {
+            workingDirectory,
+          },
+          onChunk: (chunk) => {
+            state.chunks.push(chunk);
+          },
+        });
       }
 
-      toolNames.push(toolCall.function.name);
-      console.log(`  tool -> ${toolCall.function.name}(${toolCall.function.arguments || '{}'})`);
+      return await generate({
+        provider: providerSelection.provider,
+        model: providerSelection.model,
+        builtIns: scenario.builtIns,
+        messages,
+        temperature: 0,
+        environment,
+        context: {
+          workingDirectory,
+        },
+      });
+    },
+    onTextResponse: async ({ state, responseText, response }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        finalText: responseText,
+      },
+    }),
+    onToolCallsResponse: async ({ state, response, iteration }) => {
+      assert(iteration <= MAX_TOOL_TURNS, `Scenario exceeded ${MAX_TOOL_TURNS} tool rounds without reaching a final answer.`);
 
-      const toolResult = await tool.execute(parsedArgs, {
-        workingDirectory,
-        toolCallId: toolCall.id,
-        toolPermission: 'auto',
+      const tools = await resolveToolsAsync({
+        environment,
+        builtIns: scenario.builtIns,
       });
 
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: toToolMessageContent(toolResult),
-      });
-    }
-  }
+      const nextMessages = [...state.messages, response.assistantMessage];
+      const nextToolNames = [...state.toolNames];
 
-  throw new Error(`Scenario exceeded ${MAX_TOOL_TURNS} tool rounds without reaching a final answer.`);
+      for (const toolCall of response.tool_calls ?? []) {
+        const tool = tools[toolCall.function.name];
+        assert(tool?.execute, `Missing executable tool: ${toolCall.function.name}`);
+
+        let parsedArgs: Record<string, unknown> = {};
+        try {
+          parsedArgs = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
+        } catch (error) {
+          throw new Error(`Invalid tool arguments for ${toolCall.function.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        nextToolNames.push(toolCall.function.name);
+        console.log(`  tool -> ${toolCall.function.name}(${toolCall.function.arguments || '{}'})`);
+
+        const toolResult = await tool.execute(parsedArgs, {
+          workingDirectory,
+          toolCallId: toolCall.id,
+          toolPermission: 'auto',
+        });
+
+        nextMessages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: toToolMessageContent(toolResult),
+        });
+      }
+
+      return {
+        state: {
+          ...state,
+          messages: nextMessages,
+          toolNames: nextToolNames,
+        },
+        next: {
+          control: 'continue',
+        },
+      };
+    },
+  });
+
+  return {
+    finalText: result.state.finalText,
+    toolNames: result.state.toolNames,
+    chunks: result.state.chunks,
+    turns: result.iterations,
+  };
 }
 
 async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelection, dryRun: boolean) {
@@ -189,7 +225,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
   };
 
   try {
-    console.log('LLM package real showcase');
+    console.log('LLM package turn-loop real showcase');
     console.log(`provider=${providerSelection.provider}`);
     console.log(`model=${providerSelection.model}`);
 
@@ -206,7 +242,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
 
     for (const scenario of buildShowcaseScenarios()) {
       console.log(`\n[scenario] ${scenario.name}`);
-      const result = await runToolLoop(
+      const result = await runShowcaseScenario(
         scenario,
         workspace.rootPath,
         providerSelection,
@@ -221,7 +257,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
       console.log(`  status: PASS in ${result.turns} turn(s)`);
     }
 
-    console.log('\nshowcase status: PASS');
+    console.log('\nturn-loop showcase status: PASS');
   } finally {
     await environment.mcpRegistry.shutdown().catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
@@ -237,7 +273,7 @@ async function main() {
 
   const selection = resolveShowcaseProviderSelection(process.env);
   if (!selection && !flags.dryRun) {
-    console.error('No real LLM provider configuration was found for the showcase runner.\n');
+    console.error('No real LLM provider configuration was found for the turn-loop showcase runner.\n');
     console.error(getShowcaseEnvHelp());
     process.exitCode = 1;
     return;
@@ -257,7 +293,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('showcase status: FAIL');
+  console.error('turn-loop showcase status: FAIL');
   console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   process.exitCode = 1;
 });

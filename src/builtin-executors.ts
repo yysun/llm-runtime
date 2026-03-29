@@ -21,7 +21,7 @@
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import * as fg from 'fast-glob';
+import fg from 'fast-glob';
 import type {
   BuiltInToolName,
   LLMToolExecutionContext,
@@ -456,14 +456,14 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
     child.stdout?.on('data', (chunk) => {
       stdout += chunk.toString();
     });
-    child.stderr?.on('data', (chunk) => {
+    child.stderr?.on('data', (chunk: Buffer | string) => {
       stderr += chunk.toString();
     });
-    child.on('error', (error) => {
+    child.on('error', (error: Error) => {
       clearTimeout(timer);
       resolvePromise(`Error: shell_cmd failed - ${error.message}`);
     });
-    child.on('close', (code, signal) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       clearTimeout(timer);
       const durationMs = Date.now() - startedAt;
       if (outputFormat === 'json') {

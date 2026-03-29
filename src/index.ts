@@ -8,6 +8,7 @@
  * - Per-call `generate(...)`, `stream(...)`, and explicit environment export.
  * - Package-owned provider configuration helpers.
  * - Package-owned built-in tool catalog and runtime helpers.
+ * - Generic host-agnostic turn-loop orchestration helpers.
  * - MCP, skill, and tool registry helpers and types.
  *
  * Implementation notes:
@@ -16,6 +17,7 @@
  * - Serves as the primary import target for `core` and external consumers.
  *
  * Recent changes:
+ * - 2026-03-29: Exported the generic host-agnostic `runTurnLoop(...)` package API.
  * - 2026-03-27: Initial public API for `packages/llm`.
  */
 
@@ -26,6 +28,7 @@ export * from './mcp.js';
 export * from './skills.js';
 export * from './tools.js';
 export * from './tool-validation.js';
+export * from './turn-loop.js';
 export {
   createLLMEnvironment,
   generate,

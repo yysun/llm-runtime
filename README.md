@@ -7,6 +7,7 @@ This package is designed for harnesses that want a stable per-call API without p
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
+- Generic host-agnostic turn-loop orchestration through `runTurnLoop(...)`
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
 - Skill discovery from configured skill roots
@@ -17,6 +18,7 @@ This package is designed for harnesses that want a stable per-call API without p
 - `createLLMEnvironment(...)`
 - `generate(...)`
 - `stream(...)`
+- `runTurnLoop(...)`
 - `resolveTools(...)`
 - `resolveToolsAsync(...)`
 
@@ -93,6 +95,93 @@ The difference is output delivery:
 - `generate(...)` returns the final result
 - `stream(...)` emits chunks and still returns the final result at the end
 
+## `runTurnLoop(...)`
+
+`runTurnLoop(...)` is the package-owned iterative loop for harnesses that want the package to manage repeated model turns without taking ownership of harness state, persistence, or tool policy.
+
+Use it when your harness needs more control than a single `generate(...)` or `stream(...)` call, but still wants one package boundary for:
+
+- repeated model invocation
+- empty-text retry handling
+- optional plain-text tool-intent normalization
+
+The split of responsibilities is deliberate:
+
+- The package owns loop repetition and response classification.
+- The harness owns state shape, message construction, tool execution, persistence, and replay.
+
+You can provide either:
+
+- `modelRequest` when the package should call `generate(...)` or `stream(...)` for you
+- `callModel` when the harness wants to control model invocation directly
+
+Minimal shape:
+
+```ts
+import { runTurnLoop, type LLMChatMessage } from '@agent-world/llm';
+
+type ChatState = {
+  messages: LLMChatMessage[];
+  finalText: string;
+};
+
+const result = await runTurnLoop({
+  initialState: {
+    messages: [{ role: 'user', content: 'Find the token and use tools if needed.' }],
+    finalText: '',
+  },
+  emptyTextRetryLimit: 0,
+  modelRequest: {
+    provider: 'openai',
+    model: 'gpt-5',
+    builtIns: {
+      read_file: true,
+    },
+  },
+  buildMessages: async ({ state, transientInstruction }) => {
+    if (!transientInstruction) {
+      return state.messages;
+    }
+
+    return [
+      ...state.messages,
+      { role: 'system', content: transientInstruction },
+    ];
+  },
+  onToolCallsResponse: async ({ state, response }) => {
+    const nextMessages = [...state.messages, response.assistantMessage];
+
+    for (const toolCall of response.tool_calls ?? []) {
+      const toolResult = await executeTool(toolCall);
+      nextMessages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(toolResult),
+      });
+    }
+
+    return {
+      state: {
+        ...state,
+        messages: nextMessages,
+      },
+      next: {
+        control: 'continue',
+      },
+    };
+  },
+  onTextResponse: async ({ state, responseText, response }) => ({
+    state: {
+      ...state,
+      messages: [...state.messages, response.assistantMessage],
+      finalText: responseText,
+    },
+  }),
+});
+
+console.log(result.state.finalText);
+```
+
 ## Example
 
 ```ts
@@ -159,5 +248,7 @@ Recommended integration pattern:
 - `npm run test:watch` runs the Vitest suite in watch mode
 - `npm run test:e2e` runs the showcase script in `tests/e2e/llm-package-showcase.ts`
 - `npm run test:e2e:dry-run` validates the showcase wiring without live provider calls
+- `npm run test:e2e:turn-loop` runs the `runTurnLoop(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
+- `npm run test:e2e:turn-loop:dry-run` validates the turn-loop showcase wiring without live provider calls
 
 The real showcase runner expects a repo-local `.env` file when using `npm run test:e2e`.
