@@ -125,24 +125,24 @@ function normalizeToolSchema(schema: unknown): Record<string, unknown> {
   const candidate = schema as Record<string, unknown>;
   const properties = candidate.properties && typeof candidate.properties === 'object' && !Array.isArray(candidate.properties)
     ? Object.entries(candidate.properties as Record<string, unknown>).reduce<Record<string, unknown>>((accumulator, [key, value]) => {
-        const prop = value && typeof value === 'object' && !Array.isArray(value)
-          ? value as Record<string, unknown>
-          : {};
-        const nextProp: Record<string, unknown> = {
-          type: typeof prop.type === 'string' ? prop.type : 'string',
-        };
-        if (typeof prop.description === 'string' && prop.description.trim()) {
-          nextProp.description = prop.description;
-        }
-        if (Array.isArray(prop.enum)) {
-          nextProp.enum = prop.enum;
-        }
-        if (prop.items && typeof prop.items === 'object' && !Array.isArray(prop.items)) {
-          nextProp.items = prop.items;
-        }
-        accumulator[key] = nextProp;
-        return accumulator;
-      }, {})
+      const prop = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+      const nextProp: Record<string, unknown> = {
+        type: typeof prop.type === 'string' ? prop.type : 'string',
+      };
+      if (typeof prop.description === 'string' && prop.description.trim()) {
+        nextProp.description = prop.description;
+      }
+      if (Array.isArray(prop.enum)) {
+        nextProp.enum = prop.enum;
+      }
+      if (prop.items && typeof prop.items === 'object' && !Array.isArray(prop.items)) {
+        nextProp.items = prop.items;
+      }
+      accumulator[key] = nextProp;
+      return accumulator;
+    }, {})
     : {};
 
   return {
@@ -225,7 +225,7 @@ export function parseMCPConfigJson(input: string | null | undefined): MCPConfig 
 
 async function connectMCPServer(server: MCPRegistryEntry): Promise<Client> {
   const transport = server.transport || 'stdio';
-  const client = new Client({ name: '@agent-world/llm', version: '0.1.0' }, { capabilities: {} });
+  const client = new Client({ name: 'llm-runtime', version: '0.1.0' }, { capabilities: {} });
 
   if (transport === 'stdio') {
     const stdioTransport = new StdioClientTransport({

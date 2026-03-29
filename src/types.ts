@@ -2,7 +2,7 @@
  * LLM Package Types
  *
  * Purpose:
- * - Define the public type contracts for the publishable `@agent-world/llm` package.
+ * - Define the public type contracts for the publishable `llm-runtime` package.
  *
  * Key features:
  * - Provider configuration types decoupled from `core`.
@@ -50,12 +50,12 @@ export interface BaseLLMConfig {
   apiVersion?: string;
 }
 
-export interface OpenAIConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> {}
-export interface AnthropicConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> {}
-export interface GoogleConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> {}
-export interface XAIConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> {}
-export interface OpenAICompatibleConfig extends Required<Pick<BaseLLMConfig, 'apiKey' | 'baseUrl'>> {}
-export interface OllamaConfig extends Required<Pick<BaseLLMConfig, 'baseUrl'>> {}
+export interface OpenAIConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> { }
+export interface AnthropicConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> { }
+export interface GoogleConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> { }
+export interface XAIConfig extends Required<Pick<BaseLLMConfig, 'apiKey'>> { }
+export interface OpenAICompatibleConfig extends Required<Pick<BaseLLMConfig, 'apiKey' | 'baseUrl'>> { }
+export interface OllamaConfig extends Required<Pick<BaseLLMConfig, 'baseUrl'>> { }
 export interface AzureConfig extends Required<Pick<BaseLLMConfig, 'apiKey' | 'deployment'>> {
   resourceName: string;
   apiVersion?: string;
@@ -275,7 +275,7 @@ export interface LLMPerCallProviderOptions {
   context?: LLMToolExecutionContext;
 }
 
-export interface LLMGenerateOptions extends LLMPerCallProviderOptions {}
+export interface LLMGenerateOptions extends LLMPerCallProviderOptions { }
 
 export interface LLMStreamOptions extends LLMPerCallProviderOptions {
   onChunk?: (chunk: LLMStreamChunk) => void;

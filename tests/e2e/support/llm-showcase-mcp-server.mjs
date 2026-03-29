@@ -2,7 +2,7 @@
  * LLM Package Showcase MCP Server
  *
  * Purpose:
- * - Provide a tiny deterministic stdio MCP server for the real `@agent-world/llm` showcase.
+ * - Provide a tiny deterministic stdio MCP server for the real `llm-runtime` showcase.
  *
  * Key features:
  * - Exposes one predictable lookup tool that returns release tokens by subject.

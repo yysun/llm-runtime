@@ -2,7 +2,7 @@
  * LLM Package Turn Loop Real Showcase Runner
  *
  * Purpose:
- * - Run a real end-to-end terminal showcase for the generic `runTurnLoop(...)` API in `@agent-world/llm`.
+ * - Run a real end-to-end terminal showcase for the generic `runTurnLoop(...)` API in `llm-runtime`.
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.

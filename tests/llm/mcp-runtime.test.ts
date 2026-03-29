@@ -14,7 +14,7 @@
  * - Exercises the public runtime and registry surfaces from `packages/llm`.
  *
  * Recent changes:
- * - 2026-03-27: Initial MCP runtime coverage for the publishable `@agent-world/llm` package.
+ * - 2026-03-27: Initial MCP runtime coverage for the publishable `llm-runtime` package.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -90,7 +90,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   },
 }));
 
-describe('@agent-world/llm MCP runtime', () => {
+describe('llm-runtime MCP runtime', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     listToolsPayload.length = 0;

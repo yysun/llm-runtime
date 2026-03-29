@@ -13,7 +13,7 @@
  * - Exercises the provider module through its public exports.
  *
  * Recent changes:
- * - 2026-03-27: Initial targeted OpenAI-compatible provider coverage for `@agent-world/llm`.
+ * - 2026-03-27: Initial targeted OpenAI-compatible provider coverage for `llm-runtime`.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -22,7 +22,7 @@ import {
   streamOpenAIResponse,
 } from '../../src/openai-direct.js';
 
-describe('@agent-world/llm openai-direct', () => {
+describe('llm-runtime openai-direct', () => {
   it('normalizes non-streaming tool calls into package-native responses', async () => {
     const fakeClient = {
       chat: {

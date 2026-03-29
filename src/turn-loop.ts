@@ -2,7 +2,7 @@
  * LLM Package Generic Turn Loop
  *
  * Purpose:
- * - Provide a host-agnostic iterative model/tool loop for `@agent-world/llm`.
+ * - Provide a host-agnostic iterative model/tool loop for `llm-runtime`.
  *
  * Key features:
  * - Callback-driven loop control with caller-owned generic state.

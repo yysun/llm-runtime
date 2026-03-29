@@ -14,7 +14,7 @@
  * - Avoids real filesystem, network, and provider clients.
  *
  * Recent changes:
- * - 2026-03-27: Initial provider-dispatch coverage for the publishable `@agent-world/llm` runtime.
+ * - 2026-03-27: Initial provider-dispatch coverage for the publishable `llm-runtime` runtime.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -53,7 +53,7 @@ vi.mock('../../src/openai-direct.js', () => ({
   streamOpenAIResponse: mockStreamOpenAIResponse,
 }));
 
-describe('@agent-world/llm runtime provider dispatch', () => {
+describe('llm-runtime runtime provider dispatch', () => {
   afterEach(async () => {
     const { __resetLLMCallCachesForTests } = await import('../../src/runtime.js');
     await __resetLLMCallCachesForTests();
@@ -180,7 +180,7 @@ describe('@agent-world/llm runtime provider dispatch', () => {
           parameters: { type: 'object' },
         },
       },
-    })).rejects.toThrow('Tool name "read_file" is reserved by @agent-world/llm built-ins.');
+    })).rejects.toThrow('Tool name "read_file" is reserved by llm-runtime built-ins.');
   });
 
   it('dispatches per-call generate requests without constructing a runtime', async () => {

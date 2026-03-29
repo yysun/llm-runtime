@@ -43,7 +43,7 @@ function createTextResponse(content: string): LLMResponse {
   };
 }
 
-describe('@agent-world/llm runTurnLoop', () => {
+describe('llm-runtime runTurnLoop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });

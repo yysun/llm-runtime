@@ -2,7 +2,7 @@
  * LLM Package Built-In Tool Catalog
  *
  * Purpose:
- * - Own the canonical built-in tool catalog for `@agent-world/llm`.
+ * - Own the canonical built-in tool catalog for `llm-runtime`.
  *
  * Key features:
  * - Stable built-in tool names, descriptions, and parameter schemas.
@@ -357,7 +357,7 @@ export function createBuiltInToolDefinitions(options: {
 export function assertNoBuiltInToolNameCollisions(tools: LLMToolDefinition[]): void {
   for (const tool of tools) {
     if (BUILT_IN_TOOL_NAMES.includes(tool.name as BuiltInToolName)) {
-      throw new Error(`Tool name "${tool.name}" is reserved by @agent-world/llm built-ins.`);
+      throw new Error(`Tool name "${tool.name}" is reserved by llm-runtime built-ins.`);
     }
   }
 }

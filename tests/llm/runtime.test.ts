@@ -15,7 +15,7 @@
  * - Avoids any real filesystem, network, or provider calls.
  *
  * Recent changes:
- * - 2026-03-27: Initial targeted coverage for the new `@agent-world/llm` package.
+ * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
  * - 2026-03-27: Added built-in tool enablement, narrowing, and host-adapter coverage.
  */
@@ -94,7 +94,7 @@ function createMockSkillFileSystem(files: Record<string, string>): SkillFileSyst
   };
 }
 
-describe('@agent-world/llm runtime', () => {
+describe('llm-runtime runtime', () => {
   it('parses legacy MCP JSON and normalizes mcpServers into servers', () => {
     const config = parseMCPConfigJson(JSON.stringify({
       mcpServers: {
@@ -289,7 +289,7 @@ describe('@agent-world/llm runtime', () => {
         },
       ],
     })).toThrow(
-      'Tool name "read_file" is reserved by @agent-world/llm built-ins.',
+      'Tool name "read_file" is reserved by llm-runtime built-ins.',
     );
   });
 

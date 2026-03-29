@@ -1,6 +1,6 @@
-# `@agent-world/llm`
+# `llm-runtime`
 
-`@agent-world/llm` is a runtime layer for application-owned LLM workflows. It wraps provider invocation with one package boundary for tool orchestration, MCP integration, and skill loading.
+`llm-runtime` is a runtime layer for application-owned LLM workflows. It wraps provider invocation with one package boundary for tool orchestration, MCP integration, and skill loading.
 
 This package is designed for harnesses that want a stable per-call API without pushing provider-specific details, built-in tool contracts, MCP wiring, and skill discovery into application code.
 
@@ -53,7 +53,7 @@ If a value should change from one request or UI action to the next, it usually s
 
 ## Tool Model
 
-`@agent-world/llm` merges several tool sources into one callable surface.
+`llm-runtime` merges several tool sources into one callable surface.
 
 ### Built-In Tools
 
@@ -118,7 +118,7 @@ You can provide either:
 Minimal shape:
 
 ```ts
-import { runTurnLoop, type LLMChatMessage } from '@agent-world/llm';
+import { runTurnLoop, type LLMChatMessage } from 'llm-runtime';
 
 type ChatState = {
   messages: LLMChatMessage[];
@@ -185,7 +185,7 @@ console.log(result.state.finalText);
 ## Example
 
 ```ts
-import { createLLMEnvironment, generate } from '@agent-world/llm';
+import { createLLMEnvironment, generate } from 'llm-runtime';
 
 const environment = createLLMEnvironment({
   providers: {

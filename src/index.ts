@@ -2,7 +2,7 @@
  * LLM Package Public Entrypoint
  *
  * Purpose:
- * - Export the public API for the publishable `@agent-world/llm` workspace.
+ * - Export the public API for the publishable `llm-runtime` workspace.
  *
  * Key features:
  * - Per-call `generate(...)`, `stream(...)`, and explicit environment export.

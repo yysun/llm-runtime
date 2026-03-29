@@ -2,7 +2,7 @@
  * LLM Package Mocked Showcase Suite
  *
  * Purpose:
- * - Provide a mocked feature-tour suite for the `@agent-world/llm` package surface.
+ * - Provide a mocked feature-tour suite for the `llm-runtime` package surface.
  *
  * Key features:
  * - Demonstrates package-owned built-ins, skills, MCP, and provider dispatch.
@@ -15,7 +15,7 @@
  *
  * Recent changes:
  * - 2026-03-29: Added mocked `runTurnLoop(...)` showcase coverage.
- * - 2026-03-27: Initial terminal showcase suite for `@agent-world/llm`.
+ * - 2026-03-27: Initial terminal showcase suite for `llm-runtime`.
  * - 2026-03-27: Re-labeled as the mocked showcase after adding the real e2e showcase runner.
  */
 
@@ -108,7 +108,7 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
   },
 }));
 
-describe('@agent-world/llm mocked showcase', () => {
+describe('llm-runtime mocked showcase', () => {
   afterEach(async () => {
     const { __resetLLMCallCachesForTests } = await import('../../src/runtime.js');
     await __resetLLMCallCachesForTests();

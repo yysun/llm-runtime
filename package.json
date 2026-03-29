@@ -1,5 +1,5 @@
 {
-  "name": "@agent-world/llm",
+  "name": "llm-runtime",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",

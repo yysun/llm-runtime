@@ -2,7 +2,7 @@
  * LLM Package Showcase Support Helpers
  *
  * Purpose:
- * - Provide reusable support helpers for the real `@agent-world/llm` showcase runner.
+ * - Provide reusable support helpers for the real `llm-runtime` showcase runner.
  *
  * Key features:
  * - Resolves Google Gemini provider/model selection from env vars for a live showcase run.

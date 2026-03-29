@@ -2,7 +2,7 @@
  * LLM Package Showcase Config Tests
  *
  * Purpose:
- * - Validate env-driven provider selection for the real `@agent-world/llm` showcase runner.
+ * - Validate env-driven provider selection for the real `llm-runtime` showcase runner.
  *
  * Key features:
  * - Covers auto-detection for common providers.

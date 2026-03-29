@@ -2,7 +2,7 @@
  * LLM Package Runtime API
  *
  * Purpose:
- * - Expose per-call `generate(...)`, `stream(...)`, and tool-resolution APIs for `@agent-world/llm`.
+ * - Expose per-call `generate(...)`, `stream(...)`, and tool-resolution APIs for `llm-runtime`.
  *
  * Key features:
  * - Supports explicit `LLMEnvironment` injection for provider/MCP/skill dependencies.

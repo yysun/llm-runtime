@@ -2,7 +2,7 @@
  * LLM Package Provider Configuration
  *
  * Purpose:
- * - Provide package-owned provider configuration storage and validation for `@agent-world/llm`.
+ * - Provide package-owned provider configuration storage and validation for `llm-runtime`.
  *
  * Key features:
  * - Runtime configuration store for all supported providers.

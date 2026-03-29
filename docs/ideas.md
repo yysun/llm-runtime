@@ -1,4 +1,4 @@
-# `@agent-world/llm` Developer Training
+# `llm-runtime` Developer Training
 
 
 ## Session Outcomes
@@ -16,7 +16,7 @@ By the end of the session, developers should be able to:
 
 ### 0:00-0:05 Intro and Goals
 
-- Why `@agent-world/llm` exists
+- Why `llm-runtime` exists
 - Why the package is more than a raw provider SDK
 - What developers should be able to do after the session
 
@@ -82,7 +82,7 @@ By the end of the session, developers should be able to:
 
 ### Slide 1: Title
 
-- Training: `@agent-world/llm`
+- Training: `llm-runtime`
 - Per-call runtime, tools, MCP, and skills
 
 **Speaker notes**
@@ -93,7 +93,7 @@ This session is about how to use the package as an application runtime layer, no
 
 - raw provider SDKs solve only model invocation
 - real apps also need tools, MCP, and skills
-- `@agent-world/llm` gives one package boundary for that runtime logic
+- `llm-runtime` gives one package boundary for that runtime logic
 
 **Speaker notes**
 
@@ -109,7 +109,7 @@ Emphasize that this package exists so application code does not need to own prov
 
 **Speaker notes**
 
-This is the package boundary. If a developer asks whether something belongs in their harness or in `@agent-world/llm`, start by checking whether it is part of model orchestration, tool orchestration, MCP orchestration, or skill loading.
+This is the package boundary. If a developer asks whether something belongs in their harness or in `llm-runtime`, start by checking whether it is part of model orchestration, tool orchestration, MCP orchestration, or skill loading.
 
 ### Slide 4: Public API
 
@@ -350,7 +350,7 @@ Developers should know the package supports both fast deterministic unit coverag
 
 ### Slide 22: Summary
 
-- `@agent-world/llm` is a runtime layer
+- `llm-runtime` is a runtime layer
 - the harness owns environment
 - per-call inputs choose provider and model
 - request-local state drives execution context

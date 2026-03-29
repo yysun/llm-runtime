@@ -2,7 +2,7 @@
  * LLM Package Real Showcase Runner
  *
  * Purpose:
- * - Run a real end-to-end terminal showcase for the publishable `@agent-world/llm` package.
+ * - Run a real end-to-end terminal showcase for the publishable `llm-runtime` package.
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.
@@ -15,7 +15,7 @@
  * - `--dry-run` validates setup without making real provider calls.
  *
  * Recent changes:
- * - 2026-03-27: Added the real e2e showcase runner for `@agent-world/llm`.
+ * - 2026-03-27: Added the real e2e showcase runner for `llm-runtime`.
  * - 2026-03-27: Switched env loading to the repo-local `.env` file explicitly.
  */
 
