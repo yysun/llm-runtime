@@ -7,7 +7,7 @@ By the end of the session, developers should be able to:
 - explain the difference between `environment` and per-call inputs
 - map stable harness state and request-specific state into one `generate(...)` or `stream(...)` call
 - explain how built-ins, MCP tools, extra tools, and skills differ
-- use `resolveToolsAsync(...)` to inspect the effective tool surface
+- use `environment.skillRegistry` and `environment.mcpRegistry` to inspect configured discovery surfaces
 - know when to update skill roots and when not to rebuild the environment
 
 ---
@@ -60,7 +60,7 @@ By the end of the session, developers should be able to:
 - `createLLMEnvironment(...)`
 - `generate(...)`
 - `stream(...)`
-- `resolveTools(...)` / `resolveToolsAsync(...)`
+- `environment.skillRegistry` / `environment.mcpRegistry`
 - concrete harness usage pattern
 
 ### 0:48-0:55 Demo / Code Walkthrough
@@ -116,8 +116,8 @@ This is the package boundary. If a developer asks whether something belongs in t
 - `createLLMEnvironment(...)`
 - `generate(...)`
 - `stream(...)`
-- `resolveTools(...)`
-- `resolveToolsAsync(...)`
+- `environment.skillRegistry`
+- `environment.mcpRegistry`
 
 **Speaker notes**
 
@@ -314,7 +314,7 @@ This is the canonical example to anchor the rest of the training. Everything els
 
 ### Slide 19: Debugging Tips
 
-- inspect `resolveToolsAsync(...)` to see the effective tool surface
+- inspect `environment.skillRegistry` and `environment.mcpRegistry` to debug discovery inputs
 - verify provider and model resolution before blaming the runtime
 - check skill roots if `load_skill` is not finding expected content
 - check MCP config and transport if MCP tools are missing
@@ -366,7 +366,7 @@ End on the ownership model and the package boundary. That is the main conceptual
 
 ### Demo 1: Inspect the Effective Tool Surface
 
-- show `resolveToolsAsync(...)`
+- show `environment.skillRegistry` and `environment.mcpRegistry`
 - point out built-ins, MCP tools, and naming
 
 ### Demo 2: Run `generate(...)`

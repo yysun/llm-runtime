@@ -4,6 +4,8 @@
 
 This package is designed for harnesses that want a stable per-call API without pushing provider-specific details, built-in tool contracts, MCP wiring, and skill discovery into application code.
 
+> It is extracted from the [Agent World](https://github.com/yysun/agent-world) to be a standalone dependency for any application that needs provider calls with tool calls, MCP and agent skill support to build your own full agent orchestration or harness.
+
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
@@ -11,7 +13,7 @@ This package is designed for harnesses that want a stable per-call API without p
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
 - Skill discovery from configured skill roots
-- Effective tool-surface resolution through `resolveTools(...)` and `resolveToolsAsync(...)`
+- Stable environment-level registries for MCP servers and skills
 
 ## Public API
 
@@ -19,8 +21,6 @@ This package is designed for harnesses that want a stable per-call API without p
 - `generate(...)`
 - `stream(...)`
 - `runTurnLoop(...)`
-- `resolveTools(...)`
-- `resolveToolsAsync(...)`
 
 The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or inject an explicit `environment` when your harness wants stable provider, MCP, and skill dependencies.
 
@@ -236,9 +236,30 @@ Recommended integration pattern:
 
 1. Create one stable `environment` for the harness.
 2. Pass request-specific inputs per call.
-3. Use `resolveToolsAsync(...)` when you need to inspect the effective callable tool surface before execution.
+3. Inspect `environment.skillRegistry` and `environment.mcpRegistry` when you need to debug discovered skills or MCP servers.
 4. Update skill roots when the harness-level skill search path changes.
 5. Do not rebuild the environment just because request-local values like `messages` or `workingDirectory` changed.
+
+Example registry inspection pattern:
+
+```ts
+import { createLLMEnvironment } from 'llm-runtime';
+
+const environment = createLLMEnvironment();
+
+const skills = await environment.skillRegistry.listSkills();
+const servers = environment.mcpRegistry.listServers();
+
+console.table(skills.map((skill) => ({
+  skillId: skill.skillId,
+  title: skill.title,
+})));
+
+console.table(servers.map((server) => ({
+  name: server.name,
+  transport: server.config.transport,
+})));
+```
 
 ## Local Development
 

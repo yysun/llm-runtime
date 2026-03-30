@@ -23,11 +23,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   createLLMEnvironment,
-  resolveTools,
   parseMCPConfigJson,
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
 } from '../../src/index.js';
+import { resolveTools } from '../../src/runtime.js';
 
 function createMockSkillFileSystem(files: Record<string, string>): SkillFileSystemAdapter {
   const normalizedFiles = new Map(

@@ -32,8 +32,6 @@ export * from './turn-loop.js';
 export {
   createLLMEnvironment,
   generate,
-  resolveTools,
-  resolveToolsAsync,
   stream,
 } from './runtime.js';
 export * from './openai-direct.js';

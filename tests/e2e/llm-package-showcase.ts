@@ -27,13 +27,13 @@ import { config as loadDotEnv } from 'dotenv';
 import {
   createLLMEnvironment,
   generate,
-  resolveToolsAsync,
   stream,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
   type LLMStreamChunk,
 } from '../../src/index.js';
+import { resolveToolsAsync } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
   resolveShowcaseProviderSelection,

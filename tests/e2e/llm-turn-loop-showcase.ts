@@ -26,7 +26,6 @@ import { config as loadDotEnv } from 'dotenv';
 import {
   createLLMEnvironment,
   generate,
-  resolveToolsAsync,
   runTurnLoop,
   stream,
   type LLMChatMessage,
@@ -34,6 +33,7 @@ import {
   type LLMResponse,
   type LLMStreamChunk,
 } from '../../src/index.js';
+import { resolveToolsAsync } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
   resolveShowcaseProviderSelection,
