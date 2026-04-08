@@ -1,17 +1,47 @@
 {
   "name": "llm-runtime",
   "version": "0.1.0",
+  "description": "Runtime layer for application-owned LLM workflows with tool orchestration, MCP integration, and skill loading.",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": false,
   "files": [
-    "dist",
-    "src"
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yysun/llm-runtime.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yysun/llm-runtime/issues"
+  },
+  "homepage": "https://github.com/yysun/llm-runtime#readme",
+  "keywords": [
+    "llm",
+    "runtime",
+    "agents",
+    "mcp",
+    "openai",
+    "anthropic",
+    "gemini"
   ],
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
     "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
     "test": "vitest run tests/llm",
     "test:watch": "vitest tests/llm",
     "test:e2e": "tsx tests/e2e/llm-package-showcase.ts",

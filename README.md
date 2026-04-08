@@ -6,6 +6,14 @@ This package is designed for harnesses that want a stable per-call API without p
 
 > It is extracted from the [Agent World](https://github.com/yysun/agent-world) to be a standalone dependency for any application that needs provider calls with tool calls, MCP and agent skill support to build your own full agent orchestration or harness.
 
+## Installation
+
+```bash
+npm install llm-runtime
+```
+
+The published package targets Node.js 18 and later and exposes a single root entrypoint.
+
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
