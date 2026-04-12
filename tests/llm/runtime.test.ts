@@ -314,9 +314,24 @@ describe('llm-runtime runtime', () => {
       options: ['Yes'],
     } as any);
 
-    expect(failureResult).toBe(
-      "Error: Tool parameter validation failed for human_intervention_request: Parameter 'question' must be a string, got: number",
-    );
+    expect(failureResult).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(failureResult).toContain('"toolName": "human_intervention_request"');
+    expect(failureResult).toContain('"path": "question"');
+    expect(failureResult).toContain('"expectedType": "string"');
+    expect(failureResult).toContain('"receivedType": "number"');
+  });
+
+  it('returns a durable validation artifact for missing required parameters', async () => {
+    const tools = resolveTools();
+
+    const failureResult = await tools.human_intervention_request?.execute?.({
+      options: ['Yes'],
+    } as any);
+
+    expect(failureResult).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(failureResult).toContain('"path": "question"');
+    expect(failureResult).toContain('"code": "missing_required"');
+    expect(failureResult).toContain("Required parameter 'question' is missing or empty");
   });
 
   it('creates an explicit environment without relying on convenience caches', () => {

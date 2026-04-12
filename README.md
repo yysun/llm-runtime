@@ -118,6 +118,29 @@ The split of responsibilities is deliberate:
 - The package owns loop repetition and response classification.
 - The harness owns state shape, message construction, tool execution, persistence, and replay.
 
+### Turn-Loop Hardening
+
+For tool-capable turns, `runTurnLoop(...)` can now reject intent-only narration such as "I will check the file" when the harness still requires action evidence.
+
+Use these hooks when your harness needs hardening against weak tool users:
+
+- `requiresActionEvidence(...)` tells the package whether a non-empty text reply still needs proof of action before it can be accepted as final.
+- `classifyTextResponse(...)` lets the harness override package defaults and explicitly classify replies as `verified_final_response`, `intent_only_narration`, or `non_progressing`.
+- `onRejectedTextResponse(...)` lets the harness persist rejected narration or other non-progressing text before retrying or stopping.
+- `rejectedTextRetryLimit` bounds how many rejected text retries the package should allow before returning `rejected_text_response` instead of false success.
+
+The package also exports reusable recovery helpers:
+
+- `DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION`
+- `DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION`
+- `DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION`
+
+These are default exported strings, not mutable runtime settings. A harness should treat them as convenient starting points and override the effective recovery text by returning its own `transientInstruction` from `onRejectedTextResponse(...)`, by returning a custom assessment from `classifyTextResponse(...)`, or by supplying its own validation-recovery instruction after parsing a validation artifact.
+
+Tool validation failures now return durable JSON artifacts instead of opaque error strings. Use `parseToolValidationFailureArtifact(...)` when the harness wants to detect a validation failure from a tool result and prompt the model to emit a corrected tool call.
+
+The boundary remains the same: the package can classify and reject narration, but the harness still owns the policy for when a reply is truly verified and how bounded recovery should be persisted.
+
 You can provide either:
 
 - `modelRequest` when the package should call `generate(...)` or `stream(...)` for you
@@ -188,6 +211,87 @@ const result = await runTurnLoop({
 });
 
 console.log(result.state.finalText);
+```
+
+Hardening-oriented shape:
+
+```ts
+import {
+  DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
+  DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
+  parseToolValidationFailureArtifact,
+  runTurnLoop,
+} from 'llm-runtime';
+
+const result = await runTurnLoop({
+  initialState,
+  emptyTextRetryLimit: 0,
+  rejectedTextRetryLimit: 1,
+  requiresActionEvidence: ({ state }) => state.awaitingVerifiedAction,
+  buildMessages: async ({ state, transientInstruction }) => {
+    if (!transientInstruction) {
+      return state.messages;
+    }
+
+    return [...state.messages, { role: 'system', content: transientInstruction }];
+  },
+  onRejectedTextResponse: async ({ state, responseText, classification }) => ({
+    state: {
+      ...state,
+      rejected: [...state.rejected, { classification, responseText }],
+    },
+    next: {
+      control: 'continue',
+      transientInstruction: DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
+    },
+  }),
+  onToolCallsResponse: async ({ state, response }) => {
+    const nextMessages = [...state.messages, response.assistantMessage];
+
+    for (const toolCall of response.tool_calls ?? []) {
+      const toolResult = await executeTool(toolCall);
+      const content = JSON.stringify(toolResult);
+      const validationArtifact = parseToolValidationFailureArtifact(content);
+
+      nextMessages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content,
+      });
+
+      if (validationArtifact) {
+        return {
+          state: {
+            ...state,
+            messages: nextMessages,
+          },
+          next: {
+            control: 'continue',
+            transientInstruction: DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
+          },
+        };
+      }
+    }
+
+    return {
+      state: {
+        ...state,
+        messages: nextMessages,
+      },
+      next: {
+        control: 'continue',
+      },
+    };
+  },
+  onTextResponse: async ({ state, response, responseText }) => ({
+    state: {
+      ...state,
+      messages: [...state.messages, response.assistantMessage],
+      finalText: responseText,
+      awaitingVerifiedAction: false,
+    },
+  }),
+});
 ```
 
 ## Example
@@ -279,5 +383,8 @@ console.table(servers.map((server) => ({
 - `npm run test:e2e:dry-run` validates the showcase wiring without live provider calls
 - `npm run test:e2e:turn-loop` runs the `runTurnLoop(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
 - `npm run test:e2e:turn-loop:dry-run` validates the turn-loop showcase wiring without live provider calls
+- `npm run test:e2e:hardening` runs deterministic end-to-end hardening coverage for narrated intent recovery and validation-failure correction without a live provider
 
-The real showcase runner expects a repo-local `.env` file when using `npm run test:e2e`.
+Use `npm run test:e2e:hardening` for package-level regression coverage of turn-loop hardening. Use the showcase runners when you want to validate live provider integration and real tool-calling behavior.
+
+The real showcase runners expect a repo-local `.env` file when using `npm run test:e2e` or `npm run test:e2e:turn-loop`.

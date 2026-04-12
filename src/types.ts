@@ -201,6 +201,24 @@ export interface PendingHitlToolResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface ToolValidationIssue {
+  path: string;
+  code: 'missing_required' | 'unknown_parameter' | 'invalid_type';
+  message: string;
+  expectedType?: string;
+  receivedType?: string;
+}
+
+export interface ToolValidationFailureArtifact {
+  ok: false;
+  status: 'error';
+  errorType: 'tool_parameter_validation_failed';
+  toolName: string;
+  message: string;
+  issues: ToolValidationIssue[];
+  corrections: string[];
+}
+
 export interface SkillFileSystemAdapter {
   access(path: string): Promise<void>;
   readFile(path: string, encoding: BufferEncoding): Promise<string>;

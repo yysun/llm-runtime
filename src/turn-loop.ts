@@ -39,7 +39,21 @@ export type TurnLoopTerminalReason =
   | 'text_response'
   | 'tool_calls_response'
   | 'empty_text_stop'
+  | 'rejected_text_response'
   | 'unhandled_response';
+
+export type TurnLoopTextResponseClassification =
+  | 'verified_final_response'
+  | 'intent_only_narration'
+  | 'non_progressing';
+
+export interface TurnLoopTextResponseAssessment {
+  classification: TurnLoopTextResponseClassification;
+  transientInstruction?: string;
+}
+
+export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'Do not describe future tool actions. If a tool is needed, emit the tool call now. If prior tool results already contain the answer, reply with the verified final result instead.';
+export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'Your last response did not make progress. If a tool is needed, emit the tool call now. Otherwise reply with the verified final result based on prior tool results.';
 
 export type TurnLoopStepResult<TState> = {
   state: TState;
@@ -54,6 +68,8 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
   initialState: TState;
   emptyTextRetryLimit: number;
   initialEmptyTextRetryCount?: number;
+  rejectedTextRetryLimit?: number;
+  initialRejectedTextRetryCount?: number;
   abortSignal?: AbortSignal;
   modelRequest?: TurnLoopPackageModelRequest;
   callModel?: (params: {
@@ -67,12 +83,40 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
     transientInstruction?: string;
   }) => Promise<TMessage[]>;
   parsePlainTextToolIntent?: (content: string) => ParsedToolIntent;
+  requiresActionEvidence?: (params: {
+    state: TState;
+    responseText: string;
+    response: LLMResponse;
+    messages: TMessage[];
+    iteration: number;
+  }) => Promise<boolean> | boolean;
+  classifyTextResponse?: (params: {
+    state: TState;
+    responseText: string;
+    response: LLMResponse;
+    messages: TMessage[];
+    iteration: number;
+    requiresActionEvidence: boolean;
+  }) => Promise<TurnLoopTextResponseClassification | TurnLoopTextResponseAssessment | void>
+    | TurnLoopTextResponseClassification
+    | TurnLoopTextResponseAssessment
+    | void;
   onTextResponse: (params: {
     state: TState;
     responseText: string;
     response: LLMResponse;
     messages: TMessage[];
     iteration: number;
+  }) => Promise<TurnLoopStepResult<TState> | void>;
+  onRejectedTextResponse?: (params: {
+    state: TState;
+    responseText: string;
+    response: LLMResponse;
+    messages: TMessage[];
+    iteration: number;
+    retryCount: number;
+    classification: Exclude<TurnLoopTextResponseClassification, 'verified_final_response'>;
+    requiresActionEvidence: boolean;
   }) => Promise<TurnLoopStepResult<TState> | void>;
   onToolCallsResponse: (params: {
     state: TState;
@@ -100,8 +144,39 @@ export interface RunTurnLoopResult<TState> {
   state: TState;
   iterations: number;
   emptyTextRetryCount: number;
+  rejectedTextRetryCount: number;
   reason: TurnLoopTerminalReason;
   response: LLMResponse;
+}
+
+const INTENT_ONLY_NARRATION_PATTERN = /^\s*(?:ok(?:ay)?[,:]?\s+|sure[,:]?\s+|next[,:]?\s+|first[,:]?\s+|then[,:]?\s+)?(?:i\s+will|i['’]ll|let\s+me|i\s+am\s+going\s+to|i'm\s+going\s+to)\s+(?:run|check|search|open|update|inspect|read|look\s+for|review|use|call|execute|try|fetch|edit|write|ask)\b/i;
+
+function looksLikeIntentOnlyNarration(content: string): boolean {
+  return INTENT_ONLY_NARRATION_PATTERN.test(content.trim());
+}
+
+function normalizeTextAssessment(
+  assessment: TurnLoopTextResponseClassification | TurnLoopTextResponseAssessment | void,
+): TurnLoopTextResponseAssessment | undefined {
+  if (!assessment) {
+    return undefined;
+  }
+
+  if (typeof assessment === 'string') {
+    return { classification: assessment };
+  }
+
+  return assessment;
+}
+
+function getDefaultRejectedTextInstruction(
+  classification: Exclude<TurnLoopTextResponseClassification, 'verified_final_response'>,
+): string {
+  if (classification === 'intent_only_narration') {
+    return DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION;
+  }
+
+  return DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION;
 }
 
 function normalizeToolIntentResponse(params: {
@@ -206,6 +281,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
   const callModel = resolveModelCaller(options);
   let state = options.initialState;
   let emptyTextRetryCount = options.initialEmptyTextRetryCount ?? 0;
+  let rejectedTextRetryCount = options.initialRejectedTextRetryCount ?? 0;
   let transientInstruction: string | undefined;
   let iterations = 0;
 
@@ -231,6 +307,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
 
     if (response.type === 'tool_calls') {
       emptyTextRetryCount = 0;
+      rejectedTextRetryCount = 0;
       const next = await options.onToolCallsResponse({
         state,
         response,
@@ -246,30 +323,90 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
         state,
         iterations,
         emptyTextRetryCount,
+        rejectedTextRetryCount,
         reason: 'tool_calls_response',
         response,
       };
     }
 
     if (response.type === 'text' && String(response.content || '').trim()) {
-      emptyTextRetryCount = 0;
-      const next = await options.onTextResponse({
+      const responseText = String(response.content || '');
+      const requiresActionEvidence = await options.requiresActionEvidence?.({
         state,
-        responseText: String(response.content || ''),
+        responseText,
         response,
         messages,
         iteration: iterations,
+      }) ?? false;
+      const explicitAssessment = normalizeTextAssessment(await options.classifyTextResponse?.({
+        state,
+        responseText,
+        response,
+        messages,
+        iteration: iterations,
+        requiresActionEvidence,
+      }));
+      const assessment = explicitAssessment
+        ?? {
+          classification: requiresActionEvidence && looksLikeIntentOnlyNarration(responseText)
+            ? 'intent_only_narration'
+            : 'verified_final_response',
+        } satisfies TurnLoopTextResponseAssessment;
+
+      if (assessment.classification === 'verified_final_response') {
+        emptyTextRetryCount = 0;
+        rejectedTextRetryCount = 0;
+        const next = await options.onTextResponse({
+          state,
+          responseText,
+          response,
+          messages,
+          iteration: iterations,
+        });
+        state = next?.state ?? state;
+        if (next?.next?.control === 'continue') {
+          transientInstruction = next.next.transientInstruction;
+          continue;
+        }
+        return {
+          state,
+          iterations,
+          emptyTextRetryCount,
+          rejectedTextRetryCount,
+          reason: 'text_response',
+          response,
+        };
+      }
+
+      const next = await options.onRejectedTextResponse?.({
+        state,
+        responseText,
+        response,
+        messages,
+        iteration: iterations,
+        retryCount: rejectedTextRetryCount,
+        classification: assessment.classification,
+        requiresActionEvidence,
       });
       state = next?.state ?? state;
-      if (next?.next?.control === 'continue') {
-        transientInstruction = next.next.transientInstruction;
+      const rejectedTextRetryLimit = options.rejectedTextRetryLimit ?? 0;
+
+      if (rejectedTextRetryCount < rejectedTextRetryLimit && next?.next?.control !== 'stop') {
+        rejectedTextRetryCount += 1;
+        transientInstruction = next?.next?.control === 'continue'
+          ? (next.next.transientInstruction
+            ?? assessment.transientInstruction
+            ?? getDefaultRejectedTextInstruction(assessment.classification))
+          : (assessment.transientInstruction ?? getDefaultRejectedTextInstruction(assessment.classification));
         continue;
       }
+
       return {
         state,
         iterations,
         emptyTextRetryCount,
-        reason: 'text_response',
+        rejectedTextRetryCount,
+        reason: 'rejected_text_response',
         response,
       };
     }
@@ -292,6 +429,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
         state,
         iterations,
         emptyTextRetryCount,
+        rejectedTextRetryCount,
         reason: 'empty_text_stop',
         response,
       };
@@ -309,6 +447,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
       state,
       iterations,
       emptyTextRetryCount,
+      rejectedTextRetryCount,
       reason: 'unhandled_response',
       response,
     };

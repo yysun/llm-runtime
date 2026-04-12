@@ -68,6 +68,7 @@ describe('llm-runtime runTurnLoop', () => {
 
     expect(result.reason).toBe('text_response');
     expect(result.iterations).toBe(1);
+    expect(result.rejectedTextRetryCount).toBe(0);
     expect(result.state).toEqual({
       messages: [{ role: 'user', content: 'hello' }],
       finalText: 'echo:hello',
@@ -103,6 +104,43 @@ describe('llm-runtime runTurnLoop', () => {
       messages: [{ role: 'user', content: 'summarize this' }],
     }));
     expect(result.state.seenTexts).toEqual(['done']);
+  });
+
+  it('does not finalize intent-only narration as a successful direct-turn response when action evidence is required', async () => {
+    const onTextResponse = vi.fn();
+    const onRejectedTextResponse = vi.fn(async ({ state, classification, responseText }) => ({
+      state: {
+        ...state,
+        rejected: { classification, responseText },
+      },
+    }));
+
+    const result = await runTurnLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => createTextResponse('I will run the command now.')),
+      buildMessages: async ({ state }) => state.messages,
+      requiresActionEvidence: () => true,
+      onTextResponse,
+      onRejectedTextResponse,
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(onTextResponse).not.toHaveBeenCalled();
+    expect(onRejectedTextResponse).toHaveBeenCalledWith(expect.objectContaining({
+      classification: 'intent_only_narration',
+      responseText: 'I will run the command now.',
+    }));
+    expect(result.state).toMatchObject({
+      rejected: {
+        classification: 'intent_only_narration',
+        responseText: 'I will run the command now.',
+      },
+    });
   });
 
   it('continues after a synthesized plain-text tool intent and stops on the follow-up text', async () => {
@@ -173,6 +211,89 @@ describe('llm-runtime runTurnLoop', () => {
           name: 'read_file',
         },
       }],
+    });
+  });
+
+  it('does not finalize continuation narration as success when further action evidence is still required', async () => {
+    const responses: LLMResponse[] = [
+      {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [{
+          id: 'tool-1',
+          type: 'function',
+          function: {
+            name: 'read_file',
+            arguments: JSON.stringify({ filePath: 'notes.txt' }),
+          },
+        }],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: 'tool-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'notes.txt' }),
+            },
+          }],
+        },
+      },
+      createTextResponse('I will inspect the file next.'),
+    ];
+    const onTextResponse = vi.fn();
+
+    const result = await runTurnLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'read the file and inspect it' } satisfies LLMChatMessage],
+        needsMoreAction: true,
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? createTextResponse('unexpected')),
+      buildMessages: async ({ state, transientInstruction }) => {
+        if (!transientInstruction) {
+          return state.messages;
+        }
+        return [...state.messages, { role: 'system', content: transientInstruction }];
+      },
+      requiresActionEvidence: ({ state }) => state.needsMoreAction,
+      onTextResponse,
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: {
+          ...state,
+          rejected: { classification, responseText },
+        },
+      }),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: '{"ok":true,"summary":"read complete"}',
+            },
+          ],
+        },
+        next: {
+          control: 'continue',
+          transientInstruction: 'Continue only when you have a verified result or a real tool call.',
+        },
+      }),
+    });
+
+    expect(result.iterations).toBe(2);
+    expect(result.reason).toBe('rejected_text_response');
+    expect(onTextResponse).not.toHaveBeenCalled();
+    expect(result.state).toMatchObject({
+      rejected: {
+        classification: 'intent_only_narration',
+        responseText: 'I will inspect the file next.',
+      },
     });
   });
 });

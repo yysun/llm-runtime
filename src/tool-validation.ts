@@ -18,7 +18,21 @@
  * - 2026-03-27: Added package-owned validation for built-in tool execution.
  */
 
-import type { LLMToolDefinition } from './types.js';
+import type {
+  LLMToolDefinition,
+  ToolValidationFailureArtifact,
+  ToolValidationIssue,
+} from './types.js';
+
+export interface ToolParameterValidationResult {
+  valid: boolean;
+  correctedArgs?: Record<string, unknown>;
+  error?: string;
+  issues?: ToolValidationIssue[];
+  corrections?: string[];
+}
+
+export const DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION = 'Your previous tool call failed validation. Emit a corrected tool call now with the required parameters. Do not narrate what you intend to do next.';
 
 function normalizeKnownParameterAliases(toolName: string, args: Record<string, unknown>): {
   normalizedArgs: Record<string, unknown>;
@@ -123,23 +137,29 @@ export function validateToolParameters(
   args: unknown,
   toolSchema: Record<string, unknown> | undefined,
   toolName: string,
-): {
-  valid: boolean;
-  correctedArgs?: Record<string, unknown>;
-  error?: string;
-} {
+): ToolParameterValidationResult {
   const schemaProperties = toolSchema?.properties;
   if (!schemaProperties || typeof schemaProperties !== 'object') {
     return {
       valid: true,
       correctedArgs: (args && typeof args === 'object') ? { ...(args as Record<string, unknown>) } : {},
+      corrections: [],
     };
   }
 
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    const receivedType = Array.isArray(args) ? 'array' : typeof args;
     return {
       valid: false,
-      error: `Tool arguments must be an object, got: ${Array.isArray(args) ? 'array' : typeof args}`,
+      error: `Tool arguments must be an object, got: ${receivedType}`,
+      issues: [{
+        path: '$',
+        code: 'invalid_type',
+        message: `Tool arguments must be an object, got: ${receivedType}`,
+        expectedType: 'object',
+        receivedType,
+      }],
+      corrections: [],
     };
   }
 
@@ -151,12 +171,16 @@ export function validateToolParameters(
   const correctedArgs: Record<string, unknown> = {};
   const requiredParams = Array.isArray(toolSchema.required) ? toolSchema.required : [];
   const allowsAdditionalProperties = toolSchema.additionalProperties !== false;
-  const errors: string[] = [];
+  const issues: ToolValidationIssue[] = [];
 
   for (const requiredParam of requiredParams) {
     const value = normalizedArgs[requiredParam as string];
     if (value === undefined || value === null || value === '') {
-      errors.push(`Required parameter '${String(requiredParam)}' is missing or empty`);
+      issues.push({
+        path: String(requiredParam),
+        code: 'missing_required',
+        message: `Required parameter '${String(requiredParam)}' is missing or empty`,
+      });
     }
   }
 
@@ -164,7 +188,11 @@ export function validateToolParameters(
     const propSchema = (schemaProperties as Record<string, any>)[key];
     if (!propSchema) {
       if (!allowsAdditionalProperties) {
-        errors.push(`Unknown parameter '${key}' is not allowed`);
+        issues.push({
+          path: key,
+          code: 'unknown_parameter',
+          message: `Unknown parameter '${key}' is not allowed`,
+        });
         continue;
       }
       correctedArgs[key] = value;
@@ -181,7 +209,13 @@ export function validateToolParameters(
     }
 
     if (propSchema.type === 'array' && !Array.isArray(value)) {
-      errors.push(`Parameter '${key}' must be an array, got: ${typeof value}`);
+      issues.push({
+        path: key,
+        code: 'invalid_type',
+        message: `Parameter '${key}' must be an array, got: ${typeof value}`,
+        expectedType: 'array',
+        receivedType: typeof value,
+      });
       continue;
     }
 
@@ -194,29 +228,97 @@ export function validateToolParameters(
     }
 
     if (propSchema.type === 'string' && typeof value !== 'string') {
-      errors.push(`Parameter '${key}' must be a string, got: ${typeof value}`);
+      issues.push({
+        path: key,
+        code: 'invalid_type',
+        message: `Parameter '${key}' must be a string, got: ${typeof value}`,
+        expectedType: 'string',
+        receivedType: typeof value,
+      });
       continue;
     }
 
     if (propSchema.type === 'boolean' && typeof value !== 'boolean') {
-      errors.push(`Parameter '${key}' must be a boolean, got: ${typeof value}`);
+      issues.push({
+        path: key,
+        code: 'invalid_type',
+        message: `Parameter '${key}' must be a boolean, got: ${typeof value}`,
+        expectedType: 'boolean',
+        receivedType: typeof value,
+      });
       continue;
     }
 
     correctedArgs[key] = value;
   }
 
-  if (errors.length > 0) {
+  if (issues.length > 0) {
     return {
       valid: false,
-      error: errors.join('; '),
+      error: issues.map((issue) => issue.message).join('; '),
+      issues,
+      corrections: aliasNormalization.corrections,
     };
   }
 
   return {
     valid: true,
     correctedArgs,
+    corrections: aliasNormalization.corrections,
   };
+}
+
+export function createToolValidationFailureArtifact(params: {
+  toolName: string;
+  validation: ToolParameterValidationResult;
+}): ToolValidationFailureArtifact {
+  const message = `Tool parameter validation failed for ${params.toolName}: ${params.validation.error ?? 'Unknown validation error'}`;
+
+  return {
+    ok: false,
+    status: 'error',
+    errorType: 'tool_parameter_validation_failed',
+    toolName: params.toolName,
+    message,
+    issues: params.validation.issues ?? [],
+    corrections: params.validation.corrections ?? [],
+  };
+}
+
+export function isToolValidationFailureArtifact(value: unknown): value is ToolValidationFailureArtifact {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && (value as { ok?: unknown }).ok === false
+    && (value as { status?: unknown }).status === 'error'
+    && (value as { errorType?: unknown }).errorType === 'tool_parameter_validation_failed'
+    && typeof (value as { toolName?: unknown }).toolName === 'string'
+    && Array.isArray((value as { issues?: unknown }).issues),
+  );
+}
+
+export function parseToolValidationFailureArtifact(content: unknown): ToolValidationFailureArtifact | null {
+  if (isToolValidationFailureArtifact(content)) {
+    return content;
+  }
+
+  if (typeof content !== 'string' || !content.trim()) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    return isToolValidationFailureArtifact(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatToolValidationFailureArtifact(params: {
+  toolName: string;
+  validation: ToolParameterValidationResult;
+}): string {
+  return JSON.stringify(createToolValidationFailureArtifact(params), null, 2);
 }
 
 export function wrapToolWithValidation(tool: LLMToolDefinition): LLMToolDefinition {
@@ -229,7 +331,10 @@ export function wrapToolWithValidation(tool: LLMToolDefinition): LLMToolDefiniti
     execute: async (args, context) => {
       const validation = validateToolParameters(args, tool.parameters, tool.name);
       if (!validation.valid) {
-        return `Error: Tool parameter validation failed for ${tool.name}: ${validation.error}`;
+        return formatToolValidationFailureArtifact({
+          toolName: tool.name,
+          validation,
+        });
       }
 
       return tool.execute?.(validation.correctedArgs ?? {}, context);
