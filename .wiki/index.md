@@ -22,6 +22,9 @@ Execution surfaces:
 - [[src-tool-validation]] covers deterministic argument normalization and durable validation artifacts.
 - [[provider-adapters]] compares the OpenAI-compatible, Anthropic, and Google adapters.
 
+Operational safeguards:
+- [[shell-command-safeguards]] documents the actual runtime protections and current limits of the builtin `shell_cmd` executor.
+
 Quality and recent changes:
 - [[testing-and-showcases]] summarizes unit coverage, real-provider showcases, and deterministic hardening e2e coverage.
 - [[action-execution-hardening]] captures the April 2026 fix that prevents narration-only false success in tool-capable turns.
