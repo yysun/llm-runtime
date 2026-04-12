@@ -26,6 +26,7 @@ import process from 'node:process';
 import { config as loadDotEnv } from 'dotenv';
 import {
   createLLMEnvironment,
+  disposeLLMEnvironment,
   generate,
   stream,
   type LLMChatMessage,
@@ -223,7 +224,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
 
     console.log('\nshowcase status: PASS');
   } finally {
-    await environment.mcpRegistry.shutdown().catch(() => undefined);
+    await disposeLLMEnvironment(environment).catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }

@@ -110,8 +110,8 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 
 describe('llm-runtime mocked showcase', () => {
   afterEach(async () => {
-    const { __resetLLMCallCachesForTests } = await import('../../src/runtime.js');
-    await __resetLLMCallCachesForTests();
+    const { disposeLLMRuntimeCaches } = await import('../../src/runtime.js');
+    await disposeLLMRuntimeCaches();
   });
 
   it('showcases built-in tools and skill loading through an explicit environment', async () => {

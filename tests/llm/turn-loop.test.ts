@@ -1,23 +1,4 @@
-/**
- * LLM Package Turn Loop Tests
- *
- * Purpose:
- * - Validate the host-agnostic `runTurnLoop(...)` API in `packages/llm`.
- *
- * Key features:
- * - Covers plain text terminal responses with caller-owned state.
- * - Covers package-managed model invocation through the existing per-call API.
- * - Covers iterative tool-call continuation without world/agent/chat assumptions.
- *
- * Notes on implementation:
- * - Mocks package runtime model calls to keep tests deterministic and network-free.
- * - Uses only package-owned message and response contracts.
- *
- * Summary of recent changes:
- * - 2026-03-29: Added targeted coverage for the new generic package turn loop.
- */
-
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockGenerate, mockStream } = vi.hoisted(() => ({
   mockGenerate: vi.fn(),
@@ -32,13 +13,31 @@ vi.mock('../../src/runtime.js', () => ({
 import { runTurnLoop } from '../../src/turn-loop.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
-function createTextResponse(content: string): LLMResponse {
+function text(content: string): LLMResponse {
   return {
     type: 'text',
     content,
+    assistantMessage: { role: 'assistant', content },
+  };
+}
+
+function toolCall(name: string, args: Record<string, unknown>, id = 'tool-1'): LLMResponse {
+  return {
+    type: 'tool_calls',
+    content: '',
+    tool_calls: [{
+      id,
+      type: 'function',
+      function: { name, arguments: JSON.stringify(args) },
+    }],
     assistantMessage: {
       role: 'assistant',
-      content,
+      content: '',
+      tool_calls: [{
+        id,
+        type: 'function',
+        function: { name, arguments: JSON.stringify(args) },
+      }],
     },
   };
 }
@@ -48,35 +47,36 @@ describe('llm-runtime runTurnLoop', () => {
     vi.clearAllMocks();
   });
 
-  it('stops on a plain text response with caller-owned state only', async () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('stops on verified text and records a step summary', async () => {
     const result = await runTurnLoop({
       initialState: {
         messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage],
         finalText: '',
       },
       emptyTextRetryLimit: 1,
-      callModel: vi.fn(async ({ messages }) => createTextResponse(`echo:${messages.at(-1)?.content}`)),
+      callModel: vi.fn(async ({ messages }) => text(`echo:${messages.at(-1)?.content}`)),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state, responseText }) => ({
-        state: {
-          ...state,
-          finalText: responseText,
-        },
+        state: { ...state, finalText: responseText },
       }),
       onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
     expect(result.reason).toBe('text_response');
+    expect(result.stop.reason).toBe('text_response');
     expect(result.iterations).toBe(1);
-    expect(result.rejectedTextRetryCount).toBe(0);
-    expect(result.state).toEqual({
-      messages: [{ role: 'user', content: 'hello' }],
-      finalText: 'echo:hello',
-    });
+    expect(result.steps).toEqual([
+      expect.objectContaining({ iteration: 1, branch: 'text_response_stop' }),
+    ]);
+    expect(result.state.finalText).toBe('echo:hello');
   });
 
-  it('can use the package-managed generate path when modelRequest is provided', async () => {
-    mockGenerate.mockResolvedValueOnce(createTextResponse('done'));
+  it('uses the package-managed generate path', async () => {
+    mockGenerate.mockResolvedValueOnce(text('done'));
 
     const result = await runTurnLoop({
       initialState: {
@@ -84,70 +84,52 @@ describe('llm-runtime runTurnLoop', () => {
         seenTexts: [] as string[],
       },
       emptyTextRetryLimit: 0,
-      modelRequest: {
-        provider: 'openai',
-        model: 'gpt-5',
-      },
+      modelRequest: { provider: 'openai', model: 'gpt-5' },
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state, responseText }) => ({
-        state: {
-          ...state,
-          seenTexts: [...state.seenTexts, responseText],
-        },
+        state: { ...state, seenTexts: [...state.seenTexts, responseText] },
       }),
       onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
-    expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'openai',
-      model: 'gpt-5',
-      messages: [{ role: 'user', content: 'summarize this' }],
-    }));
+    expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'openai', model: 'gpt-5' }));
     expect(result.state.seenTexts).toEqual(['done']);
   });
 
-  it('does not finalize intent-only narration as a successful direct-turn response when action evidence is required', async () => {
-    const onTextResponse = vi.fn();
-    const onRejectedTextResponse = vi.fn(async ({ state, classification, responseText }) => ({
-      state: {
-        ...state,
-        rejected: { classification, responseText },
-      },
-    }));
-
+  it('stops rejected narration with classification and retry history', async () => {
     const result = await runTurnLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 0,
-      callModel: vi.fn(async () => createTextResponse('I will run the command now.')),
+      callModel: vi.fn(async () => text('I will run the command now.')),
       buildMessages: async ({ state }) => state.messages,
       requiresActionEvidence: () => true,
-      onTextResponse,
-      onRejectedTextResponse,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
       onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
     expect(result.reason).toBe('rejected_text_response');
-    expect(onTextResponse).not.toHaveBeenCalled();
-    expect(onRejectedTextResponse).toHaveBeenCalledWith(expect.objectContaining({
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'intent_only_narration' }),
+    ]);
+    expect(result.retries).toEqual([
+      expect.objectContaining({ kind: 'rejected_text', decision: 'stop' }),
+    ]);
+    expect(result.state.rejected).toEqual({
       classification: 'intent_only_narration',
       responseText: 'I will run the command now.',
-    }));
-    expect(result.state).toMatchObject({
-      rejected: {
-        classification: 'intent_only_narration',
-        responseText: 'I will run the command now.',
-      },
     });
   });
 
-  it('continues after a synthesized plain-text tool intent and stops on the follow-up text', async () => {
-    const responses: LLMResponse[] = [
-      createTextResponse('Calling tool: read_file'),
-      createTextResponse('File read successfully.'),
-    ];
+  it('marks normalized text tool intents as synthetic and emits lifecycle hooks in order', async () => {
+    const responses = [text('Calling tool: read_file'), text('File read successfully.')];
+    const events: string[] = [];
 
     const result = await runTurnLoop({
       initialState: {
@@ -156,144 +138,149 @@ describe('llm-runtime runTurnLoop', () => {
         finalText: '',
       },
       emptyTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? createTextResponse('unexpected')),
-      buildMessages: async ({ state, transientInstruction }) => {
-        if (!transientInstruction) {
-          return state.messages;
-        }
-        return [...state.messages, { role: 'system', content: transientInstruction }];
+      markSyntheticToolCalls: true,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      onIterationStart: ({ iteration }) => { events.push(`start:${iteration}`); },
+      onModelResponse: ({ iteration, response, normalizedToolIntent }) => {
+        events.push(`model:${iteration}:${response.type}:${normalizedToolIntent ? 'synthetic' : 'model'}`);
       },
-      parsePlainTextToolIntent: (content) => {
-        if (content.trim() !== 'Calling tool: read_file') {
-          return null;
-        }
+      onClassification: ({ iteration, assessment }) => {
+        events.push(`classification:${iteration}:${assessment.classification}`);
+      },
+      onStop: ({ result: finalResult }) => { events.push(`stop:${finalResult.reason}`); },
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
+      ),
+      parsePlainTextToolIntent: (content) => content.trim() === 'Calling tool: read_file'
+        ? { toolName: 'read_file', toolArgs: { filePath: 'notes.txt' } }
+        : null,
+      onToolCallsResponse: async ({ state, response, iteration }) => {
+        events.push(`tool:${iteration}`);
         return {
-          toolName: 'read_file',
-          toolArgs: { filePath: 'notes.txt' },
+          state: {
+            ...state,
+            toolRuns: state.toolRuns + 1,
+            messages: [
+              ...state.messages,
+              response.assistantMessage,
+              { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' },
+            ],
+          },
+          next: { control: 'continue', transientInstruction: 'Use the tool result and answer normally.' },
         };
       },
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          toolRuns: state.toolRuns + 1,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            {
-              role: 'tool',
-              tool_call_id: response.tool_calls?.[0]?.id,
-              content: 'contents',
-            },
-          ],
-        },
-        next: {
-          control: 'continue',
-          transientInstruction: 'Use the tool result and answer normally.',
-        },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: {
-          ...state,
-          finalText: responseText,
-        },
-      }),
+      onTextResponse: async ({ state, responseText, iteration }) => {
+        events.push(`text:${iteration}`);
+        return { state: { ...state, finalText: responseText } };
+      },
     });
 
-    expect(result.iterations).toBe(2);
     expect(result.reason).toBe('text_response');
-    expect(result.state.toolRuns).toBe(1);
-    expect(result.state.finalText).toBe('File read successfully.');
-    expect(result.state.messages).toHaveLength(3);
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({ toolName: 'read_file', source: 'normalized_text_intent', synthetic: true }),
+    ]);
     expect(result.state.messages[1]).toMatchObject({
-      role: 'assistant',
-      tool_calls: [{
-        function: {
-          name: 'read_file',
-        },
-      }],
+      tool_calls: [{ synthetic: true, function: { name: 'read_file' } }],
     });
+    expect(events).toEqual([
+      'start:1',
+      'model:1:tool_calls:synthetic',
+      'tool:1',
+      'start:2',
+      'model:2:text:model',
+      'classification:2:verified_final_response',
+      'text:2',
+      'stop:text_response',
+    ]);
   });
 
-  it('does not finalize continuation narration as success when further action evidence is still required', async () => {
-    const responses: LLMResponse[] = [
-      {
-        type: 'tool_calls',
-        content: '',
-        tool_calls: [{
-          id: 'tool-1',
-          type: 'function',
-          function: {
-            name: 'read_file',
-            arguments: JSON.stringify({ filePath: 'notes.txt' }),
-          },
-        }],
-        assistantMessage: {
-          role: 'assistant',
-          content: '',
-          tool_calls: [{
-            id: 'tool-1',
-            type: 'function',
-            function: {
-              name: 'read_file',
-              arguments: JSON.stringify({ filePath: 'notes.txt' }),
-            },
-          }],
-        },
-      },
-      createTextResponse('I will inspect the file next.'),
-    ];
-    const onTextResponse = vi.fn();
+  it('stops on max_iterations_exceeded', async () => {
+    const callModel = vi.fn(async () => text(''));
 
     const result = await runTurnLoop({
-      initialState: {
-        messages: [{ role: 'user', content: 'read the file and inspect it' } satisfies LLMChatMessage],
-        needsMoreAction: true,
-      },
-      emptyTextRetryLimit: 0,
-      rejectedTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? createTextResponse('unexpected')),
-      buildMessages: async ({ state, transientInstruction }) => {
-        if (!transientInstruction) {
-          return state.messages;
-        }
-        return [...state.messages, { role: 'system', content: transientInstruction }];
-      },
-      requiresActionEvidence: ({ state }) => state.needsMoreAction,
-      onTextResponse,
-      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
-        state: {
-          ...state,
-          rejected: { classification, responseText },
-        },
-      }),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            {
-              role: 'tool',
-              tool_call_id: response.tool_calls?.[0]?.id,
-              content: '{"ok":true,"summary":"read complete"}',
-            },
-          ],
-        },
-        next: {
-          control: 'continue',
-          transientInstruction: 'Continue only when you have a verified result or a real tool call.',
-        },
-      }),
+      initialState: { messages: [{ role: 'user', content: 'keep trying' } satisfies LLMChatMessage] },
+      emptyTextRetryLimit: 5,
+      maxIterations: 2,
+      callModel,
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
+    expect(result.reason).toBe('max_iterations_exceeded');
     expect(result.iterations).toBe(2);
-    expect(result.reason).toBe('rejected_text_response');
-    expect(onTextResponse).not.toHaveBeenCalled();
-    expect(result.state).toMatchObject({
-      rejected: {
-        classification: 'intent_only_narration',
-        responseText: 'I will inspect the file next.',
-      },
+    expect(callModel).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops on max_tool_rounds_exceeded before re-entering host execution', async () => {
+    const onToolCallsResponse = vi.fn(async ({ state, response }) => ({
+      state: { ...state, messages: [...state.messages, response.assistantMessage] },
+      next: { control: 'continue' as const },
+    }));
+
+    const result = await runTurnLoop({
+      initialState: { messages: [{ role: 'user', content: 'use tools until done' } satisfies LLMChatMessage] },
+      emptyTextRetryLimit: 0,
+      maxConsecutiveToolTurns: 1,
+      callModel: vi.fn(async () => toolCall('read_file', { filePath: 'notes.txt' })),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse,
     });
+
+    expect(result.reason).toBe('max_tool_rounds_exceeded');
+    expect(result.steps.map((step) => step.branch)).toEqual(['tool_calls_continue', 'max_tool_rounds_stop']);
+    expect(onToolCallsResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops repeated identical tool-call batches before host execution repeats', async () => {
+    const repeated = toolCall('read_file', { filePath: 'notes.txt' });
+    const onToolCallsResponse = vi.fn(async ({ state, response }) => ({
+      state: { ...state, messages: [...state.messages, response.assistantMessage] },
+      next: { control: 'continue' as const },
+    }));
+
+    const result = await runTurnLoop({
+      initialState: { messages: [{ role: 'user', content: 'loop the same tool call' } satisfies LLMChatMessage] },
+      emptyTextRetryLimit: 0,
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      callModel: vi.fn(async () => repeated),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse,
+    });
+
+    expect(result.reason).toBe('repeated_tool_call_stopped');
+    expect(result.stop.repeatedToolCall).toEqual(expect.objectContaining({
+      consecutiveSameBatchCount: 2,
+      maxConsecutiveSameBatches: 1,
+    }));
+    expect(onToolCallsResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops on timeout and aborts the provided model signal', async () => {
+    vi.useFakeTimers();
+
+    let seenAbortSignal: AbortSignal | undefined;
+    const resultPromise = runTurnLoop({
+      initialState: { messages: [{ role: 'user', content: 'wait forever' } satisfies LLMChatMessage] },
+      emptyTextRetryLimit: 0,
+      maxWallTimeMs: 25,
+      callModel: vi.fn(async ({ abortSignal }) => {
+        seenAbortSignal = abortSignal;
+        return await new Promise<LLMResponse>(() => undefined);
+      }),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await resultPromise;
+
+    expect(result.reason).toBe('timeout');
+    expect(result.response).toBeNull();
+    expect(result.stop).toEqual(expect.objectContaining({ reason: 'timeout', timedOutDuringIteration: 1 }));
+    expect(seenAbortSignal?.aborted).toBe(true);
   });
 });

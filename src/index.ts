@@ -31,6 +31,8 @@ export * from './tool-validation.js';
 export * from './turn-loop.js';
 export {
   createLLMEnvironment,
+  disposeLLMEnvironment,
+  disposeLLMRuntimeCaches,
   generate,
   stream,
 } from './runtime.js';

@@ -77,6 +77,7 @@ export type LLMProviderConfigs = Partial<{ [K in LLMProviderName]: ProviderConfi
 export interface LLMToolCall {
   id: string;
   type: 'function';
+  synthetic?: boolean;
   function: {
     name: string;
     arguments: string;

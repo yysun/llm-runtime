@@ -23,6 +23,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createLLMEnvironment,
+  disposeLLMEnvironment,
   parseMCPConfigJson,
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
@@ -346,5 +347,24 @@ describe('llm-runtime runtime', () => {
     expect(environment.providerConfigStore.getProviderConfig('openai')).toEqual({
       apiKey: 'env-openai-key',
     });
+  });
+
+  it('does not dispose caller-owned registries through the public environment cleanup API', async () => {
+    let shutdownCalls = 0;
+    const environment = createLLMEnvironment({
+      mcpRegistry: {
+        getConfig: () => null,
+        setConfig: () => undefined,
+        listServers: () => [],
+        resolveTools: async () => ({}),
+        shutdown: async () => {
+          shutdownCalls += 1;
+        },
+      },
+    });
+
+    await expect(disposeLLMEnvironment(environment)).resolves.toBeUndefined();
+    await expect(disposeLLMEnvironment(environment)).resolves.toBeUndefined();
+    expect(shutdownCalls).toBe(0);
   });
 });

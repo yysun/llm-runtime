@@ -19,8 +19,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  __resetLLMCallCachesForTests,
   createLLMEnvironment,
+  disposeLLMEnvironment,
+  disposeLLMRuntimeCaches,
   resolveToolsAsync,
 } from '../../src/runtime.js';
 
@@ -100,7 +101,7 @@ describe('llm-runtime MCP runtime', () => {
   });
 
   afterEach(async () => {
-    await __resetLLMCallCachesForTests();
+    await disposeLLMRuntimeCaches();
   });
 
   it('resolves executable MCP tools through an explicit environment', async () => {
@@ -148,7 +149,7 @@ describe('llm-runtime MCP runtime', () => {
       },
     });
 
-    await environment.mcpRegistry.shutdown();
+    await disposeLLMEnvironment(environment);
     expect(mockClientClose).toHaveBeenCalledTimes(1);
   });
 
@@ -188,5 +189,43 @@ describe('llm-runtime MCP runtime', () => {
     expect(Object.keys(secondTools)).toEqual(['demo_lookup']);
     expect(mockClientConnect).toHaveBeenCalledTimes(1);
     expect(mockClientListTools).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes cached MCP resources through the public runtime cleanup API', async () => {
+    listToolsPayload.push({
+      name: 'lookup',
+      description: 'Lookup tool',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+        },
+        required: ['query'],
+      },
+    });
+
+    const mcpConfig = {
+      servers: {
+        demo: {
+          command: 'node',
+          args: ['demo.js'],
+          transport: 'stdio' as const,
+        },
+      },
+    };
+
+    await resolveToolsAsync({
+      mcpConfig,
+      builtIns: false,
+    });
+    await disposeLLMRuntimeCaches();
+    await resolveToolsAsync({
+      mcpConfig,
+      builtIns: false,
+    });
+
+    expect(mockClientClose).toHaveBeenCalledTimes(1);
+    expect(mockClientConnect).toHaveBeenCalledTimes(2);
+    expect(mockClientListTools).toHaveBeenCalledTimes(2);
   });
 });

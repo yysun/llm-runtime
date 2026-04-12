@@ -21,6 +21,7 @@ import {
   createLLMEnvironment,
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
+  disposeLLMEnvironment,
   parseToolValidationFailureArtifact,
   runTurnLoop,
   type LLMChatMessage,
@@ -115,7 +116,7 @@ async function runScenario(
 ): Promise<HardeningScenarioResult> {
   let modelIteration = 0;
 
-  const result = await runTurnLoop({
+  const result = await runTurnLoop<HardeningState>({
     initialState: {
       messages: [...scenario.messages],
       finalText: '',
@@ -227,12 +228,12 @@ async function runScenario(
 }
 
 function buildHardeningScenarios(): HardeningScenario[] {
-  return [
+  const scenarios: HardeningScenario[] = [
     {
       name: 'Direct-turn narration is retried until a real tool call occurs',
       messages: [
         {
-          role: 'user',
+          role: 'user' as const,
           content: 'Read docs/repo-guide.txt and return REPO_TOKEN=<token>.',
         },
       ],
@@ -263,7 +264,7 @@ function buildHardeningScenarios(): HardeningScenario[] {
       name: 'Validation failure produces a durable artifact and self-corrects',
       messages: [
         {
-          role: 'user',
+          role: 'user' as const,
           content: 'Write notes/hardening-report.txt and return WRITE_STATUS=ok.',
         },
       ],
@@ -300,7 +301,7 @@ function buildHardeningScenarios(): HardeningScenario[] {
       name: 'Continuation narration is retried before accepting a verified answer',
       messages: [
         {
-          role: 'user',
+          role: 'user' as const,
           content: 'Read docs/repo-guide.txt and return INSPECTED_TOKEN=<token>.',
         },
       ],
@@ -327,7 +328,9 @@ function buildHardeningScenarios(): HardeningScenario[] {
         assert.equal(result.finalText, 'INSPECTED_TOKEN=alpha-repo-token');
       },
     },
-  ].map((scenario) => ({
+  ];
+
+  return scenarios.map((scenario) => ({
     ...scenario,
     messages: scenario.messages.map((message) => ({ ...message })),
   }));
@@ -358,7 +361,7 @@ async function main() {
 
     console.log('\nhardening e2e status: PASS');
   } finally {
-    await environment.mcpRegistry.shutdown().catch(() => undefined);
+    await disposeLLMEnvironment(environment).catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }

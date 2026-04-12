@@ -18,19 +18,35 @@ The published package targets Node.js 18 and later and exposes a single root ent
 
 - Provider dispatch for `generate(...)` and `stream(...)`
 - Generic host-agnostic turn-loop orchestration through `runTurnLoop(...)`
+- Intrinsic turn-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
 - Skill discovery from configured skill roots
 - Stable environment-level registries for MCP servers and skills
+- Cleanup boundaries for explicit environments and convenience-path caches
 
 ## Public API
 
 - `createLLMEnvironment(...)`
+- `disposeLLMEnvironment(...)`
+- `disposeLLMRuntimeCaches()`
 - `generate(...)`
 - `stream(...)`
 - `runTurnLoop(...)`
 
 The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or inject an explicit `environment` when your harness wants stable provider, MCP, and skill dependencies.
+
+## Cleanup
+
+Use the public cleanup APIs when the runtime owns MCP clients or cached tool-discovery state:
+
+- `disposeLLMEnvironment(environment)` shuts down the environment MCP registry only when that registry was created by the runtime.
+- `disposeLLMRuntimeCaches()` shuts down cached convenience-path MCP registries and clears cached provider, MCP, and skill discovery state.
+
+Ownership is split deliberately:
+
+- The runtime owns cleanup for environments created for runtime use and for the convenience-path caches it creates internally.
+- The harness still owns temporary workspaces, transcript persistence, any caller-injected registries, and any other non-runtime resources attached to its application.
 
 ## Mental Model
 
@@ -65,6 +81,8 @@ If a value should change from one request or UI action to the next, it usually s
 
 ### Built-In Tools
 
+The minimal runtime core does not require any built-in operational tools. The built-ins below are optional package-owned convenience capabilities exposed from the same package surface.
+
 The package currently reserves these built-in names:
 
 - `shell_cmd`
@@ -76,7 +94,7 @@ The package currently reserves these built-in names:
 - `list_files`
 - `grep`
 
-Built-ins are package-owned. Application code can disable or narrow them, but should not redefine them.
+Built-ins are package-owned and reserved. Application code can disable or narrow them, but should not redefine them.
 
 ### Extra Tools
 
@@ -112,11 +130,56 @@ Use it when your harness needs more control than a single `generate(...)` or `st
 - repeated model invocation
 - empty-text retry handling
 - optional plain-text tool-intent normalization
+- hard iteration, tool-round, repeated-call, and wall-clock safety bounds
+- structured trace summaries and lifecycle hooks
 
 The split of responsibilities is deliberate:
 
-- The package owns loop repetition and response classification.
-- The harness owns state shape, message construction, tool execution, persistence, and replay.
+- The package owns loop repetition, hard-stop safety checks, response normalization, trace collection, and lifecycle hook ordering.
+- The harness owns state shape, message construction, tool execution, persistence, replay, and business-specific completion policy.
+
+### Safety And Stop Reasons
+
+`runTurnLoop(...)` now applies intrinsic package defaults for:
+
+- `maxIterations`
+- `maxConsecutiveToolTurns`
+- `maxWallTimeMs`
+- repeated identical tool-call suppression through `repeatedToolCallGuard`
+
+Terminal reasons are stable string literals suitable for harness branching:
+
+- `text_response`
+- `tool_calls_response`
+- `empty_text_stop`
+- `rejected_text_response`
+- `unhandled_response`
+- `max_iterations_exceeded`
+- `max_tool_rounds_exceeded`
+- `timeout`
+- `repeated_tool_call_stopped`
+
+The final result keeps `state`, `response`, and `reason`, and also includes:
+
+- `steps`
+- `toolCalls`
+- `classifications`
+- `retries`
+- `stop`
+- `elapsedMs`
+
+If the loop times out before any model response is available, `result.response` is `null` and `result.stop` carries the timeout detail.
+
+### Lifecycle Hooks
+
+Use these additive hooks for tracing and metrics:
+
+- `onIterationStart(...)`
+- `onModelResponse(...)`
+- `onClassification(...)`
+- `onStop(...)`
+
+They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the other branch callbacks that still own state updates.
 
 ### Turn-Loop Hardening
 
@@ -138,6 +201,18 @@ The package also exports reusable recovery helpers:
 These are default exported strings, not mutable runtime settings. A harness should treat them as convenient starting points and override the effective recovery text by returning its own `transientInstruction` from `onRejectedTextResponse(...)`, by returning a custom assessment from `classifyTextResponse(...)`, or by supplying its own validation-recovery instruction after parsing a validation artifact.
 
 Tool validation failures now return durable JSON artifacts instead of opaque error strings. Use `parseToolValidationFailureArtifact(...)` when the harness wants to detect a validation failure from a tool result and prompt the model to emit a corrected tool call.
+
+### Synthetic Tool Calls
+
+When `parsePlainTextToolIntent(...)` converts a text response into a tool-call response, you can opt in to synthetic marking with `markSyntheticToolCalls: true`.
+
+When enabled:
+
+- generated `tool_calls` entries include `synthetic: true`
+- mirrored assistant-message tool calls include the same marker
+- `result.toolCalls` summaries expose the normalized call source and synthetic status
+
+When disabled, plain-text normalization still works, but the public tool-call surface is unchanged.
 
 The boundary remains the same: the package can classify and reject narration, but the harness still owns the policy for when a reply is truly verified and how bounded recovery should be persisted.
 

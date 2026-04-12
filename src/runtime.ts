@@ -71,6 +71,15 @@ type RuntimeDefaults = Readonly<{
 const providerConfigStoreCache = new Map<string, LLMProviderConfigStore>();
 const mcpRegistryCache = new Map<string, MCPRegistry>();
 const skillRegistryCache = new Map<string, SkillRegistry>();
+const runtimeOwnedEnvironmentMCPRegistries = new WeakSet<LLMEnvironment>();
+const disposedEnvironments = new WeakSet<LLMEnvironment>();
+
+async function shutdownRegistries(registries: Iterable<MCPRegistry>): Promise<void> {
+  const uniqueRegistries = [...new Set(registries)];
+  await Promise.all(uniqueRegistries.map(async (registry) => {
+    await registry.shutdown().catch(() => undefined);
+  }));
+}
 
 function stableStringify(value: unknown): string {
   if (value === null || value === undefined) {
@@ -174,12 +183,34 @@ export function createLLMEnvironment(options: LLMEnvironmentOptions = {}): LLMEn
     ...(options.skillFileSystem ? { fileSystem: options.skillFileSystem } : {}),
   });
 
-  return {
+  const environment: LLMEnvironment = {
     defaults: createDefaults(options.defaults),
     providerConfigStore,
     mcpRegistry,
     skillRegistry,
   };
+
+  if (!options.mcpRegistry) {
+    runtimeOwnedEnvironmentMCPRegistries.add(environment);
+  }
+
+  return environment;
+}
+
+export async function disposeLLMEnvironment(environment: LLMEnvironment): Promise<void> {
+  if (!runtimeOwnedEnvironmentMCPRegistries.has(environment) || disposedEnvironments.has(environment)) {
+    return;
+  }
+
+  disposedEnvironments.add(environment);
+  await shutdownRegistries([environment.mcpRegistry]);
+}
+
+export async function disposeLLMRuntimeCaches(): Promise<void> {
+  await shutdownRegistries(mcpRegistryCache.values());
+  mcpRegistryCache.clear();
+  skillRegistryCache.clear();
+  providerConfigStoreCache.clear();
 }
 
 function buildCachedEnvironment(options: {
@@ -442,12 +473,5 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
 }
 
 export async function __resetLLMCallCachesForTests(): Promise<void> {
-  await Promise.all(
-    [...mcpRegistryCache.values()].map(async (registry) => {
-      await registry.shutdown();
-    }),
-  );
-  mcpRegistryCache.clear();
-  skillRegistryCache.clear();
-  providerConfigStoreCache.clear();
+  await disposeLLMRuntimeCaches();
 }

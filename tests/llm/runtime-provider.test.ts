@@ -55,8 +55,8 @@ vi.mock('../../src/openai-direct.js', () => ({
 
 describe('llm-runtime runtime provider dispatch', () => {
   afterEach(async () => {
-    const { __resetLLMCallCachesForTests } = await import('../../src/runtime.js');
-    await __resetLLMCallCachesForTests();
+    const { disposeLLMRuntimeCaches } = await import('../../src/runtime.js');
+    await disposeLLMRuntimeCaches();
   });
 
   it('dispatches generate requests through an explicit environment', async () => {
