@@ -5,6 +5,7 @@ status: "active"
 source_paths:
   - "src/types.ts"
   - "src/index.ts"
+  - "src/turn-loop.ts"
 updated_at: "2026-04-12"
 ---
 
@@ -15,6 +16,10 @@ Key entities:
 - `LLMToolDefinition`, `LLMToolRegistry`, and `LLMToolExecutionContext` define callable tool surfaces and runtime context.
 - `LLMEnvironment`, `LLMEnvironmentOptions`, `MCPRegistry`, and `SkillRegistry` define the stable runtime dependencies described in [[environment-vs-per-call]].
 - `ToolValidationIssue` and `ToolValidationFailureArtifact` are part of the public correction and recovery path described in [[src-tool-validation]].
+
+Recent type surface changes:
+- `LLMToolCall.synthetic?: boolean` lets callers distinguish normalized plain-text tool intents from model-emitted tool calls when `runTurnLoop(...)` synthetic marking is enabled.
+- The root entrypoint also re-exports the turn-loop trace and lifecycle types defined in `src/turn-loop.ts`, so callers can type metrics and stop metadata without reaching into internal modules.
 
 Design intent:
 - Provider names are plain string unions rather than app-local enums.

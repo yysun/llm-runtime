@@ -20,4 +20,4 @@ Facts from source:
 Important constraint:
 - Application tools are additive only. They can disable built-ins, but they cannot redefine reserved built-in names.
 
-This page pairs with [[src-runtime]] for tool resolution behavior and with [[src-tool-validation]] for the correction and failure path when a model sends malformed arguments.
+This page pairs with [[src-runtime]] for tool resolution behavior, with [[src-builtin-executors]] for the concrete HITL approval artifact path, and with [[src-tool-validation]] for the correction and failure path when a model sends malformed arguments.
