@@ -47,12 +47,14 @@ import type {
   LLMEnvironment,
   LLMEnvironmentOptions,
   LLMGenerateOptions,
+  LLMProviderName,
   LLMProviderConfigStore,
   LLMProviderConfigs,
   LLMResolveToolsOptions,
   LLMResponse,
   LLMStreamOptions,
   LLMToolDefinition,
+  LLMWebSearchOptions,
   MCPConfig,
   MCPRegistry,
   ReasoningEffort,
@@ -62,6 +64,15 @@ import type {
 
 const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'default';
 const DEFAULT_TOOL_PERMISSION: ToolPermission = 'auto';
+const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
+  'openai',
+  'anthropic',
+  'google',
+  'azure',
+  'xai',
+  'openai-compatible',
+  'ollama',
+]);
 
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
@@ -260,6 +271,44 @@ function resolveReasoningEffort(environment: LLMEnvironment, request: LLMGenerat
   return request.context?.reasoningEffort ?? environment.defaults.reasoningEffort;
 }
 
+function normalizeWebSearchOptions(
+  value: LLMGenerateOptions['webSearch'] | LLMStreamOptions['webSearch'],
+): LLMWebSearchOptions | undefined {
+  if (value === false) {
+    return undefined;
+  }
+
+  if (value === true) {
+    return {};
+  }
+
+  if (!value) {
+    return undefined;
+  }
+
+  return {
+    ...(value.searchContextSize ? { searchContextSize: value.searchContextSize } : {}),
+  };
+}
+
+function supportsWebSearch(provider: LLMProviderName): boolean {
+  return WEB_SEARCH_OPTION_PROVIDERS.has(provider);
+}
+
+function resolveWebSearch(request: LLMGenerateOptions | LLMStreamOptions): LLMWebSearchOptions | undefined {
+  if (request.webSearch !== undefined) {
+    const normalized = normalizeWebSearchOptions(request.webSearch);
+
+    if (normalized && !supportsWebSearch(request.provider)) {
+      throw new Error(`Provider ${request.provider} does not support webSearch`);
+    }
+
+    return normalized;
+  }
+
+  return undefined;
+}
+
 function buildResolvedToolSet(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
@@ -358,6 +407,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
     tools: request.tools,
   });
   const reasoningEffort = resolveReasoningEffort(environment, request);
+  const webSearch = resolveWebSearch(request);
 
   switch (request.provider) {
     case 'openai':
@@ -376,6 +426,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
       });
@@ -387,6 +438,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         abortSignal: request.context?.abortSignal,
       });
     case 'google':
@@ -397,6 +449,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
       });
@@ -421,6 +474,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
     tools: request.tools,
   });
   const reasoningEffort = resolveReasoningEffort(environment, request);
+  const webSearch = resolveWebSearch(request);
   const onChunk = request.onChunk ?? (() => undefined);
 
   switch (request.provider) {
@@ -440,6 +494,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
         onChunk,
@@ -452,6 +507,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         abortSignal: request.context?.abortSignal,
         onChunk,
       });
@@ -463,6 +519,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
+        webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
         onChunk,

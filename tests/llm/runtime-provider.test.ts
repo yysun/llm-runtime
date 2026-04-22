@@ -20,10 +20,36 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const {
+  mockCreateAnthropicClient,
+  mockGenerateAnthropicResponse,
+  mockStreamAnthropicResponse,
   mockCreateClientForProvider,
   mockGenerateOpenAIResponse,
   mockStreamOpenAIResponse,
+  mockCreateGoogleClient,
+  mockGenerateGoogleResponse,
+  mockStreamGoogleResponse,
 } = vi.hoisted(() => ({
+  mockCreateAnthropicClient: vi.fn(() => ({ client: 'anthropic' })),
+  mockGenerateAnthropicResponse: vi.fn(async () => ({
+    type: 'text',
+    content: 'anthropic-generated',
+    assistantMessage: {
+      role: 'assistant',
+      content: 'anthropic-generated',
+    },
+  })),
+  mockStreamAnthropicResponse: vi.fn(async (request: any) => {
+    request.onChunk({ content: 'anthropic-chunk-1' });
+    return {
+      type: 'text',
+      content: 'anthropic-streamed',
+      assistantMessage: {
+        role: 'assistant',
+        content: 'anthropic-streamed',
+      },
+    };
+  }),
   mockCreateClientForProvider: vi.fn(() => ({ client: 'openai' })),
   mockGenerateOpenAIResponse: vi.fn(async (request: any) => ({
     type: 'text',
@@ -45,12 +71,44 @@ const {
       },
     };
   }),
+  mockCreateGoogleClient: vi.fn(() => ({ client: 'google' })),
+  mockGenerateGoogleResponse: vi.fn(async () => ({
+    type: 'text',
+    content: 'google-generated',
+    assistantMessage: {
+      role: 'assistant',
+      content: 'google-generated',
+    },
+  })),
+  mockStreamGoogleResponse: vi.fn(async (request: any) => {
+    request.onChunk({ content: 'google-chunk-1' });
+    return {
+      type: 'text',
+      content: 'google-streamed',
+      assistantMessage: {
+        role: 'assistant',
+        content: 'google-streamed',
+      },
+    };
+  }),
+}));
+
+vi.mock('../../src/anthropic-direct.js', () => ({
+  createAnthropicClient: mockCreateAnthropicClient,
+  generateAnthropicResponse: mockGenerateAnthropicResponse,
+  streamAnthropicResponse: mockStreamAnthropicResponse,
 }));
 
 vi.mock('../../src/openai-direct.js', () => ({
   createClientForProvider: mockCreateClientForProvider,
   generateOpenAIResponse: mockGenerateOpenAIResponse,
   streamOpenAIResponse: mockStreamOpenAIResponse,
+}));
+
+vi.mock('../../src/google-direct.js', () => ({
+  createGoogleClient: mockCreateGoogleClient,
+  generateGoogleResponse: mockGenerateGoogleResponse,
+  streamGoogleResponse: mockStreamGoogleResponse,
 }));
 
 describe('llm-runtime runtime provider dispatch', () => {
@@ -219,9 +277,249 @@ describe('llm-runtime runtime provider dispatch', () => {
       provider: 'openai',
       model: 'gpt-5',
       reasoningEffort: 'low',
+      webSearch: undefined,
       tools: {
         project_lookup: expect.objectContaining({ name: 'project_lookup' }),
       },
+    }));
+  });
+
+  it('passes explicit OpenAI web search through to the provider adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      webSearch: {},
+    }));
+  });
+
+  it('passes explicit Azure OpenAI web search through to the provider adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'azure',
+      providerConfig: {
+        apiKey: 'test-azure-key',
+        resourceName: 'test-resource',
+        deployment: 'gpt-4.1',
+      },
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web with Azure',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(mockCreateClientForProvider).toHaveBeenCalledWith('azure', {
+      apiKey: 'test-azure-key',
+      resourceName: 'test-resource',
+      deployment: 'gpt-4.1',
+    });
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'azure',
+      webSearch: {},
+    }));
+  });
+
+  it('treats explicit webSearch false as disabled', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Do not search the web',
+        },
+      ],
+      builtIns: false,
+      webSearch: false,
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      webSearch: undefined,
+    }));
+  });
+
+  it('passes explicit Gemini web search through to the provider adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    const response = await generate({
+      provider: 'google',
+      providerConfig: {
+        apiKey: 'test-google-key',
+      },
+      model: 'gemini-2.5-flash',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web with Gemini',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(response.content).toBe('google-generated');
+    expect(mockCreateGoogleClient).toHaveBeenCalledWith({
+      apiKey: 'test-google-key',
+    });
+    expect(mockGenerateGoogleResponse).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gemini-2.5-flash',
+      webSearch: {},
+    }));
+  });
+
+  it('forwards explicit webSearch to openai-compatible providers', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai-compatible',
+      providerConfig: {
+        apiKey: 'test-openai-compatible-key',
+        baseUrl: 'https://example.invalid/v1',
+      },
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Try web search',
+        },
+      ],
+      builtIns: false,
+      webSearch: {
+        searchContextSize: 'medium',
+      },
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'openai-compatible',
+      webSearch: {
+        searchContextSize: 'medium',
+      },
+    }));
+  });
+
+  it('does not enable webSearch implicitly for generic openai-compatible providers', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai-compatible',
+      providerConfig: {
+        apiKey: 'test-openai-compatible-key',
+        baseUrl: 'https://example.invalid/v1',
+      },
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Normal request',
+        },
+      ],
+      builtIns: false,
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'openai-compatible',
+      webSearch: undefined,
+    }));
+  });
+
+  it('passes explicit xAI web search through to the provider adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'xai',
+      providerConfig: {
+        apiKey: 'test-xai-key',
+      },
+      model: 'grok-3-mini',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web with xAI',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'xai',
+      webSearch: {},
+    }));
+  });
+
+  it('forwards explicit webSearch to Ollama through the OpenAI-compatible adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'ollama',
+      providerConfig: {
+        baseUrl: 'http://localhost:11434/v1',
+      },
+      model: 'llama3.2',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web with Ollama',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'ollama',
+      webSearch: {},
+    }));
+  });
+
+  it('passes explicit Anthropic web search through to the provider adapter', async () => {
+    const { generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'anthropic',
+      providerConfig: {
+        apiKey: 'test-anthropic-key',
+      },
+      model: 'claude-sonnet-4-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web with Anthropic',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+    });
+
+    expect(mockGenerateAnthropicResponse).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'claude-sonnet-4-5',
+      webSearch: {},
     }));
   });
 

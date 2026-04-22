@@ -23,6 +23,92 @@ import {
 } from '../../src/openai-direct.js';
 
 describe('llm-runtime openai-direct', () => {
+  it('passes chat-completions web search options through to OpenAI', async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            return {
+              choices: [
+                {
+                  message: {
+                    content: 'web search enabled',
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as any;
+
+    await generateOpenAIResponse({
+      client: fakeClient,
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web',
+        },
+      ],
+      webSearch: {
+        searchContextSize: 'high',
+      },
+    });
+
+    expect(capturedRequest).toEqual(expect.objectContaining({
+      web_search_options: {
+        search_context_size: 'high',
+      },
+    }));
+  });
+
+  it('passes chat-completions web search options through to Azure OpenAI requests', async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            return {
+              choices: [
+                {
+                  message: {
+                    content: 'azure web search enabled',
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as any;
+
+    await generateOpenAIResponse({
+      client: fakeClient,
+      provider: 'azure',
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web',
+        },
+      ],
+      webSearch: {
+        searchContextSize: 'medium',
+      },
+    });
+
+    expect(capturedRequest).toEqual(expect.objectContaining({
+      web_search_options: {
+        search_context_size: 'medium',
+      },
+    }));
+  });
+
   it('normalizes non-streaming tool calls into package-native responses', async () => {
     const fakeClient = {
       chat: {

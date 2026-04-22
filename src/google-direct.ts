@@ -24,6 +24,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
+  LLMWebSearchOptions,
   ReasoningEffort,
 } from './types.js';
 import { createPackageLogger, generateId } from './provider-utils.js';
@@ -38,6 +39,7 @@ export type GoogleProviderRequest = {
   tools?: Record<string, LLMToolDefinition>;
   temperature?: number;
   maxTokens?: number;
+  webSearch?: LLMWebSearchOptions;
   reasoningEffort?: ReasoningEffort;
   abortSignal?: AbortSignal;
 };
@@ -102,10 +104,26 @@ export function createGoogleClient(config: GoogleConfig): GoogleGenerativeAI {
   return new GoogleGenerativeAI(config.apiKey);
 }
 
+function normalizeGoogleModelTools(tools: any[] | undefined): any[] | undefined {
+  if (!tools || tools.length === 0) {
+    return undefined;
+  }
+
+  const hasStructuredToolShape = tools.some((tool) =>
+    tool
+    && typeof tool === 'object'
+    && ('functionDeclarations' in tool || 'googleSearchRetrieval' in tool || 'codeExecution' in tool),
+  );
+
+  return hasStructuredToolShape ? tools : [{ functionDeclarations: tools }];
+}
+
 export function createGoogleModel(client: GoogleGenerativeAI, modelName: string, tools?: any[]): GenerativeModel {
+  const googleTools = normalizeGoogleModelTools(tools);
+
   return client.getGenerativeModel({
     model: modelName,
-    ...(tools && tools.length > 0 ? { tools: [{ functionDeclarations: tools }] } : {}),
+    ...(googleTools ? { tools: googleTools } : {}),
   });
 }
 
@@ -165,16 +183,31 @@ function convertToolsToGoogle(tools: Record<string, LLMToolDefinition>): any[] {
   }));
 }
 
+function buildGoogleTools(
+  tools: Record<string, LLMToolDefinition> | undefined,
+  webSearch: LLMWebSearchOptions | undefined,
+): any[] | undefined {
+  const googleTools: any[] = [];
+
+  if (tools && Object.keys(tools).length > 0) {
+    googleTools.push({ functionDeclarations: convertToolsToGoogle(tools) });
+  }
+
+  if (webSearch) {
+    googleTools.push({ googleSearchRetrieval: {} });
+  }
+
+  return googleTools.length > 0 ? googleTools : undefined;
+}
+
 export async function streamGoogleResponse(request: GoogleProviderStreamRequest): Promise<LLMResponse> {
-  const googleTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToGoogle(request.tools)
-    : undefined;
+  const googleTools = buildGoogleTools(request.tools, request.webSearch);
   const converted = convertMessagesToGoogle(request.messages);
   const thinkingConfig = buildGoogleThinkingConfig(request.reasoningEffort);
   const generativeModel = request.client.getGenerativeModel({
     model: request.model,
     systemInstruction: converted.systemInstruction || undefined,
-    ...(googleTools && googleTools.length > 0 ? { tools: [{ functionDeclarations: googleTools }] } : {}),
+    ...(googleTools ? { tools: googleTools } : {}),
     generationConfig: {
       temperature: request.temperature,
       maxOutputTokens: request.maxTokens,
@@ -274,15 +307,13 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
 }
 
 export async function generateGoogleResponse(request: GoogleProviderRequest): Promise<LLMResponse> {
-  const googleTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToGoogle(request.tools)
-    : undefined;
+  const googleTools = buildGoogleTools(request.tools, request.webSearch);
   const converted = convertMessagesToGoogle(request.messages);
   const thinkingConfig = buildGoogleThinkingConfig(request.reasoningEffort);
   const generativeModel = request.client.getGenerativeModel({
     model: request.model,
     systemInstruction: converted.systemInstruction || undefined,
-    ...(googleTools && googleTools.length > 0 ? { tools: [{ functionDeclarations: googleTools }] } : {}),
+    ...(googleTools ? { tools: googleTools } : {}),
     generationConfig: {
       temperature: request.temperature,
       maxOutputTokens: request.maxTokens,

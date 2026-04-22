@@ -32,6 +32,7 @@ export type LLMProviderName =
 
 export type ReasoningEffort = 'default' | 'none' | 'low' | 'medium' | 'high';
 export type ToolPermission = 'auto' | 'ask' | 'read';
+export type WebSearchContextSize = 'low' | 'medium' | 'high';
 export type BuiltInToolName =
   | 'shell_cmd'
   | 'load_skill'
@@ -188,6 +189,10 @@ export interface LLMToolRegistry {
 
 export type BuiltInToolSelection = boolean | Partial<Record<BuiltInToolName, boolean>>;
 
+export interface LLMWebSearchOptions {
+  searchContextSize?: WebSearchContextSize;
+}
+
 export interface PendingHitlToolResult {
   ok: false;
   pending: true;
@@ -283,6 +288,7 @@ export interface LLMPerCallProviderOptions {
   messages: LLMChatMessage[];
   temperature?: number;
   maxTokens?: number;
+  webSearch?: boolean | LLMWebSearchOptions;
   providerConfig?: ProviderConfig;
   providers?: LLMProviderConfigs;
   mcpConfig?: MCPConfig | null;

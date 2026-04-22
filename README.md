@@ -71,6 +71,7 @@ The main rule is simple:
 - `workingDirectory`
 - `reasoningEffort`
 - `toolPermission`
+- `webSearch`
 - `abortSignal`
 
 If a value should change from one request or UI action to the next, it usually should not live in the environment.
@@ -120,6 +121,18 @@ The difference is output delivery:
 
 - `generate(...)` returns the final result
 - `stream(...)` emits chunks and still returns the final result at the end
+
+## Web Search
+
+`llm-runtime` can enable or forward per-call web search across the package provider set.
+
+- Per call, pass `webSearch: true` or `webSearch: { searchContextSize: 'low' | 'medium' | 'high' }`.
+- `webSearch` is mapped to provider-native request fields for `openai`, `azure`, `xai`, `anthropic`, and `google`.
+- For `openai-compatible` and `ollama`, `webSearch` is forwarded as OpenAI-style `web_search_options` on a best-effort basis for backends that honor that field.
+- Anthropic uses its built-in `web_search_20250305` server tool.
+- Gemini uses Google Search grounding.
+- `searchContextSize` is forwarded for OpenAI-style requests and ignored by Anthropic and Gemini.
+- Omit `webSearch` to leave web search disabled.
 
 ## `runTurnLoop(...)`
 

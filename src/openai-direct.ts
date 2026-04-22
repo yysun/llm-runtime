@@ -26,6 +26,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
+  LLMWebSearchOptions,
   OllamaConfig,
   OpenAICompatibleConfig,
   OpenAIConfig,
@@ -53,6 +54,7 @@ export type OpenAIProviderRequest = {
   tools?: Record<string, LLMToolDefinition>;
   temperature?: number;
   maxTokens?: number;
+  webSearch?: LLMWebSearchOptions;
   reasoningEffort?: ReasoningEffort;
   abortSignal?: AbortSignal;
 };
@@ -375,12 +377,27 @@ function convertToolsToOpenAI(tools: Record<string, LLMToolDefinition>): OpenAI.
   }));
 }
 
+function buildOpenAIWebSearchOptions(
+  webSearch: LLMWebSearchOptions | undefined,
+): OpenAI.Chat.Completions.ChatCompletionCreateParams.WebSearchOptions | undefined {
+  if (!webSearch) {
+    return undefined;
+  }
+
+  return {
+    ...(webSearch.searchContextSize
+      ? { search_context_size: webSearch.searchContextSize }
+      : {}),
+  };
+}
+
 export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest): Promise<LLMResponse> {
   const openaiMessages = convertMessagesToOpenAI(request.messages);
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
     ? convertToolsToOpenAI(request.tools)
     : undefined;
   const reasoning = getReasoningConfig(request.reasoningEffort);
+  const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
 
   const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & { reasoning?: { effort: OpenAIReasoningEffort } } = {
     model: request.model,
@@ -390,6 +407,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
     max_completion_tokens: request.maxTokens,
     ...(reasoning ? { reasoning } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
+    ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
   };
 
   const stream = await request.client.chat.completions.create(
@@ -512,6 +530,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     ? convertToolsToOpenAI(request.tools)
     : undefined;
   const reasoning = getReasoningConfig(request.reasoningEffort);
+  const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
 
   const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming & { reasoning?: { effort: OpenAIReasoningEffort } } = {
     model: request.model,
@@ -520,6 +539,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     max_completion_tokens: request.maxTokens,
     ...(reasoning ? { reasoning } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
+    ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
   };
 
   const response = await request.client.chat.completions.create(
@@ -561,10 +581,10 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
       },
       usage: response.usage
         ? {
-            inputTokens: response.usage.prompt_tokens,
-            outputTokens: response.usage.completion_tokens,
-            totalTokens: response.usage.total_tokens,
-          }
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+          totalTokens: response.usage.total_tokens,
+        }
         : undefined,
     };
   }
@@ -578,10 +598,10 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     },
     usage: response.usage
       ? {
-          inputTokens: response.usage.prompt_tokens,
-          outputTokens: response.usage.completion_tokens,
-          totalTokens: response.usage.total_tokens,
-        }
+        inputTokens: response.usage.prompt_tokens,
+        outputTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+      }
       : undefined,
   };
 }

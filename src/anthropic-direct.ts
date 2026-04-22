@@ -24,6 +24,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
+  LLMWebSearchOptions,
 } from './types.js';
 import { createPackageLogger } from './provider-utils.js';
 
@@ -36,6 +37,7 @@ export type AnthropicProviderRequest = {
   tools?: Record<string, LLMToolDefinition>;
   temperature?: number;
   maxTokens?: number;
+  webSearch?: LLMWebSearchOptions;
   abortSignal?: AbortSignal;
 };
 
@@ -116,6 +118,51 @@ function convertToolsToAnthropic(tools: Record<string, LLMToolDefinition>): Anth
   }));
 }
 
+function buildAnthropicTools(
+  tools: Record<string, LLMToolDefinition> | undefined,
+  webSearch: LLMWebSearchOptions | undefined,
+): Anthropic.Messages.ToolUnion[] | undefined {
+  const anthropicTools: Anthropic.Messages.ToolUnion[] = [];
+
+  if (tools && Object.keys(tools).length > 0) {
+    anthropicTools.push(...convertToolsToAnthropic(tools));
+  }
+
+  if (webSearch) {
+    anthropicTools.push({
+      name: 'web_search',
+      type: 'web_search_20250305',
+    });
+  }
+
+  return anthropicTools.length > 0 ? anthropicTools : undefined;
+}
+
+function isAnthropicClientToolUseBlock(
+  block: Anthropic.Messages.ContentBlock | Anthropic.Messages.ContentBlockStartEvent['content_block'],
+): block is Anthropic.Messages.ToolUseBlock {
+  return block.type === 'tool_use';
+}
+
+function isAnthropicServerToolBlock(
+  block: Anthropic.Messages.ContentBlock | Anthropic.Messages.ContentBlockStartEvent['content_block'],
+): block is Anthropic.Messages.ServerToolUseBlock | Anthropic.Messages.WebSearchToolResultBlock {
+  return block.type === 'server_tool_use' || block.type === 'web_search_tool_result';
+}
+
+function mapAnthropicToolUses(toolUses: Anthropic.Messages.ToolUseBlock[]) {
+  return toolUses
+    .filter((toolUse) => toolUse.name && toolUse.name.trim() !== '')
+    .map((toolUse) => ({
+      id: toolUse.id,
+      type: 'function' as const,
+      function: {
+        name: toolUse.name,
+        arguments: JSON.stringify(toolUse.input),
+      },
+    }));
+}
+
 function extractSystemPrompt(messages: LLMChatMessage[]): string {
   const systemMessage = messages.find((message) => message.role === 'system');
   return systemMessage?.content || 'You are a helpful assistant.';
@@ -123,9 +170,7 @@ function extractSystemPrompt(messages: LLMChatMessage[]): string {
 
 export async function streamAnthropicResponse(request: AnthropicProviderStreamRequest): Promise<LLMResponse> {
   const anthropicMessages = convertMessagesToAnthropic(request.messages);
-  const anthropicTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToAnthropic(request.tools)
-    : undefined;
+  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch);
 
   const stream = await request.client.messages.create(
     {
@@ -141,7 +186,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
   );
 
   let fullResponse = '';
-  const toolUses: any[] = [];
+  const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
 
   try {
     for await (const chunk of stream) {
@@ -152,22 +197,15 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
         fullResponse += chunk.delta.text;
         request.onChunk({ content: chunk.delta.text });
-      } else if (chunk.type === 'content_block_start' && chunk.content_block.type === 'tool_use') {
+      } else if (chunk.type === 'content_block_start' && isAnthropicClientToolUseBlock(chunk.content_block)) {
         toolUses.push(chunk.content_block);
+      } else if (chunk.type === 'content_block_start' && isAnthropicServerToolBlock(chunk.content_block)) {
+        // Anthropic server tools are handled provider-side and should not surface as host tool calls.
       }
     }
 
     if (toolUses.length > 0) {
-      const toolCalls = toolUses
-        .filter((toolUse) => toolUse.name && toolUse.name.trim() !== '')
-        .map((toolUse) => ({
-          id: toolUse.id,
-          type: 'function' as const,
-          function: {
-            name: toolUse.name,
-            arguments: JSON.stringify(toolUse.input),
-          },
-        }));
+      const toolCalls = mapAnthropicToolUses(toolUses);
 
       return {
         type: 'tool_calls',
@@ -204,9 +242,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
 
 export async function generateAnthropicResponse(request: AnthropicProviderRequest): Promise<LLMResponse> {
   const anthropicMessages = convertMessagesToAnthropic(request.messages);
-  const anthropicTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToAnthropic(request.tools)
-    : undefined;
+  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch);
 
   const response = await request.client.messages.create(
     {
@@ -221,27 +257,20 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
   );
 
   let content = '';
-  const toolUses: any[] = [];
+  const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
 
   response.content.forEach((block) => {
     if (block.type === 'text') {
       content += block.text;
-    } else if (block.type === 'tool_use') {
+    } else if (isAnthropicClientToolUseBlock(block)) {
       toolUses.push(block);
+    } else if (isAnthropicServerToolBlock(block)) {
+      // Anthropic server tools are handled provider-side and should not surface as host tool calls.
     }
   });
 
   if (toolUses.length > 0) {
-    const toolCalls = toolUses
-      .filter((toolUse) => toolUse.name && toolUse.name.trim() !== '')
-      .map((toolUse) => ({
-        id: toolUse.id,
-        type: 'function' as const,
-        function: {
-          name: toolUse.name,
-          arguments: JSON.stringify(toolUse.input),
-        },
-      }));
+    const toolCalls = mapAnthropicToolUses(toolUses);
 
     return {
       type: 'tool_calls',
@@ -254,9 +283,9 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
       },
       usage: response.usage
         ? {
-            inputTokens: response.usage.input_tokens,
-            outputTokens: response.usage.output_tokens,
-          }
+          inputTokens: response.usage.input_tokens,
+          outputTokens: response.usage.output_tokens,
+        }
         : undefined,
     };
   }
@@ -270,9 +299,9 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
     },
     usage: response.usage
       ? {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
-        }
+        inputTokens: response.usage.input_tokens,
+        outputTokens: response.usage.output_tokens,
+      }
       : undefined,
   };
 }
