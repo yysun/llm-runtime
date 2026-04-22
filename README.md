@@ -17,7 +17,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
-- Generic host-agnostic turn-loop orchestration through `runTurnLoop(...)`
+- Generic host-agnostic turn orchestration through `respondWithTools(...)`, with `runTurnLoop(...)` kept for backward compatibility
 - Intrinsic turn-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
@@ -32,6 +32,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 - `disposeLLMRuntimeCaches()`
 - `generate(...)`
 - `stream(...)`
+- `respondWithTools(...)`
 - `runTurnLoop(...)`
 
 The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or inject an explicit `environment` when your harness wants stable provider, MCP, and skill dependencies.
@@ -134,9 +135,11 @@ The difference is output delivery:
 - `searchContextSize` is forwarded for OpenAI-style requests and ignored by Anthropic and Gemini.
 - Omit `webSearch` to leave web search disabled.
 
-## `runTurnLoop(...)`
+## `respondWithTools(...)` / `runTurnLoop(...)`
 
-`runTurnLoop(...)` is the package-owned iterative loop for harnesses that want the package to manage repeated model turns without taking ownership of harness state, persistence, or tool policy.
+`respondWithTools(...)` is the preferred user-facing name for the package-owned iterative loop that manages repeated model turns without taking ownership of harness state, persistence, or tool policy.
+
+`runTurnLoop(...)` remains available as the backward-compatible name for the same API.
 
 Use it when your harness needs more control than a single `generate(...)` or `stream(...)` call, but still wants one package boundary for:
 
@@ -153,7 +156,7 @@ The split of responsibilities is deliberate:
 
 ### Safety And Stop Reasons
 
-`runTurnLoop(...)` now applies intrinsic package defaults for:
+`respondWithTools(...)` now applies intrinsic package defaults for:
 
 - `maxIterations`
 - `maxConsecutiveToolTurns`
@@ -196,7 +199,7 @@ They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the ot
 
 ### Turn-Loop Hardening
 
-For tool-capable turns, `runTurnLoop(...)` can now reject intent-only narration such as "I will check the file" when the harness still requires action evidence.
+For tool-capable turns, `respondWithTools(...)` can reject intent-only narration such as "I will check the file" when the harness still requires action evidence.
 
 Use these hooks when your harness needs hardening against weak tool users:
 
@@ -237,14 +240,14 @@ You can provide either:
 Minimal shape:
 
 ```ts
-import { runTurnLoop, type LLMChatMessage } from 'llm-runtime';
+import { respondWithTools, type LLMChatMessage } from 'llm-runtime';
 
 type ChatState = {
   messages: LLMChatMessage[];
   finalText: string;
 };
 
-const result = await runTurnLoop({
+const result = await respondWithTools({
   initialState: {
     messages: [{ role: 'user', content: 'Find the token and use tools if needed.' }],
     finalText: '',
@@ -308,10 +311,10 @@ import {
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
   parseToolValidationFailureArtifact,
-  runTurnLoop,
+  respondWithTools,
 } from 'llm-runtime';
 
-const result = await runTurnLoop({
+const result = await respondWithTools({
   initialState,
   emptyTextRetryLimit: 0,
   rejectedTextRetryLimit: 1,
@@ -469,7 +472,7 @@ console.table(servers.map((server) => ({
 - `npm run test:watch` runs the Vitest suite in watch mode
 - `npm run test:e2e` runs the showcase script in `tests/e2e/llm-package-showcase.ts`
 - `npm run test:e2e:dry-run` validates the showcase wiring without live provider calls
-- `npm run test:e2e:turn-loop` runs the `runTurnLoop(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
+- `npm run test:e2e:turn-loop` runs the `respondWithTools(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
 - `npm run test:e2e:turn-loop:dry-run` validates the turn-loop showcase wiring without live provider calls
 - `npm run test:e2e:hardening` runs deterministic end-to-end hardening coverage for narrated intent recovery and validation-failure correction without a live provider
 

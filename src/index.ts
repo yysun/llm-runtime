@@ -29,6 +29,7 @@ export * from './skills.js';
 export * from './tools.js';
 export * from './tool-validation.js';
 export * from './turn-loop.js';
+export { runTurnLoop as respondWithTools } from './turn-loop.js';
 export {
   createLLMEnvironment,
   disposeLLMEnvironment,

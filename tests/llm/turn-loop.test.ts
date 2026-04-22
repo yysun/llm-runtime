@@ -11,6 +11,7 @@ vi.mock('../../src/runtime.js', () => ({
 }));
 
 import { runTurnLoop } from '../../src/turn-loop.js';
+import { respondWithTools } from '../../src/index.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
 function text(content: string): LLMResponse {
@@ -75,6 +76,25 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.state.finalText).toBe('echo:hello');
   });
 
+  it('exports respondWithTools as an additive alias', async () => {
+    const result = await respondWithTools({
+      initialState: {
+        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 1,
+      callModel: vi.fn(async ({ messages }) => text(`echo:${messages.at(-1)?.content}`)),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('echo:hello');
+  });
+
   it('uses the package-managed generate path', async () => {
     mockGenerate.mockResolvedValueOnce(text('done'));
 
@@ -133,7 +153,7 @@ describe('llm-runtime runTurnLoop', () => {
 
     const result = await runTurnLoop({
       initialState: {
-        messages: [{ role: 'user', content: 'inspect file' } satisfies LLMChatMessage],
+        messages: [{ role: 'user', content: 'inspect file' } satisfies LLMChatMessage] as LLMChatMessage[],
         toolRuns: 0,
         finalText: '',
       },
@@ -163,7 +183,7 @@ describe('llm-runtime runTurnLoop', () => {
             messages: [
               ...state.messages,
               response.assistantMessage,
-              { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' },
+              { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
             ],
           },
           next: { control: 'continue', transientInstruction: 'Use the tool result and answer normally.' },
