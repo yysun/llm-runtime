@@ -54,8 +54,10 @@ import type {
   LLMProviderConfigs,
   LLMResolveToolsOptions,
   LLMResponse,
+  LLMStreamChunk,
   LLMStreamOptions,
   LLMToolDefinition,
+  LLMWarning,
   LLMWebSearchOptions,
   MCPConfig,
   MCPRegistry,
@@ -70,10 +72,6 @@ const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
   'openai',
   'anthropic',
   'google',
-  'azure',
-  'xai',
-  'openai-compatible',
-  'ollama',
 ]);
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
   'When you need clarification, missing user-specific input, explicit approval, or another human decision, prefer the `ask_user_input` tool instead of asking only in plain text. The legacy alias `human_intervention_request` is equivalent when present.',
@@ -302,18 +300,81 @@ function supportsWebSearch(provider: LLMProviderName): boolean {
   return WEB_SEARCH_OPTION_PROVIDERS.has(provider);
 }
 
-function resolveWebSearch(request: LLMGenerateOptions | LLMStreamOptions): LLMWebSearchOptions | undefined {
+function appendWarnings(response: LLMResponse, warnings: LLMWarning[]): LLMResponse {
+  if (warnings.length === 0) {
+    return response;
+  }
+
+  return {
+    ...response,
+    warnings: [...(response.warnings ?? []), ...warnings],
+  };
+}
+
+function emitWarningChunk(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): void {
+  if (warnings.length === 0) {
+    return;
+  }
+
+  onChunk({ warnings });
+}
+
+function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): {
+  onChunk: (chunk: LLMStreamChunk) => void;
+  emitRemaining: () => void;
+} {
+  let emitted = false;
+
+  return {
+    onChunk(chunk: LLMStreamChunk) {
+      if (!emitted) {
+        emitWarningChunk(onChunk, warnings);
+        emitted = true;
+      }
+
+      onChunk(chunk);
+    },
+    emitRemaining() {
+      if (emitted) {
+        return;
+      }
+
+      emitWarningChunk(onChunk, warnings);
+      emitted = true;
+    },
+  };
+}
+
+function resolveWebSearch(request: LLMGenerateOptions | LLMStreamOptions): { webSearch?: LLMWebSearchOptions; warnings: LLMWarning[] } {
   if (request.webSearch !== undefined) {
     const normalized = normalizeWebSearchOptions(request.webSearch);
 
     if (normalized && !supportsWebSearch(request.provider)) {
-      throw new Error(`Provider ${request.provider} does not support webSearch`);
+      return {
+        webSearch: undefined,
+        warnings: [
+          {
+            code: 'web_search_ignored',
+            provider: request.provider,
+            message: `webSearch was ignored for provider ${request.provider} on the current API path.`,
+            details: {
+              reason: 'provider_not_supported',
+            },
+          },
+        ],
+      };
     }
 
-    return normalized;
+    return {
+      webSearch: normalized,
+      warnings: [],
+    };
   }
 
-  return undefined;
+  return {
+    webSearch: undefined,
+    warnings: [],
+  };
 }
 
 function injectToolGuidance(
@@ -453,7 +514,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
   });
   const messages = injectToolGuidance(request.messages, tools);
   const reasoningEffort = resolveReasoningEffort(environment, request);
-  const webSearch = resolveWebSearch(request);
+  const resolvedWebSearch = resolveWebSearch(request);
 
   switch (request.provider) {
     case 'openai':
@@ -461,7 +522,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
     case 'openai-compatible':
     case 'xai':
     case 'ollama':
-      return await generateOpenAIResponse({
+      return appendWarnings(await generateOpenAIResponse({
         client: createClientForProvider(
           request.provider,
           environment.providerConfigStore.getProviderConfig(request.provider as any) as any,
@@ -472,33 +533,33 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
-      });
+      }), resolvedWebSearch.warnings);
     case 'anthropic':
-      return await generateAnthropicResponse({
+      return appendWarnings(await generateAnthropicResponse({
         client: createAnthropicClient(environment.providerConfigStore.getProviderConfig('anthropic')),
         model: request.model,
         messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         abortSignal: request.context?.abortSignal,
-      });
+      }), resolvedWebSearch.warnings);
     case 'google':
-      return await generateGoogleResponse({
+      return appendWarnings(await generateGoogleResponse({
         client: createGoogleClient(environment.providerConfigStore.getProviderConfig('google')),
         model: request.model,
         messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
-      });
+      }), resolvedWebSearch.warnings);
     default:
       throw new Error(`Unsupported provider: ${request.provider}`);
   }
@@ -521,56 +582,64 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
   });
   const messages = injectToolGuidance(request.messages, tools);
   const reasoningEffort = resolveReasoningEffort(environment, request);
-  const webSearch = resolveWebSearch(request);
+  const resolvedWebSearch = resolveWebSearch(request);
   const onChunk = request.onChunk ?? (() => undefined);
+  const warningChunkEmitter = createWarningChunkEmitter(onChunk, resolvedWebSearch.warnings);
+  const finalizeStream = async (run: () => Promise<LLMResponse>): Promise<LLMResponse> => {
+    const response = await run();
+    warningChunkEmitter.emitRemaining();
+    return appendWarnings(response, resolvedWebSearch.warnings);
+  };
 
   switch (request.provider) {
     case 'openai':
     case 'azure':
     case 'openai-compatible':
     case 'xai':
-    case 'ollama':
-      return await streamOpenAIResponse({
+    case 'ollama': {
+      const provider = request.provider;
+      return await finalizeStream(async () => await streamOpenAIResponse({
         client: createClientForProvider(
-          request.provider,
-          environment.providerConfigStore.getProviderConfig(request.provider as any) as any,
+          provider,
+          environment.providerConfigStore.getProviderConfig(provider as any) as any,
         ),
-        provider: request.provider,
+        provider,
         model: request.model,
         messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
-        onChunk,
-      });
+        onChunk: warningChunkEmitter.onChunk,
+      }));
+    }
     case 'anthropic':
-      return await streamAnthropicResponse({
+      return await finalizeStream(async () => await streamAnthropicResponse({
         client: createAnthropicClient(environment.providerConfigStore.getProviderConfig('anthropic')),
         model: request.model,
         messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         abortSignal: request.context?.abortSignal,
-        onChunk,
-      });
+        onChunk: warningChunkEmitter.onChunk,
+      }));
     case 'google':
-      return await streamGoogleResponse({
+      return await finalizeStream(async () => await streamGoogleResponse({
         client: createGoogleClient(environment.providerConfigStore.getProviderConfig('google')),
         model: request.model,
         messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
-        webSearch,
+        webSearch: resolvedWebSearch.webSearch,
         reasoningEffort,
         abortSignal: request.context?.abortSignal,
-        onChunk,
-      });
+        onChunk: warningChunkEmitter.onChunk,
+      }));
     default:
       throw new Error(`Unsupported provider: ${request.provider}`);
   }

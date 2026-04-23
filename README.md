@@ -141,10 +141,11 @@ The difference is output delivery:
 `llm-runtime` can enable or forward per-call web search across the package provider set.
 
 - Per call, pass `webSearch: true` or `webSearch: { searchContextSize: 'low' | 'medium' | 'high' }`.
-- `webSearch` is mapped to provider-native request fields for `openai`, `azure`, `xai`, `anthropic`, and `google`.
-- For `openai-compatible` and `ollama`, `webSearch` is forwarded as OpenAI-style `web_search_options` on a best-effort basis for backends that honor that field.
+- `webSearch` is mapped to provider-native request fields for `openai`, `anthropic`, and `google`.
+- For `azure`, `openai-compatible`, `xai`, and `ollama` on the current chat-API path, unsupported `webSearch` is ignored instead of failing the request.
 - Anthropic uses its built-in `web_search_20250305` server tool.
-- Gemini uses Google Search grounding.
+- Gemini uses Google Search grounding, but Gemini built-in Google Search cannot be combined with function calling in the same request. When both `tools` and `webSearch` are present for `google`, `llm-runtime` keeps function calling and ignores `webSearch`.
+- When `webSearch` is ignored, the returned `LLMResponse` includes a `warnings` entry with code `web_search_ignored` so harnesses can surface the downgrade without failing the turn.
 - `searchContextSize` is forwarded for OpenAI-style requests and ignored by Anthropic and Gemini.
 - Omit `webSearch` to leave web search disabled.
 

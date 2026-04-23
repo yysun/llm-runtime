@@ -26,6 +26,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
+  LLMWarning,
   LLMWebSearchOptions,
   OllamaConfig,
   OpenAICompatibleConfig,
@@ -391,13 +392,92 @@ function buildOpenAIWebSearchOptions(
   };
 }
 
+function resolveOpenAIWebSearchOptions(
+  provider: OpenAIClientProvider,
+  webSearch: LLMWebSearchOptions | undefined,
+): {
+  webSearchOptions?: OpenAI.Chat.Completions.ChatCompletionCreateParams.WebSearchOptions;
+  warnings: LLMWarning[];
+} {
+  if (!webSearch) {
+    return { webSearchOptions: undefined, warnings: [] };
+  }
+
+  if (provider !== 'openai') {
+    return {
+      webSearchOptions: undefined,
+      warnings: [
+        {
+          code: 'web_search_ignored',
+          provider,
+          message: `webSearch was ignored for provider ${provider} on the current chat-completions API path.`,
+          details: {
+            reason: 'provider_not_supported',
+          },
+        },
+      ],
+    };
+  }
+
+  return {
+    webSearchOptions: buildOpenAIWebSearchOptions(webSearch),
+    warnings: [],
+  };
+}
+
+function appendWarnings(response: LLMResponse, warnings: LLMWarning[]): LLMResponse {
+  if (warnings.length === 0) {
+    return response;
+  }
+
+  return {
+    ...response,
+    warnings: [...(response.warnings ?? []), ...warnings],
+  };
+}
+
+function emitWarningChunk(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): void {
+  if (warnings.length === 0) {
+    return;
+  }
+
+  onChunk({ warnings });
+}
+
+function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): {
+  onChunk: (chunk: LLMStreamChunk) => void;
+  emitRemaining: () => void;
+} {
+  let emitted = false;
+
+  return {
+    onChunk(chunk: LLMStreamChunk) {
+      if (!emitted) {
+        emitWarningChunk(onChunk, warnings);
+        emitted = true;
+      }
+
+      onChunk(chunk);
+    },
+    emitRemaining() {
+      if (emitted) {
+        return;
+      }
+
+      emitWarningChunk(onChunk, warnings);
+      emitted = true;
+    },
+  };
+}
+
 export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest): Promise<LLMResponse> {
   const openaiMessages = convertMessagesToOpenAI(request.messages);
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
     ? convertToolsToOpenAI(request.tools)
     : undefined;
   const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
-  const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
+  const resolvedWebSearch = resolveOpenAIWebSearchOptions(request.provider, request.webSearch);
+  const warningChunkEmitter = createWarningChunkEmitter(request.onChunk, resolvedWebSearch.warnings);
 
   const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
     model: request.model,
@@ -407,7 +487,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
     max_completion_tokens: request.maxTokens,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
-    ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
+    ...(resolvedWebSearch.webSearchOptions ? { web_search_options: resolvedWebSearch.webSearchOptions } : {}),
   };
 
   const stream = await request.client.chat.completions.create(
@@ -436,12 +516,12 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
       );
 
       if (reasoningContent) {
-        request.onChunk({ reasoningContent });
+        warningChunkEmitter.onChunk({ reasoningContent });
       }
 
       if (delta?.content) {
         fullResponse += delta.content;
-        request.onChunk({ content: delta.content });
+        warningChunkEmitter.onChunk({ content: delta.content });
       }
 
       if (delta?.tool_calls) {
@@ -477,6 +557,8 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
       }
     }
 
+    warningChunkEmitter.emitRemaining();
+
     if (functionCalls.length > 0) {
       const validCalls = functionCalls.filter(
         (functionCall) => functionCall.function?.name && functionCall.function.name.trim() !== '',
@@ -491,7 +573,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
         },
       }));
 
-      return {
+      return appendWarnings({
         type: 'tool_calls',
         content: fullResponse,
         tool_calls: toolCallsFormatted,
@@ -500,17 +582,17 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
           content: fullResponse || '',
           tool_calls: toolCallsFormatted,
         },
-      };
+      }, resolvedWebSearch.warnings);
     }
 
-    return {
+    return appendWarnings({
       type: 'text',
       content: fullResponse,
       assistantMessage: {
         role: 'assistant',
         content: fullResponse,
       },
-    };
+    }, resolvedWebSearch.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
       logger.info('OpenAI streaming canceled', {
@@ -530,7 +612,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     ? convertToolsToOpenAI(request.tools)
     : undefined;
   const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
-  const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
+  const resolvedWebSearch = resolveOpenAIWebSearchOptions(request.provider, request.webSearch);
 
   const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
     model: request.model,
@@ -539,7 +621,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     max_completion_tokens: request.maxTokens,
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
-    ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
+    ...(resolvedWebSearch.webSearchOptions ? { web_search_options: resolvedWebSearch.webSearchOptions } : {}),
   };
 
   const response = await request.client.chat.completions.create(
@@ -570,7 +652,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
       };
     });
 
-    return {
+    return appendWarnings({
       type: 'tool_calls',
       content,
       tool_calls: toolCallsFormatted,
@@ -586,10 +668,10 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
           totalTokens: response.usage.total_tokens,
         }
         : undefined,
-    };
+    }, resolvedWebSearch.warnings);
   }
 
-  return {
+  return appendWarnings({
     type: 'text',
     content,
     assistantMessage: {
@@ -603,7 +685,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
         totalTokens: response.usage.total_tokens,
       }
       : undefined,
-  };
+  }, resolvedWebSearch.warnings);
 }
 
 export function createClientForProvider(providerType: OpenAIClientProvider, config: OpenAIConfig | AzureConfig | OpenAICompatibleConfig | XAIConfig | OllamaConfig): OpenAI {

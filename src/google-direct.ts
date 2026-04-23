@@ -24,6 +24,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
+  LLMWarning,
   LLMWebSearchOptions,
   ReasoningEffort,
 } from './types.js';
@@ -269,6 +270,51 @@ export function createGoogleClient(config: GoogleConfig): GoogleGenerativeAI {
   return new GoogleGenerativeAI(config.apiKey);
 }
 
+function normalizeGoogleStructuredTool(tool: any): any {
+  if (!tool || typeof tool !== 'object') {
+    return tool;
+  }
+
+  if ('googleSearchRetrieval' in tool && !('googleSearch' in tool)) {
+    const { googleSearchRetrieval, ...rest } = tool as Record<string, unknown>;
+    return {
+      ...rest,
+      googleSearch: googleSearchRetrieval ?? {},
+    };
+  }
+
+  return tool;
+}
+
+function stripGoogleSearchFromStructuredTools(tools: any[]): any[] {
+  const hasFunctionDeclarations = tools.some((tool) =>
+    tool
+    && typeof tool === 'object'
+    && 'functionDeclarations' in tool,
+  );
+
+  if (!hasFunctionDeclarations) {
+    return tools;
+  }
+
+  let strippedGoogleSearch = false;
+  const normalizedTools = tools.flatMap((tool) => {
+    if (!tool || typeof tool !== 'object' || !('googleSearch' in tool)) {
+      return [tool];
+    }
+
+    strippedGoogleSearch = true;
+    const { googleSearch, ...rest } = tool as Record<string, unknown>;
+    return Object.keys(rest).length > 0 ? [rest] : [];
+  });
+
+  if (strippedGoogleSearch) {
+    logger.warn('Gemini googleSearch removed from createGoogleModel tools because Gemini does not allow Google Search with function calling in the same request');
+  }
+
+  return normalizedTools;
+}
+
 function normalizeGoogleModelTools(tools: any[] | undefined): any[] | undefined {
   if (!tools || tools.length === 0) {
     return undefined;
@@ -277,10 +323,12 @@ function normalizeGoogleModelTools(tools: any[] | undefined): any[] | undefined 
   const hasStructuredToolShape = tools.some((tool) =>
     tool
     && typeof tool === 'object'
-    && ('functionDeclarations' in tool || 'googleSearchRetrieval' in tool || 'codeExecution' in tool),
+    && ('functionDeclarations' in tool || 'googleSearch' in tool || 'googleSearchRetrieval' in tool || 'codeExecution' in tool),
   );
 
-  return hasStructuredToolShape ? tools : [{ functionDeclarations: tools }];
+  return hasStructuredToolShape
+    ? stripGoogleSearchFromStructuredTools(tools.map((tool) => normalizeGoogleStructuredTool(tool)))
+    : [{ functionDeclarations: tools }];
 }
 
 export function createGoogleModel(client: GoogleGenerativeAI, modelName: string, tools?: any[]): GenerativeModel {
@@ -351,28 +399,89 @@ function convertToolsToGoogle(tools: Record<string, LLMToolDefinition>): any[] {
 function buildGoogleTools(
   tools: Record<string, LLMToolDefinition> | undefined,
   webSearch: LLMWebSearchOptions | undefined,
-): any[] | undefined {
+): { googleTools?: any[]; warnings: LLMWarning[] } {
   const googleTools: any[] = [];
+  const functionTools = tools && Object.keys(tools).length > 0 ? tools : undefined;
+  const warnings: LLMWarning[] = [];
 
-  if (tools && Object.keys(tools).length > 0) {
-    googleTools.push({ functionDeclarations: convertToolsToGoogle(tools) });
+  if (functionTools) {
+    googleTools.push({ functionDeclarations: convertToolsToGoogle(functionTools) });
   }
 
-  if (webSearch) {
-    googleTools.push({ googleSearchRetrieval: {} });
+  if (webSearch && !functionTools) {
+    googleTools.push({ googleSearch: {} });
+  } else if (webSearch && functionTools) {
+    logger.warn('Gemini webSearch ignored because Gemini does not allow googleSearch with function calling in the same request');
+    warnings.push({
+      code: 'web_search_ignored',
+      provider: 'google',
+      message: 'webSearch was ignored for provider google because Gemini does not allow Google Search and function calling in the same request.',
+      details: {
+        reason: 'google_builtin_search_conflicts_with_function_calling',
+      },
+    });
   }
 
-  return googleTools.length > 0 ? googleTools : undefined;
+  return {
+    googleTools: googleTools.length > 0 ? googleTools : undefined,
+    warnings,
+  };
+}
+
+function appendWarnings(response: LLMResponse, warnings: LLMWarning[]): LLMResponse {
+  if (warnings.length === 0) {
+    return response;
+  }
+
+  return {
+    ...response,
+    warnings: [...(response.warnings ?? []), ...warnings],
+  };
+}
+
+function emitWarningChunk(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): void {
+  if (warnings.length === 0) {
+    return;
+  }
+
+  onChunk({ warnings });
+}
+
+function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, warnings: LLMWarning[]): {
+  onChunk: (chunk: LLMStreamChunk) => void;
+  emitRemaining: () => void;
+} {
+  let emitted = false;
+
+  return {
+    onChunk(chunk: LLMStreamChunk) {
+      if (!emitted) {
+        emitWarningChunk(onChunk, warnings);
+        emitted = true;
+      }
+
+      onChunk(chunk);
+    },
+    emitRemaining() {
+      if (emitted) {
+        return;
+      }
+
+      emitWarningChunk(onChunk, warnings);
+      emitted = true;
+    },
+  };
 }
 
 export async function streamGoogleResponse(request: GoogleProviderStreamRequest): Promise<LLMResponse> {
-  const googleTools = buildGoogleTools(request.tools, request.webSearch);
+  const resolvedGoogleTools = buildGoogleTools(request.tools, request.webSearch);
   const converted = convertMessagesToGoogle(request.messages);
   const thinkingConfig = buildGoogleThinkingConfig(request.reasoningEffort);
+  const warningChunkEmitter = createWarningChunkEmitter(request.onChunk, resolvedGoogleTools.warnings);
   const generativeModel = request.client.getGenerativeModel({
     model: request.model,
     systemInstruction: converted.systemInstruction || undefined,
-    ...(googleTools ? { tools: googleTools } : {}),
+    ...(resolvedGoogleTools.googleTools ? { tools: resolvedGoogleTools.googleTools } : {}),
     generationConfig: {
       temperature: request.temperature,
       maxOutputTokens: request.maxTokens,
@@ -406,10 +515,10 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
         for (const part of parts) {
           if (typeof part?.text === 'string' && part.text.length > 0) {
             if ((part as { thought?: boolean }).thought === true) {
-              request.onChunk({ reasoningContent: part.text });
+              warningChunkEmitter.onChunk({ reasoningContent: part.text });
             } else {
               fullResponse += part.text;
-              request.onChunk({ content: part.text });
+              warningChunkEmitter.onChunk({ content: part.text });
             }
           }
 
@@ -428,17 +537,19 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
         const chunkText = chunk.text();
         if (chunkText) {
           fullResponse += chunkText;
-          request.onChunk({ content: chunkText });
+          warningChunkEmitter.onChunk({ content: chunkText });
         }
       }
     }
+
+    warningChunkEmitter.emitRemaining();
 
     if (functionCalls.length > 0) {
       const validCalls = functionCalls.filter(
         (functionCall) => functionCall.function?.name && functionCall.function.name.trim() !== '',
       );
 
-      return {
+      return appendWarnings({
         type: 'tool_calls',
         content: fullResponse,
         tool_calls: validCalls,
@@ -447,17 +558,17 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
           content: fullResponse || '',
           tool_calls: validCalls,
         },
-      };
+      }, resolvedGoogleTools.warnings);
     }
 
-    return {
+    return appendWarnings({
       type: 'text',
       content: fullResponse,
       assistantMessage: {
         role: 'assistant',
         content: fullResponse,
       },
-    };
+    }, resolvedGoogleTools.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
       logger.info('Google streaming canceled', {
@@ -472,13 +583,13 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
 }
 
 export async function generateGoogleResponse(request: GoogleProviderRequest): Promise<LLMResponse> {
-  const googleTools = buildGoogleTools(request.tools, request.webSearch);
+  const resolvedGoogleTools = buildGoogleTools(request.tools, request.webSearch);
   const converted = convertMessagesToGoogle(request.messages);
   const thinkingConfig = buildGoogleThinkingConfig(request.reasoningEffort);
   const generativeModel = request.client.getGenerativeModel({
     model: request.model,
     systemInstruction: converted.systemInstruction || undefined,
-    ...(googleTools ? { tools: googleTools } : {}),
+    ...(resolvedGoogleTools.googleTools ? { tools: resolvedGoogleTools.googleTools } : {}),
     generationConfig: {
       temperature: request.temperature,
       maxOutputTokens: request.maxTokens,
@@ -518,7 +629,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
       (functionCall) => functionCall.function?.name && functionCall.function.name.trim() !== '',
     );
 
-    return {
+    return appendWarnings({
       type: 'tool_calls',
       content,
       tool_calls: validCalls,
@@ -527,15 +638,15 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
         content,
         tool_calls: validCalls,
       },
-    };
+    }, resolvedGoogleTools.warnings);
   }
 
-  return {
+  return appendWarnings({
     type: 'text',
     content,
     assistantMessage: {
       role: 'assistant',
       content,
     },
-  };
+  }, resolvedGoogleTools.warnings);
 }

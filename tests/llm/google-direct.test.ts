@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { createGoogleModel, generateGoogleResponse } from '../../src/google-direct.js';
+import { createGoogleModel, generateGoogleResponse, streamGoogleResponse } from '../../src/google-direct.js';
 
 describe('llm-runtime google-direct', () => {
   it('adds Gemini Google Search grounding when web search is enabled', async () => {
@@ -28,7 +28,7 @@ describe('llm-runtime google-direct', () => {
       },
     } as any;
 
-    await generateGoogleResponse({
+    const response = await generateGoogleResponse({
       client: fakeClient,
       model: 'gemini-2.5-flash',
       messages: [
@@ -43,13 +43,13 @@ describe('llm-runtime google-direct', () => {
     expect(capturedOptions).toEqual(expect.objectContaining({
       tools: [
         {
-          googleSearchRetrieval: {},
+          googleSearch: {},
         },
       ],
     }));
   });
 
-  it('merges Gemini search grounding with function declarations', async () => {
+  it('prefers function declarations over Gemini web search when both are requested', async () => {
     let capturedOptions: Record<string, unknown> | undefined;
 
     const fakeModel = {
@@ -68,7 +68,7 @@ describe('llm-runtime google-direct', () => {
       },
     } as any;
 
-    await generateGoogleResponse({
+    const response = await generateGoogleResponse({
       client: fakeClient,
       model: 'gemini-2.5-flash',
       messages: [
@@ -96,14 +96,19 @@ describe('llm-runtime google-direct', () => {
             }),
           ],
         },
-        {
-          googleSearchRetrieval: {},
-        },
       ],
     }));
+
+    expect(JSON.stringify(capturedOptions)).not.toContain('googleSearch');
+    expect(response.warnings).toEqual([
+      expect.objectContaining({
+        code: 'web_search_ignored',
+        provider: 'google',
+      }),
+    ]);
   });
 
-  it('lets createGoogleModel accept structured Gemini tools', () => {
+  it('removes Gemini Google Search from createGoogleModel when function declarations are present', () => {
     let capturedOptions: Record<string, unknown> | undefined;
 
     const fakeClient = {
@@ -135,11 +140,112 @@ describe('llm-runtime google-direct', () => {
             expect.objectContaining({ name: 'lookup' }),
           ],
         },
-        {
-          googleSearchRetrieval: {},
-        },
       ],
     }));
+    expect(JSON.stringify(capturedOptions)).not.toContain('googleSearch');
+  });
+
+  it('emits an early warning chunk when Gemini streaming ignores web search because tools are present', async () => {
+    const fakeModel = {
+      generateContentStream: async () => ({
+        stream: (async function* createStream() {
+          yield {
+            text: () => 'google-streamed',
+            candidates: [],
+          };
+        }()),
+      }),
+    };
+
+    const fakeClient = {
+      getGenerativeModel: () => fakeModel,
+    } as any;
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+    const response = await streamGoogleResponse({
+      client: fakeClient,
+      model: 'gemini-2.5-flash',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web and call a tool',
+        },
+      ],
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Look something up',
+          parameters: { type: 'object', properties: {} },
+        },
+      },
+      webSearch: true,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    });
+
+    expect(chunks).toEqual([
+      {
+        warnings: [
+          expect.objectContaining({
+            code: 'web_search_ignored',
+            provider: 'google',
+          }),
+        ],
+      },
+      { content: 'google-streamed' },
+    ]);
+    expect(response.warnings).toEqual([
+      expect.objectContaining({
+        code: 'web_search_ignored',
+        provider: 'google',
+      }),
+    ]);
+  });
+
+  it('does not emit warning chunks when Gemini streaming aborts before start', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const fakeClient = {
+      getGenerativeModel: () => ({
+        generateContentStream: async () => ({
+          stream: (async function* createStream() {
+            yield {
+              text: () => 'unused',
+              candidates: [],
+            };
+          }()),
+        }),
+      }),
+    } as any;
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+
+    await expect(streamGoogleResponse({
+      client: fakeClient,
+      model: 'gemini-2.5-flash',
+      messages: [
+        {
+          role: 'user',
+          content: 'Search the web and call a tool',
+        },
+      ],
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Look something up',
+          parameters: { type: 'object', properties: {} },
+        },
+      },
+      webSearch: true,
+      abortSignal: abortController.signal,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    })).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(chunks).toEqual([]);
   });
 
   it('dereferences local refs and strips unsupported JSON Schema fields from tool parameters', async () => {

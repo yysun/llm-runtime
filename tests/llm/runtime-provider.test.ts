@@ -187,7 +187,7 @@ describe('llm-runtime runtime provider dispatch', () => {
       },
     });
 
-    const chunks: Array<{ content?: string; reasoningContent?: string }> = [];
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
     const response = await stream({
       provider: 'openai',
       model: 'gpt-5',
@@ -214,6 +214,92 @@ describe('llm-runtime runtime provider dispatch', () => {
       model: 'gpt-5',
       reasoningEffort: 'medium',
     }));
+  });
+
+  it('emits an early warning chunk when stream ignores unsupported webSearch', async () => {
+    const { stream } = await import('../../src/runtime.js');
+
+    mockCreateClientForProvider.mockClear();
+    mockStreamOpenAIResponse.mockClear();
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+    const response = await stream({
+      provider: 'azure',
+      providerConfig: {
+        apiKey: 'test-azure-key',
+        resourceName: 'test-resource',
+        deployment: 'gpt-4.1',
+      },
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Stream with web search on Azure',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    });
+
+    expect(chunks).toEqual([
+      {
+        warnings: [
+          expect.objectContaining({
+            code: 'web_search_ignored',
+            provider: 'azure',
+          }),
+        ],
+      },
+      { content: 'chunk-1' },
+      { reasoningContent: 'reasoning-1' },
+    ]);
+    expect(response.warnings).toEqual([
+      expect.objectContaining({
+        code: 'web_search_ignored',
+        provider: 'azure',
+      }),
+    ]);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'azure',
+      webSearch: undefined,
+    }));
+  });
+
+  it('does not emit warning chunks when runtime streaming fails before provider output starts', async () => {
+    const { stream } = await import('../../src/runtime.js');
+
+    mockCreateClientForProvider.mockClear();
+    mockStreamOpenAIResponse.mockImplementationOnce(async () => {
+      throw new DOMException('OpenAI stream aborted', 'AbortError');
+    });
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+
+    await expect(stream({
+      provider: 'azure',
+      providerConfig: {
+        apiKey: 'test-azure-key',
+        resourceName: 'test-resource',
+        deployment: 'gpt-4.1',
+      },
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Stream with web search on Azure',
+        },
+      ],
+      builtIns: false,
+      webSearch: true,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    })).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(chunks).toEqual([]);
   });
 
   it('rejects per-call request.tools attempts to override reserved built-in names', async () => {
@@ -374,36 +460,80 @@ describe('llm-runtime runtime provider dispatch', () => {
     }));
   });
 
-  it('passes explicit Azure OpenAI web search through to the provider adapter', async () => {
+  it('ignores explicit webSearch for providers without implemented support', async () => {
     const { generate } = await import('../../src/runtime.js');
 
-    await generate({
-      provider: 'azure',
-      providerConfig: {
-        apiKey: 'test-azure-key',
-        resourceName: 'test-resource',
-        deployment: 'gpt-4.1',
-      },
-      model: 'gpt-4.1',
-      messages: [
-        {
-          role: 'user',
-          content: 'Search the web with Azure',
-        },
-      ],
-      builtIns: false,
-      webSearch: true,
-    });
+    mockCreateClientForProvider.mockClear();
+    mockGenerateOpenAIResponse.mockClear();
 
-    expect(mockCreateClientForProvider).toHaveBeenCalledWith('azure', {
-      apiKey: 'test-azure-key',
-      resourceName: 'test-resource',
-      deployment: 'gpt-4.1',
-    });
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'azure',
-      webSearch: {},
-    }));
+    const unsupportedRequests = [
+      {
+        provider: 'azure' as const,
+        providerConfig: {
+          apiKey: 'test-azure-key',
+          resourceName: 'test-resource',
+          deployment: 'gpt-4.1',
+        },
+        model: 'gpt-4.1',
+        message: 'Search the web with Azure',
+      },
+      {
+        provider: 'openai-compatible' as const,
+        providerConfig: {
+          apiKey: 'test-openai-compatible-key',
+          baseUrl: 'https://example.invalid/v1',
+        },
+        model: 'gpt-4.1',
+        message: 'Search the web with a generic OpenAI-compatible endpoint',
+      },
+      {
+        provider: 'xai' as const,
+        providerConfig: {
+          apiKey: 'test-xai-key',
+        },
+        model: 'grok-3-mini',
+        message: 'Search the web with xAI',
+      },
+      {
+        provider: 'ollama' as const,
+        providerConfig: {
+          baseUrl: 'http://localhost:11434/v1',
+        },
+        model: 'llama3.2',
+        message: 'Search the web with Ollama',
+      },
+    ];
+
+    for (const request of unsupportedRequests) {
+      const response = await generate({
+        provider: request.provider,
+        providerConfig: request.providerConfig as any,
+        model: request.model,
+        messages: [
+          {
+            role: 'user',
+            content: request.message,
+          },
+        ],
+        builtIns: false,
+        webSearch: true,
+      });
+
+      expect(response.warnings).toEqual([
+        expect.objectContaining({
+          code: 'web_search_ignored',
+          provider: request.provider,
+        }),
+      ]);
+    }
+
+    expect(mockCreateClientForProvider).toHaveBeenCalledTimes(unsupportedRequests.length);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(unsupportedRequests.length);
+    for (const call of mockGenerateOpenAIResponse.mock.calls) {
+      expect(call[0]).toEqual(expect.objectContaining({
+        webSearch: undefined,
+      }));
+    }
   });
 
   it('treats explicit webSearch false as disabled', async () => {
@@ -459,36 +589,6 @@ describe('llm-runtime runtime provider dispatch', () => {
     }));
   });
 
-  it('forwards explicit webSearch to openai-compatible providers', async () => {
-    const { generate } = await import('../../src/runtime.js');
-
-    await generate({
-      provider: 'openai-compatible',
-      providerConfig: {
-        apiKey: 'test-openai-compatible-key',
-        baseUrl: 'https://example.invalid/v1',
-      },
-      model: 'gpt-4.1',
-      messages: [
-        {
-          role: 'user',
-          content: 'Try web search',
-        },
-      ],
-      builtIns: false,
-      webSearch: {
-        searchContextSize: 'medium',
-      },
-    });
-
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'openai-compatible',
-      webSearch: {
-        searchContextSize: 'medium',
-      },
-    }));
-  });
-
   it('does not enable webSearch implicitly for generic openai-compatible providers', async () => {
     const { generate } = await import('../../src/runtime.js');
 
@@ -511,56 +611,6 @@ describe('llm-runtime runtime provider dispatch', () => {
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'openai-compatible',
       webSearch: undefined,
-    }));
-  });
-
-  it('passes explicit xAI web search through to the provider adapter', async () => {
-    const { generate } = await import('../../src/runtime.js');
-
-    await generate({
-      provider: 'xai',
-      providerConfig: {
-        apiKey: 'test-xai-key',
-      },
-      model: 'grok-3-mini',
-      messages: [
-        {
-          role: 'user',
-          content: 'Search the web with xAI',
-        },
-      ],
-      builtIns: false,
-      webSearch: true,
-    });
-
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'xai',
-      webSearch: {},
-    }));
-  });
-
-  it('forwards explicit webSearch to Ollama through the OpenAI-compatible adapter', async () => {
-    const { generate } = await import('../../src/runtime.js');
-
-    await generate({
-      provider: 'ollama',
-      providerConfig: {
-        baseUrl: 'http://localhost:11434/v1',
-      },
-      model: 'llama3.2',
-      messages: [
-        {
-          role: 'user',
-          content: 'Search the web with Ollama',
-        },
-      ],
-      builtIns: false,
-      webSearch: true,
-    });
-
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledWith(expect.objectContaining({
-      provider: 'ollama',
-      webSearch: {},
     }));
   });
 
@@ -592,7 +642,7 @@ describe('llm-runtime runtime provider dispatch', () => {
   it('dispatches per-call stream requests without constructing a runtime', async () => {
     const { stream } = await import('../../src/runtime.js');
 
-    const chunks: Array<{ content?: string; reasoningContent?: string }> = [];
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
     const response = await stream({
       provider: 'openai',
       providerConfig: {

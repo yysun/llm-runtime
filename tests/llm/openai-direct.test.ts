@@ -106,7 +106,7 @@ describe('llm-runtime openai-direct', () => {
     }));
   });
 
-  it('passes chat-completions web search options through to Azure OpenAI requests', async () => {
+  it('ignores web search for Azure OpenAI chat-completions requests', async () => {
     let capturedRequest: Record<string, unknown> | undefined;
     const fakeClient = {
       chat: {
@@ -127,7 +127,7 @@ describe('llm-runtime openai-direct', () => {
       },
     } as any;
 
-    await generateOpenAIResponse({
+    const response = await generateOpenAIResponse({
       client: fakeClient,
       provider: 'azure',
       model: 'gpt-4.1',
@@ -142,11 +142,13 @@ describe('llm-runtime openai-direct', () => {
       },
     });
 
-    expect(capturedRequest).toEqual(expect.objectContaining({
-      web_search_options: {
-        search_context_size: 'medium',
-      },
-    }));
+    expect(capturedRequest).not.toHaveProperty('web_search_options');
+    expect(response.warnings).toEqual([
+      expect.objectContaining({
+        code: 'web_search_ignored',
+        provider: 'azure',
+      }),
+    ]);
   });
 
   it('normalizes non-streaming tool calls into package-native responses', async () => {
@@ -401,5 +403,101 @@ describe('llm-runtime openai-direct', () => {
       reasoning_effort: 'high',
     }));
     expect(capturedRequest).not.toHaveProperty('reasoning');
+  });
+
+  it('emits an early warning chunk when streaming ignores web search for Azure', async () => {
+    async function* createStream() {
+      yield {
+        choices: [
+          {
+            delta: {
+              content: 'hello',
+            },
+          },
+        ],
+      };
+    }
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async () => createStream(),
+        },
+      },
+    } as any;
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+    const response = await streamOpenAIResponse({
+      client: fakeClient,
+      provider: 'azure',
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Stream and search the web',
+        },
+      ],
+      webSearch: true,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    });
+
+    expect(chunks).toEqual([
+      {
+        warnings: [
+          expect.objectContaining({
+            code: 'web_search_ignored',
+            provider: 'azure',
+          }),
+        ],
+      },
+      { content: 'hello' },
+    ]);
+    expect(response.warnings).toEqual([
+      expect.objectContaining({
+        code: 'web_search_ignored',
+        provider: 'azure',
+      }),
+    ]);
+  });
+
+  it('does not emit warning chunks when OpenAI-family streaming fails before the stream starts', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (_request: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+            if (options?.signal?.aborted) {
+              throw new DOMException('OpenAI stream aborted', 'AbortError');
+            }
+            throw new Error('Expected an aborted signal');
+          },
+        },
+      },
+    } as any;
+
+    const chunks: Array<{ content?: string; reasoningContent?: string; warnings?: unknown[] }> = [];
+
+    await expect(streamOpenAIResponse({
+      client: fakeClient,
+      provider: 'azure',
+      model: 'gpt-4.1',
+      messages: [
+        {
+          role: 'user',
+          content: 'Stream and search the web',
+        },
+      ],
+      webSearch: true,
+      abortSignal: abortController.signal,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
+    })).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(chunks).toEqual([]);
   });
 });

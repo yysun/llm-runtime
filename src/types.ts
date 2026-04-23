@@ -100,17 +100,26 @@ export interface LLMUsage {
   totalTokens?: number;
 }
 
+export interface LLMWarning {
+  code: 'web_search_ignored';
+  message: string;
+  provider?: LLMProviderName;
+  details?: Record<string, unknown>;
+}
+
 export interface LLMResponse {
   type: 'text' | 'tool_calls';
   content: string;
   tool_calls?: LLMToolCall[];
   assistantMessage: LLMChatMessage;
   usage?: LLMUsage;
+  warnings?: LLMWarning[];
 }
 
 export interface LLMStreamChunk {
   content?: string;
   reasoningContent?: string;
+  warnings?: LLMWarning[];
 }
 
 export interface LLMProviderConfigStore {
