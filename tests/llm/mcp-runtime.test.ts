@@ -23,7 +23,7 @@ import {
   disposeLLMEnvironment,
   disposeLLMRuntimeCaches,
   resolveToolsAsync,
-} from '../../src/runtime.js';
+} from '../../src/index.js';
 
 const {
   mockClientConnect,

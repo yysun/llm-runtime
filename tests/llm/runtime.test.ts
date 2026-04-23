@@ -26,10 +26,10 @@ import {
   disposeLLMEnvironment,
   intersectBuiltInToolSelections,
   parseMCPConfigJson,
+  resolveTools,
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
 } from '../../src/index.js';
-import { resolveTools } from '../../src/runtime.js';
 
 function createMockSkillFileSystem(files: Record<string, string>): SkillFileSystemAdapter {
   const normalizedFiles = new Map(

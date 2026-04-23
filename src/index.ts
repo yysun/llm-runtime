@@ -36,6 +36,8 @@ export {
   disposeLLMEnvironment,
   disposeLLMRuntimeCaches,
   generate,
+  resolveTools,
+  resolveToolsAsync,
   stream,
 } from './runtime.js';
 export * from './openai-direct.js';

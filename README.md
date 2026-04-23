@@ -31,6 +31,8 @@ The published package targets Node.js 18 and later and exposes a single root ent
 - `disposeLLMEnvironment(...)`
 - `disposeLLMRuntimeCaches()`
 - `generate(...)`
+- `resolveTools(...)`
+- `resolveToolsAsync(...)`
 - `stream(...)`
 - `respondWithTools(...)`
 - `runTurnLoop(...)`
