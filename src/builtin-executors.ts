@@ -495,6 +495,7 @@ export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<
     shell_cmd: (args, context) => createShellExecutor(options, args, context),
     load_skill: (args) => createLoadSkillExecutor(options, args),
     human_intervention_request: (args, context) => createHitlExecutor(options, args, context),
+    ask_user_input: (args, context) => createHitlExecutor(options, args, context),
     web_fetch: (args) => createWebFetchExecutor(options, args),
     read_file: (args, context) => createReadFileExecutor(options, args, context),
     write_file: (args, context) => createWriteFileExecutor(options, args, context),

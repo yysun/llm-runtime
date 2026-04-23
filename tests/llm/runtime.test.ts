@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createLLMEnvironment,
   disposeLLMEnvironment,
+  intersectBuiltInToolSelections,
   parseMCPConfigJson,
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
@@ -281,6 +282,7 @@ describe('llm-runtime runtime', () => {
 
   it('includes internal built-ins by default, including HITL pending requests', () => {
     expect(Object.keys(resolveTools()).sort()).toEqual([
+      'ask_user_input',
       'grep',
       'human_intervention_request',
       'list_files',
@@ -310,6 +312,46 @@ describe('llm-runtime runtime', () => {
     ].sort());
   });
 
+  it('treats ask_user_input as a synchronized alias of human_intervention_request', () => {
+    const resolvedFromCanonical = resolveTools({
+      builtIns: {
+        human_intervention_request: true,
+      },
+    });
+
+    expect(Object.keys(resolvedFromCanonical).sort()).toEqual([
+      'ask_user_input',
+      'human_intervention_request',
+    ]);
+
+    const resolvedFromAlias = resolveTools({
+      builtIns: {
+        ask_user_input: true,
+      },
+    });
+
+    expect(Object.keys(resolvedFromAlias).sort()).toEqual([
+      'ask_user_input',
+      'human_intervention_request',
+    ]);
+  });
+
+  it('keeps the ask_user_input alias synchronized in built-in intersection helpers', () => {
+    expect(intersectBuiltInToolSelections(true, {
+      ask_user_input: true,
+    })).toMatchObject({
+      ask_user_input: true,
+      human_intervention_request: true,
+    });
+
+    expect(intersectBuiltInToolSelections(true, {
+      human_intervention_request: true,
+    })).toMatchObject({
+      ask_user_input: true,
+      human_intervention_request: true,
+    });
+  });
+
   it('returns a pending HITL request artifact without requiring an adapter', async () => {
     const tools = resolveTools();
     const result = await tools.human_intervention_request?.execute?.({
@@ -326,6 +368,20 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain('"defaultOption": "Yes"');
   });
 
+  it('lets ask_user_input execute the same HITL pending flow', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_input?.execute?.({
+      question: 'Continue?',
+      options: ['Yes', 'No'],
+    }, {
+      toolCallId: 'hitl-call-alias-1',
+    });
+
+    expect(result).toContain('"status": "pending"');
+    expect(result).toContain('"requestId": "hitl-call-alias-1"');
+    expect(result).toContain('"question": "Continue?"');
+  });
+
   it('rejects attempts to override reserved built-in tool names', () => {
     expect(() => resolveTools({
       extraTools: [
@@ -337,6 +393,18 @@ describe('llm-runtime runtime', () => {
       ],
     })).toThrow(
       'Tool name "read_file" is reserved by llm-runtime built-ins.',
+    );
+
+    expect(() => resolveTools({
+      extraTools: [
+        {
+          name: 'ask_user_input',
+          description: 'override',
+          parameters: { type: 'object' },
+        },
+      ],
+    })).toThrow(
+      'Tool name "ask_user_input" is reserved by llm-runtime built-ins.',
     );
   });
 
@@ -366,6 +434,22 @@ describe('llm-runtime runtime', () => {
     expect(failureResult).toContain('"path": "question"');
     expect(failureResult).toContain('"expectedType": "string"');
     expect(failureResult).toContain('"receivedType": "number"');
+  });
+
+  it('normalizes ask_user_input parameter aliases before execution', async () => {
+    const tools = resolveTools();
+
+    const successResult = await tools.ask_user_input?.execute?.({
+      prompt: 'Continue?',
+      options: 'Yes',
+      default_option: 'Yes',
+    } as any, {
+      toolCallId: 'hitl-call-3',
+    } as any);
+
+    expect(successResult).toContain('"status": "pending"');
+    expect(successResult).toContain('"question": "Continue?"');
+    expect(successResult).toContain('"defaultOption": "Yes"');
   });
 
   it('returns a durable validation artifact for missing required parameters', async () => {

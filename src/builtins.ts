@@ -31,11 +31,17 @@ export const BUILT_IN_TOOL_NAMES = [
   'shell_cmd',
   'load_skill',
   'human_intervention_request',
+  'ask_user_input',
   'web_fetch',
   'read_file',
   'write_file',
   'list_files',
   'grep',
+] as const satisfies readonly BuiltInToolName[];
+
+export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
+  'human_intervention_request',
+  'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
@@ -101,7 +107,40 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   human_intervention_request: {
     description:
-      'Ask a human a question and offer choices; returns after a single option selection.',
+      'Legacy alias of `ask_user_input`. Ask a human a question and offer choices; returns after a single option selection.',
+    parameters: {
+      type: 'object',
+      properties: {
+        question: {
+          type: 'string',
+          description: 'Required question shown to the human.',
+        },
+        options: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Required list of selectable options.',
+        },
+        timeoutMs: {
+          type: 'number',
+          description: 'Optional timeout in milliseconds.',
+        },
+        defaultOption: {
+          type: 'string',
+          description: 'Optional default option label.',
+        },
+        metadata: {
+          type: 'object',
+          description: 'Optional metadata attached to the request.',
+          additionalProperties: true,
+        },
+      },
+      required: ['question', 'options'],
+      additionalProperties: false,
+    },
+  },
+  ask_user_input: {
+    description:
+      'Preferred built-in name for asking a human a question and offering choices; returns after a single option selection. Legacy alias: `human_intervention_request`.',
     parameters: {
       type: 'object',
       properties: {
@@ -292,7 +331,18 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
 
 function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolToggleMap {
   const resolved = {} as BuiltInToolToggleMap;
+  const humanInterventionEnabled = selection === undefined || selection === true
+    ? true
+    : selection === false
+      ? false
+      : selection.human_intervention_request === true || selection.ask_user_input === true;
+
   for (const toolName of BUILT_IN_TOOL_NAMES) {
+    if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolName)) {
+      resolved[toolName] = humanInterventionEnabled;
+      continue;
+    }
+
     resolved[toolName] = selection === undefined || selection === true
       ? true
       : selection === false
@@ -322,8 +372,10 @@ export function intersectBuiltInToolSelections(
     return Object.fromEntries(BUILT_IN_TOOL_NAMES.map((toolName) => [toolName, false])) as Record<BuiltInToolName, boolean>;
   }
 
+  const narrowingMap = toToggleMap(narrowing);
+
   return Object.fromEntries(
-    BUILT_IN_TOOL_NAMES.map((toolName) => [toolName, baselineMap[toolName] && narrowing[toolName] === true]),
+    BUILT_IN_TOOL_NAMES.map((toolName) => [toolName, baselineMap[toolName] && narrowingMap[toolName]]),
   ) as Record<BuiltInToolName, boolean>;
 }
 

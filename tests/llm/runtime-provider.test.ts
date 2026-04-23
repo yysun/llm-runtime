@@ -284,6 +284,72 @@ describe('llm-runtime runtime provider dispatch', () => {
     }));
   });
 
+  it('injects human_intervention_request guidance when the built-in is available', async () => {
+    const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'I may need clarification.',
+        },
+      ],
+      builtIns: {
+        human_intervention_request: true,
+      },
+    });
+
+    const request = mockGenerateOpenAIResponse.mock.calls.at(-1)?.[0];
+    expect(request?.messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
+      }),
+      {
+        role: 'user',
+        content: 'I may need clarification.',
+      },
+    ]);
+  });
+
+  it('merges human_intervention_request guidance into an existing system message', async () => {
+    const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, stream } = await import('../../src/runtime.js');
+
+    await stream({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'system',
+          content: 'Follow the repo conventions.',
+        },
+        {
+          role: 'user',
+          content: 'Proceed carefully.',
+        },
+      ],
+      builtIns: {
+        human_intervention_request: true,
+      },
+    });
+
+    const request = mockStreamOpenAIResponse.mock.calls.at(-1)?.[0];
+    expect(request?.messages).toHaveLength(2);
+    expect(request?.messages?.[0]).toEqual(expect.objectContaining({
+      role: 'system',
+      content: expect.stringContaining('Follow the repo conventions.'),
+    }));
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
+  });
+
   it('passes explicit OpenAI web search through to the provider adapter', async () => {
     const { generate } = await import('../../src/runtime.js');
 

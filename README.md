@@ -89,6 +89,7 @@ The package currently reserves these built-in names:
 
 - `shell_cmd`
 - `load_skill`
+- `ask_user_input`
 - `human_intervention_request`
 - `web_fetch`
 - `read_file`
@@ -97,6 +98,16 @@ The package currently reserves these built-in names:
 - `grep`
 
 Built-ins are package-owned and reserved. Application code can disable or narrow them, but should not redefine them.
+
+`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` remains supported as a legacy alias for backward compatibility. Enabling either name enables both built-ins so prompts and skills can use whichever name they already expect.
+
+For new prompts, skills, and harness code, prefer `ask_user_input`.
+
+When the built-in human-intervention tool is enabled, the runtime also injects a small system-level hint telling the model to prefer that tool for clarification, approval, and other human-in-the-loop decisions. This helps generic skills that say things like "ask the user" or "use an ask-question tool" map onto the built-in HITL tool without each skill naming it explicitly.
+
+`ask_user_input` should usually be enabled for interactive harnesses that can pause, surface a question to a human, and then resume with the selected answer. It should usually be disabled for unattended batch runs, deterministic tests, or autonomous workflows that are not allowed to wait for human input.
+
+Deprecation note: `human_intervention_request` is kept for compatibility with existing clients, but new integrations should treat it as a legacy alias and prefer `ask_user_input` instead.
 
 ### Extra Tools
 

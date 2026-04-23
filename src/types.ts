@@ -37,6 +37,7 @@ export type BuiltInToolName =
   | 'shell_cmd'
   | 'load_skill'
   | 'human_intervention_request'
+  | 'ask_user_input'
   | 'web_fetch'
   | 'read_file'
   | 'write_file'

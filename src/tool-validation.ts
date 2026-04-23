@@ -93,7 +93,7 @@ function normalizeKnownParameterAliases(toolName: string, args: Record<string, u
     corrections.push('.includePattern -> includePattern');
   }
 
-  if (toolName === 'human_intervention_request') {
+  if (toolName === 'human_intervention_request' || toolName === 'ask_user_input') {
     if (normalizedArgs.question === undefined && normalizedArgs.prompt !== undefined) {
       normalizedArgs.question = normalizedArgs.prompt;
       delete normalizedArgs.prompt;

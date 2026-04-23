@@ -20,6 +20,7 @@
 
 import * as path from 'path';
 import {
+  HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
   createBuiltInToolDefinitions,
 } from './builtins.js';
@@ -44,6 +45,7 @@ import { createSkillRegistry } from './skills.js';
 import { createToolRegistry } from './tools.js';
 import type {
   BuiltInToolSelection,
+  LLMChatMessage,
   LLMEnvironment,
   LLMEnvironmentOptions,
   LLMGenerateOptions,
@@ -73,6 +75,11 @@ const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
   'openai-compatible',
   'ollama',
 ]);
+export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
+  'When you need clarification, missing user-specific input, explicit approval, or another human decision, prefer the `ask_user_input` tool instead of asking only in plain text. The legacy alias `human_intervention_request` is equivalent when present.',
+  'Treat generic instructions such as "ask the user", "ask a question", "request approval", "ask_user_input", "human_intervention_request", "human-in-the-loop", or "HITL" as referring to this built-in human-intervention tool when it is available.',
+  'Do not guess human-provided answers when this tool is available.',
+].join(' ');
 
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
@@ -309,6 +316,44 @@ function resolveWebSearch(request: LLMGenerateOptions | LLMStreamOptions): LLMWe
   return undefined;
 }
 
+function injectToolGuidance(
+  messages: LLMChatMessage[],
+  tools: Record<string, LLMToolDefinition>,
+): LLMChatMessage[] {
+  const hasHumanInterventionTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.some((toolName) => Boolean(tools[toolName]));
+  if (!hasHumanInterventionTool) {
+    return messages;
+  }
+
+  const guidanceText = DEFAULT_HUMAN_INTERVENTION_TOOL_HINT;
+
+  const systemMessageIndex = messages.findIndex((message) => message.role === 'system');
+  if (systemMessageIndex >= 0) {
+    const systemMessage = messages[systemMessageIndex];
+    const existingContent = String(systemMessage?.content ?? '');
+    if (existingContent.includes(guidanceText)) {
+      return messages;
+    }
+
+    const nextMessages = messages.slice();
+    nextMessages[systemMessageIndex] = {
+      ...systemMessage,
+      content: existingContent.trim()
+        ? `${existingContent}\n\n${guidanceText}`
+        : guidanceText,
+    };
+    return nextMessages;
+  }
+
+  return [
+    {
+      role: 'system',
+      content: guidanceText,
+    },
+    ...messages,
+  ];
+}
+
 function buildResolvedToolSet(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
@@ -406,6 +451,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
     extraTools: request.extraTools,
     tools: request.tools,
   });
+  const messages = injectToolGuidance(request.messages, tools);
   const reasoningEffort = resolveReasoningEffort(environment, request);
   const webSearch = resolveWebSearch(request);
 
@@ -422,7 +468,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
         ),
         provider: request.provider,
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
@@ -434,7 +480,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
       return await generateAnthropicResponse({
         client: createAnthropicClient(environment.providerConfigStore.getProviderConfig('anthropic')),
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
@@ -445,7 +491,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
       return await generateGoogleResponse({
         client: createGoogleClient(environment.providerConfigStore.getProviderConfig('google')),
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
@@ -473,6 +519,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
     extraTools: request.extraTools,
     tools: request.tools,
   });
+  const messages = injectToolGuidance(request.messages, tools);
   const reasoningEffort = resolveReasoningEffort(environment, request);
   const webSearch = resolveWebSearch(request);
   const onChunk = request.onChunk ?? (() => undefined);
@@ -490,7 +537,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
         ),
         provider: request.provider,
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
@@ -503,7 +550,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
       return await streamAnthropicResponse({
         client: createAnthropicClient(environment.providerConfigStore.getProviderConfig('anthropic')),
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
@@ -515,7 +562,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
       return await streamGoogleResponse({
         client: createGoogleClient(environment.providerConfigStore.getProviderConfig('google')),
         model: request.model,
-        messages: request.messages,
+        messages,
         tools,
         temperature: request.temperature,
         maxTokens: request.maxTokens,
