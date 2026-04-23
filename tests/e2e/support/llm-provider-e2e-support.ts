@@ -92,6 +92,12 @@ function requireNonEmpty(value: string | undefined, message: string): string {
   return normalized;
 }
 
+function toDefinedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  );
+}
+
 export function parseProviderE2EFlags(argv: string[]): ProviderE2EFlags {
   const flags = new Set(argv.slice(2));
   return {
@@ -173,7 +179,7 @@ export function getAzureE2EEnvHelp(): string {
 }
 
 function buildProviderE2EScenarios(): ProviderE2EScenario[] {
-  return [
+  const scenarios: ProviderE2EScenario[] = [
     {
       name: 'Generate: built-ins + MCP + skills + reasoning',
       mode: 'generate',
@@ -285,7 +291,7 @@ function buildProviderE2EScenarios(): ProviderE2EScenario[] {
         },
       ],
       expectedExactLines: ['PERMISSION_RESULT=blocked'],
-      assertResult: async (_result, context) => {
+      assertResult: async (_result: ProviderE2EScenarioResult, context: ProviderE2EScenarioContext) => {
         const blockedPath = path.join(context.workingDirectory, 'notes', 'blocked-write.txt');
         await access(blockedPath)
           .then(() => {
@@ -301,7 +307,9 @@ function buildProviderE2EScenarios(): ProviderE2EScenario[] {
           });
       },
     },
-  ].map((scenario) => ({
+  ];
+
+  return scenarios.map((scenario) => ({
     ...scenario,
     messages: scenario.messages.map((message) => ({ ...message })),
   }));
@@ -477,7 +485,7 @@ export async function runProviderE2ESuite(options: {
           command: process.execPath,
           args: [path.resolve('tests/e2e/support/llm-showcase-mcp-server.mjs')],
           transport: 'stdio',
-          env: { ...process.env },
+          env: toDefinedEnv(process.env),
         },
       },
     },
