@@ -43,6 +43,7 @@ export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
   'human_intervention_request',
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
+const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 
@@ -338,7 +339,7 @@ function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolTo
       : selection.human_intervention_request === true || selection.ask_user_input === true;
 
   for (const toolName of BUILT_IN_TOOL_NAMES) {
-    if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolName)) {
+    if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {
       resolved[toolName] = humanInterventionEnabled;
       continue;
     }
