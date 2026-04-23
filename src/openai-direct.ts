@@ -70,9 +70,9 @@ function normalizeReasoningEffort(value: ReasoningEffort | undefined): 'default'
   return 'default';
 }
 
-function getReasoningConfig(reasoningEffort: ReasoningEffort | undefined): { effort: OpenAIReasoningEffort } | undefined {
+function getChatCompletionsReasoningEffort(reasoningEffort: ReasoningEffort | undefined): OpenAIReasoningEffort | undefined {
   const effort = normalizeReasoningEffort(reasoningEffort);
-  return effort === 'default' ? undefined : { effort };
+  return effort === 'default' ? undefined : effort;
 }
 
 function extractReasoningText(value: unknown): string {
@@ -396,16 +396,16 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
     ? convertToolsToOpenAI(request.tools)
     : undefined;
-  const reasoning = getReasoningConfig(request.reasoningEffort);
+  const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
   const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
 
-  const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & { reasoning?: { effort: OpenAIReasoningEffort } } = {
+  const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
     model: request.model,
     messages: openaiMessages,
     stream: true,
     temperature: request.temperature,
     max_completion_tokens: request.maxTokens,
-    ...(reasoning ? { reasoning } : {}),
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
     ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
   };
@@ -529,15 +529,15 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
     ? convertToolsToOpenAI(request.tools)
     : undefined;
-  const reasoning = getReasoningConfig(request.reasoningEffort);
+  const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
   const webSearchOptions = buildOpenAIWebSearchOptions(request.webSearch);
 
-  const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming & { reasoning?: { effort: OpenAIReasoningEffort } } = {
+  const requestParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
     model: request.model,
     messages: openaiMessages,
     temperature: request.temperature,
     max_completion_tokens: request.maxTokens,
-    ...(reasoning ? { reasoning } : {}),
+    ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
     ...(webSearchOptions ? { web_search_options: webSearchOptions } : {}),
   };

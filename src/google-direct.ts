@@ -32,6 +32,20 @@ import { createPackageLogger, generateId } from './provider-utils.js';
 const logger = createPackageLogger();
 type GoogleReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 
+const GOOGLE_SCHEMA_ALLOWED_KEYS = new Set([
+  'type',
+  'format',
+  'description',
+  'nullable',
+  'enum',
+  'maxItems',
+  'minItems',
+  'properties',
+  'required',
+  'propertyOrdering',
+  'items',
+]);
+
 export type GoogleProviderRequest = {
   client: GoogleGenerativeAI;
   model: string;
@@ -84,20 +98,171 @@ function isAbortLikeError(error: unknown): boolean {
   return normalized.includes('abort') || normalized.includes('canceled') || normalized.includes('cancelled');
 }
 
-function stripUnsupportedGoogleSchemaFields(schema: unknown): unknown {
+function resolveLocalSchemaRef(rootSchema: unknown, ref: string): unknown {
+  if (!ref.startsWith('#/')) {
+    return undefined;
+  }
+
+  const path = ref
+    .slice(2)
+    .split('/')
+    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+
+  let current: unknown = rootSchema;
+  for (const segment of path) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+
+  return current;
+}
+
+function normalizeGoogleSchemaType(
+  value: unknown,
+): { type?: string; nullable?: boolean } {
+  if (typeof value === 'string') {
+    return { type: value };
+  }
+
+  if (!Array.isArray(value)) {
+    return {};
+  }
+
+  const types = value.filter((entry): entry is string => typeof entry === 'string');
+  const nonNullTypes = types.filter((entry) => entry !== 'null');
+  if (nonNullTypes.length === 1) {
+    return {
+      type: nonNullTypes[0],
+      ...(types.includes('null') ? { nullable: true } : {}),
+    };
+  }
+
+  return {
+    type: nonNullTypes[0] ?? 'string',
+    ...(types.includes('null') ? { nullable: true } : {}),
+  };
+}
+
+function buildGoogleSchemaFallback(candidate: Record<string, unknown>, rootSchema: unknown, seenRefs: Set<string>): Record<string, unknown> {
+  const description = typeof candidate.description === 'string' && candidate.description.trim()
+    ? candidate.description
+    : undefined;
+
+  if (candidate.properties && typeof candidate.properties === 'object' && !Array.isArray(candidate.properties)) {
+    const normalizedProperties = Object.fromEntries(
+      Object.entries(candidate.properties as Record<string, unknown>).map(([key, value]) => [
+        key,
+        stripUnsupportedGoogleSchemaFields(value, rootSchema, seenRefs),
+      ]),
+    );
+
+    return {
+      type: 'object',
+      ...(description ? { description } : {}),
+      properties: normalizedProperties,
+      ...(Array.isArray(candidate.required) ? { required: [...candidate.required] } : {}),
+    };
+  }
+
+  if (candidate.items !== undefined) {
+    return {
+      type: 'array',
+      ...(description ? { description } : {}),
+      items: stripUnsupportedGoogleSchemaFields(candidate.items, rootSchema, seenRefs),
+    };
+  }
+
+  if (Array.isArray(candidate.enum)) {
+    return {
+      type: typeof candidate.enum[0] === 'number' ? 'number' : 'string',
+      ...(description ? { description } : {}),
+      enum: candidate.enum,
+    };
+  }
+
+  return {
+    type: 'string',
+    ...(description ? { description } : {}),
+  };
+}
+
+function stripUnsupportedGoogleSchemaFields(schema: unknown, rootSchema: unknown = schema, seenRefs = new Set<string>()): unknown {
   if (Array.isArray(schema)) {
-    return schema.map((item) => stripUnsupportedGoogleSchemaFields(item));
+    return schema.map((item) => stripUnsupportedGoogleSchemaFields(item, rootSchema, seenRefs));
   }
 
   if (!schema || typeof schema !== 'object') {
     return schema;
   }
 
-  const normalizedEntries = Object.entries(schema as Record<string, unknown>)
-    .filter(([key]) => key !== 'additionalProperties')
-    .map(([key, value]) => [key, stripUnsupportedGoogleSchemaFields(value)]);
+  const candidate = schema as Record<string, unknown>;
+  const ref = typeof candidate.$ref === 'string' ? candidate.$ref : undefined;
+  if (ref) {
+    if (seenRefs.has(ref)) {
+      return { type: 'string' };
+    }
 
-  return Object.fromEntries(normalizedEntries);
+    const resolved = resolveLocalSchemaRef(rootSchema, ref);
+    const merged = resolved && typeof resolved === 'object' && !Array.isArray(resolved)
+      ? {
+        ...(resolved as Record<string, unknown>),
+        ...Object.fromEntries(Object.entries(candidate).filter(([key]) => key !== '$ref')),
+      }
+      : Object.fromEntries(Object.entries(candidate).filter(([key]) => key !== '$ref'));
+
+    return stripUnsupportedGoogleSchemaFields(
+      Object.keys(merged).length > 0 ? merged : { type: 'string' },
+      rootSchema,
+      new Set([...seenRefs, ref]),
+    );
+  }
+
+  const normalizedType = normalizeGoogleSchemaType(candidate.type);
+  const normalizedEntries = Object.entries(candidate)
+    .filter(([key]) => GOOGLE_SCHEMA_ALLOWED_KEYS.has(key))
+    .map(([key, value]) => {
+      if (key === 'properties' && value && typeof value === 'object' && !Array.isArray(value)) {
+        return [
+          key,
+          Object.fromEntries(
+            Object.entries(value as Record<string, unknown>).map(([propertyName, propertySchema]) => [
+              propertyName,
+              stripUnsupportedGoogleSchemaFields(propertySchema, rootSchema, seenRefs),
+            ]),
+          ),
+        ];
+      }
+
+      if (key === 'items') {
+        return [key, stripUnsupportedGoogleSchemaFields(value, rootSchema, seenRefs)];
+      }
+
+      return [key, value];
+    });
+
+  const normalized = Object.fromEntries(normalizedEntries);
+  if (normalizedType.type) {
+    normalized.type = normalizedType.type;
+  }
+  if (normalizedType.nullable === true) {
+    normalized.nullable = true;
+  }
+
+  if (!normalized.type) {
+    if (normalized.properties && typeof normalized.properties === 'object' && !Array.isArray(normalized.properties)) {
+      normalized.type = 'object';
+    } else if (normalized.items !== undefined) {
+      normalized.type = 'array';
+    }
+  }
+
+  if (Object.keys(normalized).length === 0) {
+    return buildGoogleSchemaFallback(candidate, rootSchema, seenRefs);
+  }
+
+  return normalized;
 }
 
 export function createGoogleClient(config: GoogleConfig): GoogleGenerativeAI {

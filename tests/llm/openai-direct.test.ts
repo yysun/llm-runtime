@@ -23,6 +23,46 @@ import {
 } from '../../src/openai-direct.js';
 
 describe('llm-runtime openai-direct', () => {
+  it('serializes reasoning effort using the chat-completions reasoning_effort field', async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            return {
+              choices: [
+                {
+                  message: {
+                    content: 'reasoning enabled',
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as any;
+
+    await generateOpenAIResponse({
+      client: fakeClient,
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Think carefully',
+        },
+      ],
+      reasoningEffort: 'medium',
+    });
+
+    expect(capturedRequest).toEqual(expect.objectContaining({
+      reasoning_effort: 'medium',
+    }));
+    expect(capturedRequest).not.toHaveProperty('reasoning');
+  });
+
   it('passes chat-completions web search options through to OpenAI', async () => {
     let capturedRequest: Record<string, unknown> | undefined;
     const fakeClient = {
@@ -315,5 +355,51 @@ describe('llm-runtime openai-direct', () => {
         ],
       },
     });
+  });
+
+  it('serializes streaming reasoning effort using reasoning_effort', async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+
+    async function* createStream() {
+      yield {
+        choices: [
+          {
+            delta: {
+              content: 'hello',
+            },
+          },
+        ],
+      };
+    }
+
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            return createStream();
+          },
+        },
+      },
+    } as any;
+
+    await streamOpenAIResponse({
+      client: fakeClient,
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Stream a result',
+        },
+      ],
+      reasoningEffort: 'high',
+      onChunk: () => undefined,
+    });
+
+    expect(capturedRequest).toEqual(expect.objectContaining({
+      reasoning_effort: 'high',
+    }));
+    expect(capturedRequest).not.toHaveProperty('reasoning');
   });
 });

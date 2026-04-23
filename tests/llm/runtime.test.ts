@@ -122,6 +122,52 @@ describe('llm-runtime runtime', () => {
     });
   });
 
+  it('rejects stdio MCP servers without a command during config parsing', () => {
+    expect(() => parseMCPConfigJson(JSON.stringify({
+      servers: {
+        gemini: {
+          command: '   ',
+        },
+      },
+    }))).toThrow('MCP server "gemini" with stdio transport requires a non-empty command');
+  });
+
+  it('rejects remote MCP transports without a url during config parsing', () => {
+    expect(() => parseMCPConfigJson(JSON.stringify({
+      servers: {
+        remote: {
+          transport: 'streamable-http',
+          url: '   ',
+        },
+      },
+    }))).toThrow('MCP server "remote" with streamable-http transport requires a non-empty url');
+  });
+
+  it('infers streamable-http transport for url-based MCP servers', () => {
+    const config = parseMCPConfigJson(JSON.stringify({
+      servers: {
+        stitch: {
+          url: 'https://stitch.googleapis.com/mcp',
+          headers: {
+            'X-Goog-Api-Key': 'test-key',
+          },
+        },
+      },
+    }));
+
+    expect(config).toEqual({
+      servers: {
+        stitch: {
+          transport: 'streamable-http',
+          url: 'https://stitch.googleapis.com/mcp',
+          headers: {
+            'X-Goog-Api-Key': 'test-key',
+          },
+        },
+      },
+    });
+  });
+
   it('applies later skill roots as higher precedence for duplicate skill ids', async () => {
     const fileSystem = createMockSkillFileSystem({
       '/global/find/SKILL.md': '---\nname: find-skills\ndescription: global description\n---\n# Global',

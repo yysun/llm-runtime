@@ -228,4 +228,60 @@ describe('llm-runtime MCP runtime', () => {
     expect(mockClientConnect).toHaveBeenCalledTimes(2);
     expect(mockClientListTools).toHaveBeenCalledTimes(2);
   });
+
+  it('fails fast before spawning when a stdio MCP server command is empty', async () => {
+    await expect(resolveToolsAsync({
+      mcpConfig: {
+        servers: {
+          gemini: {
+            command: '   ',
+            transport: 'stdio',
+          },
+        },
+      },
+      builtIns: false,
+    })).rejects.toThrow('MCP server "gemini" with stdio transport requires a non-empty command');
+
+    expect(mockClientConnect).not.toHaveBeenCalled();
+    expect(mockClientListTools).not.toHaveBeenCalled();
+  });
+
+  it('uses streamable-http when a server provides a url without an explicit transport', async () => {
+    listToolsPayload.push({
+      name: 'lookup',
+      description: 'Lookup tool',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    });
+
+    const tools = await resolveToolsAsync({
+      mcpConfig: {
+        servers: {
+          stitch: {
+            url: 'https://stitch.googleapis.com/mcp',
+            headers: {
+              'X-Goog-Api-Key': 'test-key',
+            },
+          },
+        },
+      },
+      builtIns: false,
+    });
+
+    expect(Object.keys(tools)).toEqual(['stitch_lookup']);
+    expect(mockClientConnect).toHaveBeenCalledTimes(1);
+    expect(mockClientConnect.mock.calls[0]?.[0]).toMatchObject({
+      url: new URL('https://stitch.googleapis.com/mcp'),
+      options: {
+        requestInit: {
+          headers: {
+            'X-Goog-Api-Key': 'test-key',
+          },
+        },
+      },
+    });
+    expect(mockClientListTools).toHaveBeenCalledTimes(1);
+  });
 });

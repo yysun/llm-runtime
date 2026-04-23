@@ -50,12 +50,22 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return Object.values(value).every((entry) => typeof entry === 'string');
 }
 
+function resolveTransport(candidate: { transport?: unknown; url?: string }): 'stdio' | 'sse' | 'streamable-http' {
+  if (candidate.transport === 'stdio' || candidate.transport === 'sse' || candidate.transport === 'streamable-http') {
+    return candidate.transport;
+  }
+
+  return candidate.url ? 'streamable-http' : 'stdio';
+}
+
 function normalizeServerDefinition(name: string, value: unknown): MCPRegistryEntry {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`MCP server "${name}" must be an object`);
   }
 
   const candidate = value as Record<string, unknown>;
+  const command = typeof candidate.command === 'string' ? candidate.command.trim() : '';
+  const url = typeof candidate.url === 'string' ? candidate.url.trim() : '';
   const headers = candidate.headers;
   if (headers !== undefined && !isStringRecord(headers)) {
     throw new Error(`MCP server "${name}" headers must be a string-to-string map`);
@@ -81,12 +91,21 @@ function normalizeServerDefinition(name: string, value: unknown): MCPRegistryEnt
     throw new Error(`MCP server "${name}" transport must be stdio, sse, or streamable-http`);
   }
 
+  const resolvedTransport = resolveTransport({ transport, url });
+  if (resolvedTransport === 'stdio' && !command) {
+    throw new Error(`MCP server "${name}" with stdio transport requires a non-empty command`);
+  }
+
+  if ((resolvedTransport === 'sse' || resolvedTransport === 'streamable-http') && !url) {
+    throw new Error(`MCP server "${name}" with ${resolvedTransport} transport requires a non-empty url`);
+  }
+
   const normalized: MCPRegistryEntry = { name };
-  if (typeof candidate.command === 'string' && candidate.command.trim()) normalized.command = candidate.command;
+  if (command) normalized.command = command;
   if (Array.isArray(args)) normalized.args = args.slice();
   if (env && typeof env === 'object') normalized.env = { ...env };
-  if (typeof transport === 'string') normalized.transport = transport;
-  if (typeof candidate.url === 'string' && candidate.url.trim()) normalized.url = candidate.url;
+  normalized.transport = resolvedTransport;
+  if (url) normalized.url = url;
   if (headers && typeof headers === 'object') normalized.headers = { ...headers };
   if (typeof candidate.enabled === 'boolean') normalized.enabled = candidate.enabled;
   return normalized;
@@ -224,12 +243,17 @@ export function parseMCPConfigJson(input: string | null | undefined): MCPConfig 
 }
 
 async function connectMCPServer(server: MCPRegistryEntry): Promise<Client> {
-  const transport = server.transport || 'stdio';
+  const transport = resolveTransport({ transport: server.transport, url: server.url?.trim() });
   const client = new Client({ name: 'llm-runtime', version: '0.1.0' }, { capabilities: {} });
 
   if (transport === 'stdio') {
+    const command = server.command?.trim();
+    if (!command) {
+      throw new Error(`MCP server "${server.name}" with stdio transport requires a non-empty command`);
+    }
+
     const stdioTransport = new StdioClientTransport({
-      command: server.command || '',
+      command,
       args: server.args ?? [],
       env: server.env,
     });
@@ -237,18 +261,19 @@ async function connectMCPServer(server: MCPRegistryEntry): Promise<Client> {
     return client;
   }
 
-  if (!server.url) {
-    throw new Error(`MCP server "${server.name}" requires a url for ${transport} transport`);
+  const url = server.url?.trim();
+  if (!url) {
+    throw new Error(`MCP server "${server.name}" with ${transport} transport requires a non-empty url`);
   }
 
   if (transport === 'sse') {
-    await client.connect(new SSEClientTransport(new URL(server.url), {
+    await client.connect(new SSEClientTransport(new URL(url), {
       requestInit: { headers: server.headers },
     }));
     return client;
   }
 
-  await client.connect(new StreamableHTTPClientTransport(new URL(server.url), {
+  await client.connect(new StreamableHTTPClientTransport(new URL(url), {
     requestInit: { headers: server.headers },
   }));
   return client;
