@@ -22,11 +22,16 @@ import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import fg from 'fast-glob';
+import { formatToolValidationFailureArtifact } from './tool-validation.js';
 import type {
   BuiltInToolName,
+  HitlInputOption,
+  HitlInputQuestion,
+  HitlSelectionType,
   LLMToolExecutionContext,
   PendingHitlToolResult,
   SkillRegistry,
+  ToolValidationIssue,
 } from './types.js';
 
 type BuiltInExecutor = (
@@ -390,13 +395,158 @@ async function createLoadSkillExecutor(options: BuiltInExecutorOptions, args: Re
   ].join('\n');
 }
 
-async function createHitlExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
-  const question = String(args.question ?? '').trim();
-  const optionsList = Array.isArray(args.options)
-    ? args.options.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
-    : [];
-  if (!question || optionsList.length === 0) {
-    return 'Error: human_intervention_request failed - question and options are required.';
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function normalizeSelectionType(value: unknown): HitlSelectionType | { error: string } {
+  if (value === undefined || value === null || value === '') {
+    return 'single-select';
+  }
+  if (value === 'single-select' || value === 'multiple-select') {
+    return value;
+  }
+  return { error: 'type must be one of single-select or multiple-select' };
+}
+
+function normalizeStructuredQuestion(rawQuestion: unknown, questionIndex: number): HitlInputQuestion | string {
+  const pathPrefix = `questions[${questionIndex}]`;
+  if (!isRecord(rawQuestion)) {
+    return `Error: ${pathPrefix} must be an object`;
+  }
+
+  const header = typeof rawQuestion.header === 'string' ? rawQuestion.header.trim() : '';
+  if (!header) {
+    return `Error: ${pathPrefix}.header is required`;
+  }
+
+  const id = typeof rawQuestion.id === 'string' ? rawQuestion.id.trim() : '';
+  if (!id) {
+    return `Error: ${pathPrefix}.id is required`;
+  }
+
+  const question = typeof rawQuestion.question === 'string' ? rawQuestion.question.trim() : '';
+  if (!question) {
+    return `Error: ${pathPrefix}.question is required`;
+  }
+
+  if (!Array.isArray(rawQuestion.options)) {
+    return `Error: ${pathPrefix}.options must be an array`;
+  }
+
+  if (rawQuestion.options.length < 2) {
+    return `Error: ${pathPrefix}.options must include at least two options`;
+  }
+
+  const optionIds = new Set<string>();
+  const options: HitlInputOption[] = [];
+  for (let optionIndex = 0; optionIndex < rawQuestion.options.length; optionIndex += 1) {
+    const rawOption = rawQuestion.options[optionIndex];
+    const optionPath = `${pathPrefix}.options[${optionIndex}]`;
+    if (!isRecord(rawOption)) {
+      return `Error: ${optionPath} must be an object`;
+    }
+
+    const optionId = typeof rawOption.id === 'string' ? rawOption.id.trim() : '';
+    if (!optionId) {
+      return `Error: ${optionPath}.id is required`;
+    }
+    if (optionIds.has(optionId)) {
+      return `Error: ${optionPath}.id must be unique within the question`;
+    }
+    optionIds.add(optionId);
+
+    const label = typeof rawOption.label === 'string' ? rawOption.label.trim() : '';
+    if (!label) {
+      return `Error: ${optionPath}.label is required`;
+    }
+
+    if (rawOption.description !== undefined && typeof rawOption.description !== 'string') {
+      return `Error: ${optionPath}.description must be a string`;
+    }
+
+    options.push({
+      id: optionId,
+      label,
+      ...(typeof rawOption.description === 'string' && rawOption.description.trim()
+        ? { description: rawOption.description.trim() }
+        : {}),
+    });
+  }
+
+  return {
+    header,
+    id,
+    question,
+    options,
+  };
+}
+
+function hitlIssueFromError(message: string): ToolValidationIssue {
+  const pathMatch = message.match(/^([a-zA-Z0-9_$.[\]-]+)\s/);
+  const pathValue = pathMatch?.[1] ?? '$';
+  return {
+    path: pathValue,
+    code: message.includes('required') ? 'missing_required' : 'invalid_type',
+    message,
+  };
+}
+
+function formatHitlValidationFailure(toolName: BuiltInToolName, error: string): string {
+  const message = error.replace(/^Error:\s*/, '');
+  const issue = hitlIssueFromError(message);
+  return formatToolValidationFailureArtifact({
+    toolName,
+    validation: {
+      valid: false,
+      error: issue.message,
+      issues: [issue],
+      corrections: [],
+    },
+  });
+}
+
+function normalizeHitlInput(args: Record<string, unknown>): {
+  type: HitlSelectionType;
+  allowSkip: boolean;
+  questions: HitlInputQuestion[];
+} | string {
+  const selectionType = normalizeSelectionType(args.type);
+  if (typeof selectionType === 'object') {
+    return `Error: ${selectionType.error}`;
+  }
+
+  if (args.allowSkip !== undefined && typeof args.allowSkip !== 'boolean') {
+    return 'Error: allowSkip must be a boolean';
+  }
+  const allowSkip = args.allowSkip === true;
+
+  if (!Array.isArray(args.questions)) {
+    return 'Error: questions must be an array';
+  }
+  if (args.questions.length === 0) {
+    return 'Error: questions must include at least one question';
+  }
+
+  const questions: HitlInputQuestion[] = [];
+  for (let questionIndex = 0; questionIndex < args.questions.length; questionIndex += 1) {
+    const normalizedQuestion = normalizeStructuredQuestion(args.questions[questionIndex], questionIndex);
+    if (typeof normalizedQuestion === 'string') {
+      return normalizedQuestion;
+    }
+    questions.push(normalizedQuestion);
+  }
+  return {
+    type: selectionType,
+    allowSkip,
+    questions,
+  };
+}
+
+async function createHitlExecutor(toolName: BuiltInToolName, _options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+  const normalized = normalizeHitlInput(args);
+  if (typeof normalized === 'string') {
+    return formatHitlValidationFailure(toolName, normalized);
   }
 
   const pendingResult: PendingHitlToolResult = {
@@ -405,16 +555,9 @@ async function createHitlExecutor(options: BuiltInExecutorOptions, args: Record<
     status: 'pending',
     confirmed: false,
     requestId: typeof context?.toolCallId === 'string' ? context.toolCallId : '',
-    selectedOption: null,
-    question,
-    options: optionsList,
-    ...(typeof args.defaultOption === 'string' && args.defaultOption.trim()
-      ? { defaultOption: args.defaultOption.trim() }
-      : {}),
-    ...(typeof args.timeoutMs === 'number' ? { timeoutMs: args.timeoutMs } : {}),
-    ...(typeof args.metadata === 'object' && args.metadata && !Array.isArray(args.metadata)
-      ? { metadata: args.metadata as Record<string, unknown> }
-      : {}),
+    type: normalized.type,
+    allowSkip: normalized.allowSkip,
+    questions: normalized.questions,
   };
 
   return JSON.stringify(pendingResult, null, 2);
@@ -494,8 +637,8 @@ export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<
   return {
     shell_cmd: (args, context) => createShellExecutor(options, args, context),
     load_skill: (args) => createLoadSkillExecutor(options, args),
-    human_intervention_request: (args, context) => createHitlExecutor(options, args, context),
-    ask_user_input: (args, context) => createHitlExecutor(options, args, context),
+    human_intervention_request: (args, context) => createHitlExecutor('human_intervention_request', options, args, context),
+    ask_user_input: (args, context) => createHitlExecutor('ask_user_input', options, args, context),
     web_fetch: (args) => createWebFetchExecutor(options, args),
     read_file: (args, context) => createReadFileExecutor(options, args, context),
     write_file: (args, context) => createWriteFileExecutor(options, args, context),

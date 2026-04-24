@@ -109,6 +109,29 @@ When the built-in human-intervention tool is enabled, the runtime also injects a
 
 `ask_user_input` should usually be enabled for interactive harnesses that can pause, surface a question to a human, and then resume with the selected answer. It should usually be disabled for unattended batch runs, deterministic tests, or autonomous workflows that are not allowed to wait for human input.
 
+The `ask_user_input` parameter shape is:
+
+```ts
+{
+  type?: "single-select" | "multiple-select";
+  allowSkip?: boolean;
+  questions: Array<{
+    header: string;
+    id: string;
+    question: string;
+    options: Array<{
+      id: string;
+      label: string;
+      description?: string;
+    }>;
+  }>;
+}
+```
+
+Omitting `type` defaults to `single-select`. Omitting `allowSkip` defaults to `false`. Use `allowSkip: true` only for explicitly dismissible, non-blocking prompts. Do not use `allowSkip` for approval-gated or otherwise blocking decisions; leave it omitted or `false` when the run must wait for a human answer before continuing. Option `id` values are the stable machine-readable values that harnesses should use when resuming from a human answer; labels are display text.
+
+Flat `question` / `options` payloads are not supported. Use `questions[]` for all HITL prompts.
+
 Deprecation note: `human_intervention_request` is kept for compatibility with existing clients, but new integrations should treat it as a legacy alias and prefer `ask_user_input` instead.
 
 ### Extra Tools

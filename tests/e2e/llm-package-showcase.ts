@@ -78,6 +78,87 @@ function printHelp() {
   ].join('\n'));
 }
 
+function parseToolJsonResult(result: unknown, label: string): Record<string, unknown> {
+  assert.equal(typeof result, 'string', `${label} should return a JSON string`);
+  return JSON.parse(result) as Record<string, unknown>;
+}
+
+async function assertHitlStrictSchema(environment: LLMEnvironment) {
+  const tools = await resolveToolsAsync({
+    environment,
+    builtIns: {
+      ask_user_input: true,
+    },
+  });
+
+  assert(tools.ask_user_input?.execute, 'ask_user_input should be executable');
+  assert(tools.human_intervention_request?.execute, 'human_intervention_request should be executable');
+  assert.deepEqual(
+    tools.ask_user_input.parameters,
+    tools.human_intervention_request.parameters,
+    'HITL alias names should expose the same schema',
+  );
+
+  const structuredResult = parseToolJsonResult(await tools.ask_user_input.execute({
+    type: 'multiple-select',
+    allowSkip: true,
+    questions: [{
+      header: 'Checks',
+      id: 'checks',
+      question: 'Which checks should run?',
+      options: [
+        { id: 'unit', label: 'Unit' },
+        { id: 'types', label: 'Types' },
+      ],
+    }],
+  }, {
+    toolCallId: 'e2e-hitl-structured',
+  }), 'structured ask_user_input');
+
+  assert.equal(structuredResult.status, 'pending');
+  assert.equal(structuredResult.type, 'multiple-select');
+  assert.equal(structuredResult.allowSkip, true);
+  assert.equal(structuredResult.requestId, 'e2e-hitl-structured');
+  assert.equal(structuredResult.question, undefined);
+  assert.equal(structuredResult.options, undefined);
+  assert.equal(structuredResult.defaultOption, undefined);
+  assert.equal(structuredResult.timeoutMs, undefined);
+  assert.equal(structuredResult.metadata, undefined);
+  assert.deepEqual((structuredResult.questions as any[])[0].options, [
+    { id: 'unit', label: 'Unit' },
+    { id: 'types', label: 'Types' },
+  ]);
+
+  const aliasStructuredResult = parseToolJsonResult(await tools.human_intervention_request.execute({
+    questions: [{
+      header: 'Checks',
+      id: 'checks',
+      question: 'Which checks should run?',
+      options: [
+        { id: 'unit', label: 'Unit' },
+        { id: 'types', label: 'Types' },
+      ],
+    }],
+  }, {
+    toolCallId: 'e2e-hitl-alias-structured',
+  }), 'structured human_intervention_request');
+  assert.equal(aliasStructuredResult.status, 'pending');
+  assert.deepEqual(aliasStructuredResult.questions, structuredResult.questions);
+
+  const unknownFieldResult = parseToolJsonResult(await tools.ask_user_input.execute({
+    question: 'Continue?',
+    options: ['Yes', 'No'],
+  } as any), 'flat-field ask_user_input');
+  assert.equal(unknownFieldResult.errorType, 'tool_parameter_validation_failed');
+  assert.deepEqual((unknownFieldResult.issues as any[]).map((issue) => issue.path), [
+    'questions',
+    'question',
+    'options',
+  ]);
+  assert.equal((unknownFieldResult.issues as any[])[1].code, 'unknown_parameter');
+  assert.equal((unknownFieldResult.issues as any[])[2].code, 'unknown_parameter');
+}
+
 async function runToolLoop(
   scenario: ShowcaseScenario,
   workingDirectory: string,
@@ -199,6 +280,8 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
       builtIns: showcaseBuiltIns,
     });
     console.log(`tools=${Object.keys(resolvedTools).join(', ')}`);
+    await assertHitlStrictSchema(environment);
+    console.log('hitl-strict-schema=ok');
 
     if (dryRun) {
       console.log('dry-run=ok');

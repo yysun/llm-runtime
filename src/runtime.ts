@@ -76,6 +76,7 @@ const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
   'When you need clarification, missing user-specific input, explicit approval, or another human decision, prefer the `ask_user_input` tool instead of asking only in plain text. The legacy alias `human_intervention_request` is equivalent when present.',
   'Treat generic instructions such as "ask the user", "ask a question", "request approval", "ask_user_input", "human_intervention_request", "human-in-the-loop", or "HITL" as referring to this built-in human-intervention tool when it is available.',
+  'Use allowSkip only for explicitly dismissible, non-blocking prompts. Do not use allowSkip for approval-gated or otherwise blocking decisions.',
   'Do not guess human-provided answers when this tool is available.',
 ].join(' ');
 

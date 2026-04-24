@@ -33,6 +33,7 @@ export type LLMProviderName =
 export type ReasoningEffort = 'default' | 'none' | 'low' | 'medium' | 'high';
 export type ToolPermission = 'auto' | 'ask' | 'read';
 export type WebSearchContextSize = 'low' | 'medium' | 'high';
+export type HitlSelectionType = 'single-select' | 'multiple-select';
 export type BuiltInToolName =
   | 'shell_cmd'
   | 'load_skill'
@@ -203,18 +204,28 @@ export interface LLMWebSearchOptions {
   searchContextSize?: WebSearchContextSize;
 }
 
+export interface HitlInputOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface HitlInputQuestion {
+  header: string;
+  id: string;
+  question: string;
+  options: HitlInputOption[];
+}
+
 export interface PendingHitlToolResult {
   ok: false;
   pending: true;
   status: 'pending';
   confirmed: false;
   requestId: string;
-  selectedOption: null;
-  question: string;
-  options: string[];
-  defaultOption?: string;
-  timeoutMs?: number;
-  metadata?: Record<string, unknown>;
+  type: HitlSelectionType;
+  allowSkip: boolean;
+  questions: HitlInputQuestion[];
 }
 
 export interface ToolValidationIssue {

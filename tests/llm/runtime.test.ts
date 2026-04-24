@@ -355,9 +355,15 @@ describe('llm-runtime runtime', () => {
   it('returns a pending HITL request artifact without requiring an adapter', async () => {
     const tools = resolveTools();
     const result = await tools.human_intervention_request?.execute?.({
-      question: 'Approve?',
-      options: ['Yes', 'No'],
-      defaultOption: 'Yes',
+      questions: [{
+        header: 'Approval',
+        id: 'approval',
+        question: 'Approve?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      }],
     }, {
       toolCallId: 'hitl-call-1',
     });
@@ -365,14 +371,23 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain('"status": "pending"');
     expect(result).toContain('"pending": true');
     expect(result).toContain('"requestId": "hitl-call-1"');
-    expect(result).toContain('"defaultOption": "Yes"');
+    expect(result).toContain('"type": "single-select"');
+    expect(result).toContain('"allowSkip": false');
+    expect(result).toContain('"questions": [');
   });
 
   it('lets ask_user_input execute the same HITL pending flow', async () => {
     const tools = resolveTools();
     const result = await tools.ask_user_input?.execute?.({
-      question: 'Continue?',
-      options: ['Yes', 'No'],
+      questions: [{
+        header: 'Continue',
+        id: 'continue',
+        question: 'Continue?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      }],
     }, {
       toolCallId: 'hitl-call-alias-1',
     });
@@ -380,6 +395,190 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain('"status": "pending"');
     expect(result).toContain('"requestId": "hitl-call-alias-1"');
     expect(result).toContain('"question": "Continue?"');
+  });
+
+  it('exposes the structured ask_user_input choice schema on both HITL aliases', () => {
+    const tools = resolveTools();
+    const askSchema = tools.ask_user_input?.parameters as any;
+    const legacySchema = tools.human_intervention_request?.parameters as any;
+
+    expect(tools.ask_user_input?.description).toContain('Use questions[]');
+    expect(tools.ask_user_input?.description).toContain('do not use allowSkip for approval-gated or otherwise blocking decisions');
+    expect(tools.ask_user_input?.description).toContain('Do not add a kind field');
+    expect(tools.ask_user_input?.description).toContain('Flat question/options payloads are not supported');
+    expect(askSchema.description).toContain('Flat question/options payloads are not supported');
+    expect(askSchema.properties.type.enum).toEqual(['single-select', 'multiple-select']);
+    expect(askSchema.properties.type.description).toContain('Do not use kind or approval');
+    expect(askSchema.properties.allowSkip.type).toBe('boolean');
+    expect(askSchema.properties.allowSkip.description).toContain('explicitly dismissible, non-blocking prompts');
+    expect(askSchema.properties.allowSkip.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
+    expect(askSchema.properties.questions.type).toBe('array');
+    expect(askSchema.properties.questions.description).toContain('at least two options');
+    expect(askSchema.properties.question).toBeUndefined();
+    expect(askSchema.properties.options).toBeUndefined();
+    expect(askSchema.properties.defaultOption).toBeUndefined();
+    expect(askSchema.properties.timeoutMs).toBeUndefined();
+    expect(askSchema.properties.metadata).toBeUndefined();
+    expect(askSchema.properties.questions.items.properties.options.items.properties).toMatchObject({
+      id: { type: 'string', description: expect.any(String) },
+      label: { type: 'string', description: expect.any(String) },
+      description: { type: 'string', description: expect.any(String) },
+    });
+    expect(askSchema.required).toEqual(['questions']);
+    expect(legacySchema).toEqual(askSchema);
+    expect(tools.human_intervention_request?.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
+  });
+
+  it('returns structured single-select HITL artifacts by default', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_input?.execute?.({
+      questions: [{
+        header: 'Mode',
+        id: 'mode',
+        question: 'Which mode?',
+        options: [
+          { id: 'fast', label: 'Fast', description: 'Use quicker defaults.' },
+          { id: 'careful', label: 'Careful' },
+        ],
+      }],
+    }, {
+      toolCallId: 'hitl-structured-1',
+    });
+
+    const parsed = JSON.parse(String(result));
+    expect(parsed).toMatchObject({
+      status: 'pending',
+      pending: true,
+      requestId: 'hitl-structured-1',
+      type: 'single-select',
+      allowSkip: false,
+    });
+    expect(parsed.selectedOption).toBeUndefined();
+    expect(parsed.selectedOptions).toBeUndefined();
+    expect(parsed.question).toBeUndefined();
+    expect(parsed.options).toBeUndefined();
+    expect(parsed.questions).toEqual([{
+      header: 'Mode',
+      id: 'mode',
+      question: 'Which mode?',
+      options: [
+        { id: 'fast', label: 'Fast', description: 'Use quicker defaults.' },
+        { id: 'careful', label: 'Careful' },
+      ],
+    }]);
+  });
+
+  it('preserves multiple-select and allowSkip in structured HITL artifacts', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_input?.execute?.({
+      type: 'multiple-select',
+      allowSkip: true,
+      questions: [{
+        header: 'Tools',
+        id: 'tools',
+        question: 'Which tools?',
+        options: [
+          { id: 'lint', label: 'Lint' },
+          { id: 'test', label: 'Test' },
+        ],
+      }],
+    });
+
+    const parsed = JSON.parse(String(result));
+    expect(parsed.type).toBe('multiple-select');
+    expect(parsed.allowSkip).toBe(true);
+    expect(parsed.questions[0].options.map((option: { id: string }) => option.id)).toEqual(['lint', 'test']);
+  });
+
+  it('rejects invalid structured HITL questions and option ids', async () => {
+    const tools = resolveTools();
+
+    const duplicateResult = await tools.ask_user_input?.execute?.({
+      questions: [{
+        header: 'Mode',
+        id: 'mode',
+        question: 'Which mode?',
+        options: [
+          { id: 'same', label: 'One' },
+          { id: 'same', label: 'Two' },
+        ],
+      }],
+    });
+
+    expect(duplicateResult).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(duplicateResult).toContain('questions[0].options[1].id must be unique');
+
+    const oneOptionResult = await tools.ask_user_input?.execute?.({
+      questions: [{
+        header: 'Mode',
+        id: 'mode',
+        question: 'Which mode?',
+        options: [
+          { id: 'one', label: 'One' },
+        ],
+      }],
+    });
+
+    expect(oneOptionResult).toContain('questions[0].options must include at least two options');
+  });
+
+  it('rejects unsupported HITL selection types', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_input?.execute?.({
+      type: 'approval',
+      questions: [{
+        header: 'Decision',
+        id: 'decision',
+        question: 'Approve?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      }],
+    });
+
+    expect(result).toContain('type must be one of single-select or multiple-select');
+  });
+
+  it('keeps both HITL aliases equivalent for structured calls', async () => {
+    const tools = resolveTools();
+    const payload = {
+      type: 'multiple-select',
+      allowSkip: true,
+      questions: [{
+        header: 'Checks',
+        id: 'checks',
+        question: 'Which checks?',
+        options: [
+          { id: 'unit', label: 'Unit' },
+          { id: 'types', label: 'Types' },
+        ],
+      }],
+    };
+
+    const askResult = JSON.parse(String(await tools.ask_user_input?.execute?.(payload, {
+      toolCallId: 'ask-call',
+    })));
+    const legacyResult = JSON.parse(String(await tools.human_intervention_request?.execute?.(payload, {
+      toolCallId: 'legacy-call',
+    })));
+
+    delete askResult.requestId;
+    delete legacyResult.requestId;
+    expect(legacyResult).toEqual(askResult);
+  });
+
+  it('rejects flat HITL payload fields', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_input?.execute?.({
+      question: 'Continue?',
+      options: ['Yes', 'No'],
+    } as any);
+
+    expect(result).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(result).toContain('"path": "question"');
+    expect(result).toContain('"code": "unknown_parameter"');
+    expect(result).toContain("Unknown parameter 'question' is not allowed");
   });
 
   it('rejects attempts to override reserved built-in tool names', () => {
@@ -408,61 +607,29 @@ describe('llm-runtime runtime', () => {
     );
   });
 
-  it('validates and normalizes built-in tool arguments before execution', async () => {
+  it('rejects removed HITL aliases before execution', async () => {
     const tools = resolveTools();
 
-    const successResult = await tools.human_intervention_request?.execute?.({
+    const aliasResult = await tools.human_intervention_request?.execute?.({
       prompt: 'Continue?',
-      options: 'Yes',
       default_option: 'Yes',
-    } as any, {
-      toolCallId: 'hitl-call-2',
     } as any);
 
-    expect(successResult).toContain('"status": "pending"');
-    expect(successResult).toContain('"question": "Continue?"');
-    expect(successResult).toContain('"options": [\n    "Yes"\n  ]');
-    expect(successResult).toContain('"defaultOption": "Yes"');
-
-    const failureResult = await tools.human_intervention_request?.execute?.({
-      question: 123,
-      options: ['Yes'],
-    } as any);
-
-    expect(failureResult).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(failureResult).toContain('"toolName": "human_intervention_request"');
-    expect(failureResult).toContain('"path": "question"');
-    expect(failureResult).toContain('"expectedType": "string"');
-    expect(failureResult).toContain('"receivedType": "number"');
-  });
-
-  it('normalizes ask_user_input parameter aliases before execution', async () => {
-    const tools = resolveTools();
-
-    const successResult = await tools.ask_user_input?.execute?.({
-      prompt: 'Continue?',
-      options: 'Yes',
-      default_option: 'Yes',
-    } as any, {
-      toolCallId: 'hitl-call-3',
-    } as any);
-
-    expect(successResult).toContain('"status": "pending"');
-    expect(successResult).toContain('"question": "Continue?"');
-    expect(successResult).toContain('"defaultOption": "Yes"');
+    expect(aliasResult).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(aliasResult).toContain('"path": "prompt"');
+    expect(aliasResult).toContain('"code": "unknown_parameter"');
+    expect(aliasResult).toContain("Unknown parameter 'prompt' is not allowed");
   });
 
   it('returns a durable validation artifact for missing required parameters', async () => {
     const tools = resolveTools();
 
-    const failureResult = await tools.human_intervention_request?.execute?.({
-      options: ['Yes'],
-    } as any);
+    const missingQuestionsResult = await tools.human_intervention_request?.execute?.({} as any);
 
-    expect(failureResult).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(failureResult).toContain('"path": "question"');
-    expect(failureResult).toContain('"code": "missing_required"');
-    expect(failureResult).toContain("Required parameter 'question' is missing or empty");
+    expect(missingQuestionsResult).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(missingQuestionsResult).toContain('"path": "questions"');
+    expect(missingQuestionsResult).toContain('"code": "missing_required"');
+    expect(missingQuestionsResult).toContain("Required parameter 'questions' is missing or empty");
   });
 
   it('creates an explicit environment without relying on convenience caches', () => {

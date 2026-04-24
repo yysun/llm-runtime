@@ -373,6 +373,9 @@ describe('llm-runtime runtime provider dispatch', () => {
   it('injects human_intervention_request guidance when the built-in is available', async () => {
     const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
 
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use allowSkip only for explicitly dismissible, non-blocking prompts.');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions.');
+
     await generate({
       provider: 'openai',
       providerConfig: {

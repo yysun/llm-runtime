@@ -93,19 +93,6 @@ function normalizeKnownParameterAliases(toolName: string, args: Record<string, u
     corrections.push('.includePattern -> includePattern');
   }
 
-  if (toolName === 'human_intervention_request' || toolName === 'ask_user_input') {
-    if (normalizedArgs.question === undefined && normalizedArgs.prompt !== undefined) {
-      normalizedArgs.question = normalizedArgs.prompt;
-      delete normalizedArgs.prompt;
-      corrections.push('prompt -> question');
-    }
-    if (normalizedArgs.defaultOption === undefined && normalizedArgs.default_option !== undefined) {
-      normalizedArgs.defaultOption = normalizedArgs.default_option;
-      delete normalizedArgs.default_option;
-      corrections.push('default_option -> defaultOption');
-    }
-  }
-
   if (toolName === 'web_fetch') {
     if (normalizedArgs.url === undefined && normalizedArgs.uri !== undefined) {
       normalizedArgs.url = normalizedArgs.uri;
