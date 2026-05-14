@@ -1,3 +1,17 @@
+/**
+ * Gemini Presentation E2E Runner
+ *
+ * Purpose:
+ * - Run the Gemini-backed presentation workflow against the package turn loop.
+ *
+ * Key features:
+ * - Resolves package-owned built-ins and validates a presentation-oriented tool flow.
+ * - Supports dry-run mode for configuration and tool-surface validation.
+ *
+ * Recent changes:
+ * - 2026-05-14: Updated built-in selections for the filesystem tool surface.
+ */
+
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import process from 'node:process';
@@ -87,7 +101,9 @@ async function runPresentationE2E(dryRun: boolean) {
     web_fetch: false,
     write_file: false,
     list_files: false,
-    grep: false,
+    search_files: false,
+    create_directory: false,
+    path_exists: false,
   };
   const environment = createLLMEnvironment({
     providers: geminiSelection.providers,

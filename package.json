@@ -58,7 +58,6 @@
     "@anthropic-ai/sdk": "^0.71.2",
     "@google/generative-ai": "^0.24.1",
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "fast-glob": "^3.3.3",
     "openai": "^6.25.0"
   },
   "devDependencies": {

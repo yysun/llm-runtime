@@ -6,14 +6,15 @@ source_paths:
   - "src/builtins.ts"
   - "src/builtin-executors.ts"
   - "src/tool-validation.ts"
-updated_at: "2026-04-12"
+updated_at: "2026-05-14"
 ---
 
-The package owns eight reserved built-in tool names: `shell_cmd`, `load_skill`, `human_intervention_request`, `web_fetch`, `read_file`, `write_file`, `list_files`, and `grep`.
+The package owns eleven reserved built-in tool names: `shell_cmd`, `load_skill`, `human_intervention_request`, `ask_user_input`, `web_fetch`, `read_file`, `write_file`, `list_files`, `search_files`, `create_directory`, and `path_exists`.
 
 Facts from source:
 - `src/builtins.ts` defines stable descriptions and JSON-schema parameter contracts for every built-in.
 - Selection can be boolean or per-tool; the runtime supports normalization and intersection so a caller can narrow a broader baseline safely.
+- `search_files` is the package-owned file-discovery primitive, while `create_directory` and `path_exists` cover narrow filesystem mutation and existence checks.
 - Every executable built-in is wrapped with [[src-tool-validation]] before exposure.
 - `src/builtin-executors.ts` keeps execution package-owned: file and shell tools enforce a trusted working directory, `load_skill` reads from the skill registry, and HITL returns a pending artifact instead of calling a host adapter.
 - The `shell_cmd` contract itself is intentionally narrow: `command` is required, undeclared parameters are rejected, and the description says it should only be used when the user explicitly asked for command execution.

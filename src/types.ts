@@ -19,6 +19,7 @@
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
  * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
  * - 2026-03-27: Added package-native message/response/provider invocation contracts.
+ * - 2026-05-14: Replaced the built-in `grep` tool name with `search_files`, `create_directory`, and `path_exists`.
  */
 
 export type LLMProviderName =
@@ -43,7 +44,9 @@ export type BuiltInToolName =
   | 'read_file'
   | 'write_file'
   | 'list_files'
-  | 'grep';
+  | 'search_files'
+  | 'create_directory'
+  | 'path_exists';
 
 export interface BaseLLMConfig {
   apiKey?: string;

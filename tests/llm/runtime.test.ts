@@ -12,14 +12,18 @@
  * Implementation notes:
  * - Uses a mocked in-memory filesystem adapter for skill-registry coverage.
  * - Exercises the package through its public entrypoint.
- * - Avoids any real filesystem, network, or provider calls.
+ * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
  * - 2026-03-27: Added built-in tool enablement, narrowing, and host-adapter coverage.
+ * - 2026-05-14: Replaced `grep` coverage with filesystem built-in coverage for `search_files`, `create_directory`, and `path_exists`.
  */
 
+import { promises as fs } from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 import {
   createLLMEnvironment,
@@ -94,6 +98,16 @@ function createMockSkillFileSystem(files: Record<string, string>): SkillFileSyst
       isFile: () => normalizedFiles.has(targetPath),
     }),
   };
+}
+
+async function withTempWorkspace<T>(callback: (workspacePath: string) => Promise<T>): Promise<T> {
+  const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-'));
+
+  try {
+    return await callback(workspacePath);
+  } finally {
+    await fs.rm(workspacePath, { recursive: true, force: true });
+  }
 }
 
 describe('llm-runtime runtime', () => {
@@ -283,11 +297,13 @@ describe('llm-runtime runtime', () => {
   it('includes internal built-ins by default, including HITL pending requests', () => {
     expect(Object.keys(resolveTools()).sort()).toEqual([
       'ask_user_input',
-      'grep',
+      'create_directory',
       'human_intervention_request',
       'list_files',
       'load_skill',
+      'path_exists',
       'read_file',
+      'search_files',
       'shell_cmd',
       'web_fetch',
       'write_file',
@@ -297,19 +313,133 @@ describe('llm-runtime runtime', () => {
   it('supports per-call built-in selection', () => {
     const resolved = resolveTools({
       builtIns: {
+        create_directory: true,
+        path_exists: true,
         shell_cmd: true,
         read_file: true,
-        write_file: true,
-        list_files: true,
+        search_files: true,
       },
     });
 
     expect(Object.keys(resolved).sort()).toEqual([
-      'list_files',
+      'create_directory',
+      'path_exists',
       'read_file',
+      'search_files',
       'shell_cmd',
-      'write_file',
     ].sort());
+  });
+
+  it('rejects unknown built-in selection keys such as removed grep', () => {
+    expect(() => resolveTools({
+      builtIns: {
+        grep: true,
+      } as any,
+    })).toThrow('Unknown built-in tool name "grep".');
+  });
+
+  it('searches files by glob pattern with deterministic results', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      await fs.writeFile(path.join(workspacePath, 'alpha.ts'), 'export const alpha = 1;');
+      await fs.mkdir(path.join(workspacePath, 'nested'), { recursive: true });
+      await fs.writeFile(path.join(workspacePath, 'nested', 'beta.ts'), 'export const beta = 2;');
+      await fs.writeFile(path.join(workspacePath, 'nested', 'notes.md'), '# Notes');
+
+      const tools = resolveTools({
+        builtIns: {
+          search_files: true,
+        },
+      });
+
+      const result = await tools.search_files?.execute?.({
+        pattern: '**/*.ts',
+      }, {
+        workingDirectory: workspacePath,
+      });
+
+      expect(JSON.parse(String(result))).toEqual(expect.objectContaining({
+        found: true,
+        pattern: '**/*.ts',
+        total: 2,
+        returned: 2,
+        truncated: false,
+        entries: ['alpha.ts', 'nested/beta.ts'],
+      }));
+    });
+  });
+
+  it('creates directories idempotently and reports path existence', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const tools = resolveTools({
+        builtIns: {
+          create_directory: true,
+          path_exists: true,
+        },
+      });
+
+      const createResult = await tools.create_directory?.execute?.({
+        path: 'reports/daily',
+      }, {
+        workingDirectory: workspacePath,
+      });
+      const createdDirectory = JSON.parse(String(createResult));
+
+      expect(createdDirectory).toMatchObject({
+        ok: true,
+        status: 'success',
+        created: true,
+        existed: false,
+      });
+
+      const secondCreateResult = await tools.create_directory?.execute?.({
+        path: 'reports/daily',
+      }, {
+        workingDirectory: workspacePath,
+      });
+
+      expect(JSON.parse(String(secondCreateResult))).toMatchObject({
+        ok: true,
+        created: false,
+        existed: true,
+      });
+
+      await fs.writeFile(path.join(workspacePath, 'reports', 'daily', 'summary.txt'), 'ready');
+
+      const directoryExistsResult = await tools.path_exists?.execute?.({
+        path: 'reports/daily',
+      }, {
+        workingDirectory: workspacePath,
+      });
+      const fileExistsResult = await tools.path_exists?.execute?.({
+        path: 'reports/daily/summary.txt',
+      }, {
+        workingDirectory: workspacePath,
+      });
+      const missingExistsResult = await tools.path_exists?.execute?.({
+        path: 'reports/missing.txt',
+      }, {
+        workingDirectory: workspacePath,
+      });
+
+      expect(JSON.parse(String(directoryExistsResult))).toMatchObject({
+        exists: true,
+        type: 'directory',
+        isDirectory: true,
+        isFile: false,
+      });
+      expect(JSON.parse(String(fileExistsResult))).toMatchObject({
+        exists: true,
+        type: 'file',
+        isDirectory: false,
+        isFile: true,
+      });
+      expect(JSON.parse(String(missingExistsResult))).toMatchObject({
+        exists: false,
+        type: null,
+        isDirectory: false,
+        isFile: false,
+      });
+    });
   });
 
   it('treats ask_user_input as a synchronized alias of human_intervention_request', () => {

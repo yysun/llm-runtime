@@ -16,6 +16,7 @@
  *
  * Recent changes:
  * - 2026-03-29: Added the real terminal showcase runner for `runTurnLoop(...)`.
+ * - 2026-05-14: Updated showcase built-in selections for the filesystem tool surface.
  */
 
 import assert from 'node:assert/strict';
@@ -222,7 +223,9 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
     web_fetch: false,
     write_file: false,
     list_files: false,
-    grep: false,
+    search_files: false,
+    create_directory: false,
+    path_exists: false,
   };
 
   try {

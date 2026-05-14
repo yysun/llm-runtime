@@ -16,12 +16,12 @@
  *
  * Recent changes:
  * - 2026-03-27: Added package-owned executors for built-in tools.
+ * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
 
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import fg from 'fast-glob';
 import { formatToolValidationFailureArtifact } from './tool-validation.js';
 import type {
   BuiltInToolName,
@@ -46,8 +46,7 @@ type BuiltInExecutorOptions = {
 const DEFAULT_READ_LIMIT = 200;
 const DEFAULT_LIST_MAX_ENTRIES = 200;
 const DEFAULT_LIST_MAX_DEPTH = 2;
-const DEFAULT_GREP_MAX_RESULTS = 50;
-const DEFAULT_GREP_CONTEXT_LINES = 2;
+const DEFAULT_SEARCH_MAX_RESULTS = 200;
 const DEFAULT_SHELL_TIMEOUT_MS = 600_000;
 const DEFAULT_WEB_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_WEB_FETCH_MAX_CHARS = 16_000;
@@ -109,6 +108,115 @@ function resolveScopedPath(inputPath: string, trustedWorkingDirectory: string): 
   }
 
   return resolvedPath;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+}
+
+function globToRegExp(pattern: string): RegExp {
+  const normalizedPattern = normalizePath(pattern);
+  let expression = '^';
+
+  for (let index = 0; index < normalizedPattern.length; index += 1) {
+    const character = normalizedPattern[index];
+
+    if (character === '*') {
+      const nextCharacter = normalizedPattern[index + 1];
+      const followingCharacter = normalizedPattern[index + 2];
+
+      if (nextCharacter === '*') {
+        if (followingCharacter === '/') {
+          expression += '(?:.*/)?';
+          index += 2;
+        } else {
+          expression += '.*';
+          index += 1;
+        }
+        continue;
+      }
+
+      expression += '[^/]*';
+      continue;
+    }
+
+    if (character === '?') {
+      expression += '[^/]';
+      continue;
+    }
+
+    expression += escapeRegExp(character);
+  }
+
+  expression += '$';
+  return new RegExp(expression);
+}
+
+function matchesGlobPattern(candidatePath: string, pattern: string): boolean {
+  return globToRegExp(pattern).test(normalizePath(candidatePath));
+}
+
+function matchesIncludePattern(candidatePath: string, pattern: string): boolean {
+  const normalizedPattern = pattern.trim();
+  if (!normalizedPattern) {
+    return true;
+  }
+
+  if (/[*?]/.test(normalizedPattern)) {
+    return matchesGlobPattern(candidatePath, normalizedPattern);
+  }
+
+  return candidatePath.includes(normalizedPattern);
+}
+
+function shouldIgnoreRelativePath(relativePath: string): boolean {
+  const normalized = normalizePath(relativePath).replace(/\/$/, '');
+  if (!normalized) {
+    return false;
+  }
+
+  const segments = normalized.split('/');
+  return segments.includes('node_modules') || segments.includes('.git') || segments.includes('dist');
+}
+
+async function collectDirectoryEntries(rootPath: string, options: {
+  includeHidden: boolean;
+  maxDepth: number;
+  onlyFiles: boolean;
+}): Promise<Array<{ path: string; isDirectory: boolean }>> {
+  const entries: Array<{ path: string; isDirectory: boolean }> = [];
+
+  async function walkDirectory(currentPath: string, depth: number): Promise<void> {
+    const directoryEntries = await fs.readdir(currentPath, { withFileTypes: true });
+    directoryEntries.sort((left, right) => left.name.localeCompare(right.name));
+
+    for (const directoryEntry of directoryEntries) {
+      if (!options.includeHidden && directoryEntry.name.startsWith('.')) {
+        continue;
+      }
+
+      const absolutePath = path.join(currentPath, directoryEntry.name);
+      const relativePath = normalizePath(path.relative(rootPath, absolutePath));
+      if (!relativePath || shouldIgnoreRelativePath(relativePath)) {
+        continue;
+      }
+
+      const isDirectory = directoryEntry.isDirectory();
+      if (!options.onlyFiles || !isDirectory) {
+        entries.push({
+          path: isDirectory ? `${relativePath}/` : relativePath,
+          isDirectory,
+        });
+      }
+
+      if (isDirectory && depth + 1 < options.maxDepth) {
+        await walkDirectory(absolutePath, depth + 1);
+      }
+    }
+  }
+
+  await walkDirectory(rootPath, 0);
+  return entries;
 }
 
 function stripYamlFrontMatter(markdown: string): string {
@@ -232,18 +340,15 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
     const maxEntries = clamp(Number(args.maxEntries ?? DEFAULT_LIST_MAX_ENTRIES), 1, DEFAULT_LIST_MAX_ENTRIES);
     const includePattern = String(args.includePattern ?? '').trim();
 
-    const entries = await fg(['**/*'], {
-      cwd: resolvedPath,
-      deep: maxDepth,
+    const entries = await collectDirectoryEntries(resolvedPath, {
+      includeHidden,
+      maxDepth: recursive ? maxDepth : 0,
       onlyFiles: false,
-      dot: includeHidden,
-      markDirectories: true,
-      ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
     });
 
     const filteredEntries = entries
-      .map((entry: string) => normalizePath(entry))
-      .filter((entry: string) => !includePattern || entry.includes(includePattern.replace(/\*\*/g, '').replace(/\*/g, '')))
+      .map((entry) => entry.path)
+      .filter((entry: string) => !includePattern || matchesIncludePattern(entry, includePattern))
       .sort((left: string, right: string) => left.localeCompare(right));
 
     const truncated = filteredEntries.length > maxEntries;
@@ -271,53 +376,112 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
   }
 }
 
-async function collectFilesRecursively(rootPath: string): Promise<string[]> {
-  return fg(['**/*'], {
-    cwd: rootPath,
-    onlyFiles: true,
-    dot: true,
-    ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**'],
-  }).then((entries: string[]) => entries.map((entry: string) => path.join(rootPath, entry)));
-}
-
-async function createGrepExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
-    const query = String(args.query ?? '').trim();
-    if (!query) {
-      return 'Error: grep failed - query must be a non-empty string';
+    const pattern = String(args.pattern ?? '').trim();
+    if (!pattern) {
+      return 'Error: search_files failed - pattern must be a non-empty string';
     }
 
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
-    const directoryPath = args.directoryPath
-      ? resolveScopedPath(String(args.directoryPath), trustedWorkingDirectory)
+    const searchRoot = args.path
+      ? resolveScopedPath(String(args.path), trustedWorkingDirectory)
       : trustedWorkingDirectory;
-    const isRegexp = Boolean(args.isRegexp ?? false);
-    const maxResults = clamp(Number(args.maxResults ?? DEFAULT_GREP_MAX_RESULTS), 1, DEFAULT_GREP_MAX_RESULTS);
-    const contextLines = clamp(Number(args.contextLines ?? DEFAULT_GREP_CONTEXT_LINES), 0, 5);
-    const matcher = isRegexp ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    const includeHidden = Boolean(args.includeHidden ?? true);
+    const maxResults = clamp(Number(args.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS), 1, DEFAULT_SEARCH_MAX_RESULTS);
 
-    const matches: Array<Record<string, unknown>> = [];
-    for (const filePath of await collectFilesRecursively(directoryPath)) {
-      const content = await fs.readFile(filePath, 'utf8').catch(() => null);
-      if (content == null) continue;
-      const lines = content.split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        if (!matcher.test(lines[index] ?? '')) continue;
-        matches.push({
-          filePath,
-          lineNumber: index + 1,
-          line: lines[index],
-          context: lines.slice(Math.max(0, index - contextLines), index + contextLines + 1),
-        });
-        if (matches.length >= maxResults) {
-          return JSON.stringify({ query, matches, truncated: true }, null, 2);
-        }
-      }
+    const entries = await collectDirectoryEntries(searchRoot, {
+      includeHidden,
+      maxDepth: Number.MAX_SAFE_INTEGER,
+      onlyFiles: true,
+    });
+
+    const normalizedEntries = entries
+      .map((entry) => entry.path)
+      .filter((entry: string) => matchesGlobPattern(entry, pattern))
+      .sort((left: string, right: string) => left.localeCompare(right));
+    const truncated = normalizedEntries.length > maxResults;
+    const returnedEntries = truncated ? normalizedEntries.slice(0, maxResults) : normalizedEntries;
+
+    return JSON.stringify({
+      requestedPath: String(args.path ?? '.'),
+      path: searchRoot,
+      pattern,
+      maxResults,
+      total: normalizedEntries.length,
+      returned: returnedEntries.length,
+      truncated,
+      entries: returnedEntries,
+      found: normalizedEntries.length > 0,
+      message: normalizedEntries.length === 0
+        ? 'No files matched the requested pattern.'
+        : truncated
+          ? `Result truncated to ${maxResults} entries out of ${normalizedEntries.length}.`
+          : undefined,
+    }, null, 2);
+  } catch (error) {
+    return `Error: search_files failed - ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function createDirectoryExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+  try {
+    if (context?.toolPermission === 'read') {
+      return 'Error: create_directory is blocked by the current permission level (read).';
     }
 
-    return JSON.stringify({ query, matches, truncated: false }, null, 2);
+    const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
+    const requestedPath = String(args.path ?? '').trim();
+    if (!requestedPath) {
+      return 'Error: create_directory failed - path is required';
+    }
+
+    const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
+    const existingStats = await fs.stat(resolvedPath).catch(() => null);
+    if (existingStats && !existingStats.isDirectory()) {
+      return 'Error: create_directory failed - target path already exists and is not a directory';
+    }
+
+    await fs.mkdir(resolvedPath, { recursive: true });
+
+    return JSON.stringify({
+      ok: true,
+      status: 'success',
+      path: resolvedPath,
+      created: existingStats == null,
+      existed: existingStats != null,
+    }, null, 2);
   } catch (error) {
-    return `Error: grep failed - ${error instanceof Error ? error.message : String(error)}`;
+    return `Error: create_directory failed - ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+  try {
+    const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
+    const requestedPath = String(args.path ?? '').trim();
+    if (!requestedPath) {
+      return 'Error: path_exists failed - path is required';
+    }
+
+    const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
+    const stats = await fs.stat(resolvedPath).catch(() => null);
+
+    return JSON.stringify({
+      path: resolvedPath,
+      exists: stats != null,
+      type: stats == null
+        ? null
+        : stats.isDirectory()
+          ? 'directory'
+          : stats.isFile()
+            ? 'file'
+            : 'other',
+      isDirectory: stats?.isDirectory() ?? false,
+      isFile: stats?.isFile() ?? false,
+    }, null, 2);
+  } catch (error) {
+    return `Error: path_exists failed - ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
@@ -643,6 +807,8 @@ export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<
     read_file: (args, context) => createReadFileExecutor(options, args, context),
     write_file: (args, context) => createWriteFileExecutor(options, args, context),
     list_files: (args, context) => createListFilesExecutor(options, args, context),
-    grep: (args, context) => createGrepExecutor(options, args, context),
+    search_files: (args, context) => createSearchFilesExecutor(options, args, context),
+    create_directory: (args, context) => createDirectoryExecutor(options, args, context),
+    path_exists: (args, context) => createPathExistsExecutor(options, args, context),
   };
 }

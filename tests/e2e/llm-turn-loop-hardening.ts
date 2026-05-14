@@ -12,6 +12,9 @@
  * Implementation notes:
  * - Uses a temporary workspace and package-owned tools only; no live provider calls are made.
  * - The host-side recovery logic intentionally lives in this runner to mirror production integration.
+ *
+ * Recent changes:
+ * - 2026-05-14: Updated hardening built-in selections for the filesystem tool surface.
  */
 
 import assert from 'node:assert/strict';
@@ -165,7 +168,9 @@ async function runScenario(
           web_fetch: false,
           write_file: true,
           list_files: false,
-          grep: false,
+          search_files: false,
+          create_directory: false,
+          path_exists: false,
         },
       });
 

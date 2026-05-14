@@ -16,6 +16,7 @@
  *
  * Recent changes:
  * - 2026-03-27: Added package-owned validation for built-in tool execution.
+ * - 2026-05-14: Updated filesystem built-in alias normalization for the new tool surface.
  */
 
 import type {
@@ -63,34 +64,34 @@ function normalizeKnownParameterAliases(toolName: string, args: Record<string, u
     corrections.push('.includePattern -> includePattern');
   }
 
-  if (
-    toolName === 'grep'
-    && normalizedArgs.directoryPath === undefined
-    && normalizedArgs.directory !== undefined
-  ) {
-    normalizedArgs.directoryPath = normalizedArgs.directory;
+  if (toolName === 'search_files' && normalizedArgs.pattern === undefined && normalizedArgs.query !== undefined) {
+    normalizedArgs.pattern = normalizedArgs.query;
+    delete normalizedArgs.query;
+    corrections.push('query -> pattern');
+  }
+
+  if (toolName === 'search_files' && normalizedArgs.path === undefined && normalizedArgs.directory !== undefined) {
+    normalizedArgs.path = normalizedArgs.directory;
     delete normalizedArgs.directory;
-    corrections.push('directory -> directoryPath');
+    corrections.push('directory -> path');
   }
 
-  if (
-    toolName === 'grep'
-    && normalizedArgs.directoryPath === undefined
-    && normalizedArgs.path !== undefined
-  ) {
-    normalizedArgs.directoryPath = normalizedArgs.path;
-    delete normalizedArgs.path;
-    corrections.push('path -> directoryPath');
+  if (toolName === 'create_directory' && normalizedArgs.path === undefined && normalizedArgs.directory !== undefined) {
+    normalizedArgs.path = normalizedArgs.directory;
+    delete normalizedArgs.directory;
+    corrections.push('directory -> path');
   }
 
-  if (
-    toolName === 'grep'
-    && normalizedArgs.includePattern === undefined
-    && normalizedArgs['.includePattern'] !== undefined
-  ) {
-    normalizedArgs.includePattern = normalizedArgs['.includePattern'];
-    delete normalizedArgs['.includePattern'];
-    corrections.push('.includePattern -> includePattern');
+  if (toolName === 'path_exists' && normalizedArgs.path === undefined && normalizedArgs.filePath !== undefined) {
+    normalizedArgs.path = normalizedArgs.filePath;
+    delete normalizedArgs.filePath;
+    corrections.push('filePath -> path');
+  }
+
+  if (toolName === 'path_exists' && normalizedArgs.path === undefined && normalizedArgs.directory !== undefined) {
+    normalizedArgs.path = normalizedArgs.directory;
+    delete normalizedArgs.directory;
+    corrections.push('directory -> path');
   }
 
   if (toolName === 'web_fetch') {

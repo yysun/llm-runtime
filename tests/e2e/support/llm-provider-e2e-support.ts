@@ -1,3 +1,17 @@
+/**
+ * Provider E2E Support Helpers
+ *
+ * Purpose:
+ * - Share provider selection and dry-run helpers across package E2E runners.
+ *
+ * Key features:
+ * - Common env parsing and help text.
+ * - Shared package built-in selection snippets for real and dry-run E2E flows.
+ *
+ * Recent changes:
+ * - 2026-05-14: Updated built-in selections for the filesystem tool surface.
+ */
+
 import assert from 'node:assert/strict';
 import { access, rm } from 'node:fs/promises';
 import path from 'node:path';
@@ -507,7 +521,9 @@ export async function runProviderE2ESuite(options: {
         shell_cmd: false,
         web_fetch: false,
         list_files: false,
-        grep: false,
+        search_files: false,
+        create_directory: false,
+        path_exists: false,
       },
     });
     console.log(`tools=${Object.keys(resolvedTools).join(', ')}`);

@@ -16,6 +16,7 @@
  *
  * Recent changes:
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
+ * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
 
 import { wrapToolWithValidation } from './tool-validation.js';
@@ -36,7 +37,9 @@ export const BUILT_IN_TOOL_NAMES = [
   'read_file',
   'write_file',
   'list_files',
-  'grep',
+  'search_files',
+  'create_directory',
+  'path_exists',
 ] as const satisfies readonly BuiltInToolName[];
 
 export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
@@ -44,6 +47,7 @@ export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
 const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
+const BUILT_IN_TOOL_NAME_SET = new Set<string>(BUILT_IN_TOOL_NAMES);
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 
@@ -133,7 +137,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
       properties: {
         command: {
           type: 'string',
-          description: 'The shell command to execute (for example: "ls", "cat", "grep").',
+          description: 'The shell command to execute (for example: "ls", "cat", "pwd").',
         },
         parameters: {
           type: 'array',
@@ -314,45 +318,78 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
       additionalProperties: false,
     },
   },
-  grep: {
+  search_files: {
     description:
-      'Search text across files to find destinations. Supports plain text or regex queries.',
+      'Search for files by glob-like pattern inside the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {
-        query: {
+        pattern: {
           type: 'string',
-          description: 'Text or regex pattern to search for.',
+          description: 'Glob-like file pattern to search for, for example "**/*.ts" or "src/**/index.ts".',
         },
-        isRegexp: {
+        path: {
+          type: 'string',
+          description: 'Optional root directory for the file search.',
+        },
+        includeHidden: {
           type: 'boolean',
-          description: 'When true, treat query as a regular expression.',
-        },
-        directoryPath: {
-          type: 'string',
-          description: 'Optional root directory for recursive search.',
-        },
-        includePattern: {
-          type: 'string',
-          description: 'Optional include pattern.',
+          description: 'When true, include dot-prefixed files and folders in the search.',
         },
         maxResults: {
           type: 'number',
-          description: 'Maximum matches to return.',
-        },
-        contextLines: {
-          type: 'number',
-          description: 'Number of surrounding context lines per match.',
+          description: 'Maximum number of matched file paths to return.',
         },
       },
-      required: ['query'],
+      required: ['pattern'],
+      additionalProperties: false,
+    },
+  },
+  create_directory: {
+    description:
+      'Create a directory path inside the trusted working-directory scope, including missing parent directories.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Directory path to create.',
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+  },
+  path_exists: {
+    description:
+      'Check whether a file or directory path exists inside the trusted working-directory scope.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File or directory path to check.',
+        },
+      },
+      required: ['path'],
       additionalProperties: false,
     },
   },
 };
 
+function assertKnownBuiltInSelectionKeys(selection: Partial<Record<string, unknown>>): void {
+  for (const key of Object.keys(selection)) {
+    if (!BUILT_IN_TOOL_NAME_SET.has(key)) {
+      throw new Error(`Unknown built-in tool name "${key}".`);
+    }
+  }
+}
+
 function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolToggleMap {
   const resolved = {} as BuiltInToolToggleMap;
+  if (selection && typeof selection === 'object' && !Array.isArray(selection)) {
+    assertKnownBuiltInSelectionKeys(selection as Partial<Record<string, unknown>>);
+  }
   const humanInterventionEnabled = selection === undefined || selection === true
     ? true
     : selection === false
