@@ -103,6 +103,16 @@ The package currently reserves these built-in names:
 
 Built-ins are package-owned and reserved. Application code can disable or narrow them, but should not redefine them.
 
+For routine workspace operations, prefer the structured built-ins over `shell_cmd`:
+
+- `list_files` for directory listing
+- `search_files` for glob-like file discovery
+- `read_file` for bounded file inspection
+- `path_exists` for file or directory existence checks
+- `create_directory` for directory creation
+
+Treat `shell_cmd` as a fallback for explicit command execution, git workflows, and cases the structured workspace tools do not cover.
+
 `search_files` is the built-in file-discovery tool for glob-like path matching. `create_directory` creates directories recursively inside the trusted working directory. `path_exists` reports whether a file or directory currently exists and, when it does, whether it is a file or directory.
 
 `ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` remains supported as a legacy alias for backward compatibility. Enabling either name enables both built-ins so prompts and skills can use whichever name they already expect.

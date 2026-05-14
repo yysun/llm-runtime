@@ -73,11 +73,26 @@ const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
   'anthropic',
   'google',
 ]);
+const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
+  'list_files',
+  'search_files',
+  'read_file',
+  'path_exists',
+  'create_directory',
+] as const;
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
-  'When you need clarification, missing user-specific input, explicit approval, or another human decision, prefer the `ask_user_input` tool instead of asking only in plain text. The legacy alias `human_intervention_request` is equivalent when present.',
-  'Treat generic instructions such as "ask the user", "ask a question", "request approval", "ask_user_input", "human_intervention_request", "human-in-the-loop", or "HITL" as referring to this built-in human-intervention tool when it is available.',
-  'Use allowSkip only for explicitly dismissible, non-blocking prompts. Do not use allowSkip for approval-gated or otherwise blocking decisions.',
-  'Do not guess human-provided answers when this tool is available.',
+  'If `ask_user_input` is available, use it for clarification, missing user input, approvals, or other human decisions. `human_intervention_request` is the same tool.',
+  'Treat phrases such as "ask the user", "request approval", or "HITL" as referring to this tool when present.',
+  'Use `allowSkip` only for non-blocking prompts, not required approvals or blocking decisions.',
+  'Do not invent human answers.',
+].join(' ');
+export const DEFAULT_WORKSPACE_TOOL_HINT = [
+  'Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory` for normal workspace exploration.',
+  'Use `shell_cmd` only for explicit commands, git workflows, or gaps in the structured tools.',
+  'With `shell_cmd`, send one command plus `parameters`, not a pipeline string.',
+  'Preferred shell patterns: `rg --files`, `rg "pattern"`, `find`, `sed -n "1,200p" path`, `head -n 200 path`, `tail -n 100 path`.',
+  'Prefer `rg` over `grep`, and `head` or `sed -n` over `cat` for bounded reads.',
+  'On Windows, use PowerShell-native commands only if they still fit the same single-command model.',
 ].join(' ');
 
 type RuntimeDefaults = Readonly<{
@@ -382,12 +397,23 @@ function injectToolGuidance(
   messages: LLMChatMessage[],
   tools: Record<string, LLMToolDefinition>,
 ): LLMChatMessage[] {
+  const guidanceParts: string[] = [];
+
   const hasHumanInterventionTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.some((toolName) => Boolean(tools[toolName]));
-  if (!hasHumanInterventionTool) {
+  if (hasHumanInterventionTool) {
+    guidanceParts.push(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
+  }
+
+  const hasWorkspaceGuidanceTools = WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES.some((toolName) => Boolean(tools[toolName]));
+  if (hasWorkspaceGuidanceTools) {
+    guidanceParts.push(DEFAULT_WORKSPACE_TOOL_HINT);
+  }
+
+  if (guidanceParts.length === 0) {
     return messages;
   }
 
-  const guidanceText = DEFAULT_HUMAN_INTERVENTION_TOOL_HINT;
+  const guidanceText = guidanceParts.join('\n\n');
 
   const systemMessageIndex = messages.findIndex((message) => message.role === 'system');
   if (systemMessageIndex >= 0) {

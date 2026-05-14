@@ -2,8 +2,9 @@
 title: "Project Wiki"
 type: "index"
 status: "active"
+language: "default"
 last_commit: "29033dd339e5e9df5249fddab7aebf82abd32fb9"
-updated_at: "2026-04-23"
+updated_at: "2026-05-14"
 ---
 
 `llm-runtime` is a TypeScript package that wraps provider calls, built-in tools, MCP integration, skill loading, and a host-owned turn loop behind one publishable runtime boundary.
@@ -12,6 +13,7 @@ Core pages:
 - [[environment-vs-per-call]] explains the package's main ownership rule.
 - [[src-runtime]] covers environment creation, cached convenience execution, and tool resolution.
 - [[public-types]] summarizes the portable contracts exported from the package entrypoint.
+- [[system-prompt-schema]] explains how callers should assemble one stable system message from client instructions, AGENTS.md content, caller-owned tool policy, and runtime-injected tool guidance.
 - [[web-search-across-providers]] explains the new per-call cross-provider web-search surface.
 
 Execution surfaces:

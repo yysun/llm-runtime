@@ -19,6 +19,7 @@ Facts from source:
 - `resolveTools(...)` merges built-ins and extra/direct tools synchronously; `resolveToolsAsync(...)` adds MCP-discovered tools on top.
 - Request-local `tools` override same-name resolved tools, but built-in name collisions are rejected before merge.
 - `generate(...)` and `stream(...)` share the same environment and tool-resolution pipeline, then dispatch into provider-specific helpers from [[provider-adapters]]. OpenAI, Azure, XAI, generic OpenAI-compatible backends, and Ollama all route through the OpenAI-compatible adapter; Anthropic and Google keep their own adapter paths.
+- Before dispatch, the runtime can inject package-owned tool guidance into the first system message. Caller-owned system content, including any embedded AGENTS.md instructions or caller-defined tool policy, should therefore be assembled into one leading system block before the runtime appends its own guidance.
 - `webSearch` is an explicit per-call option on `generate(...)` and `stream(...)`. `true` normalizes to an empty provider-default config, `false` disables it, and the runtime forwards it only when requested rather than enabling it implicitly for generic OpenAI-compatible backends.
 - The module exports `disposeLLMEnvironment(...)` for explicit environment cleanup and `disposeLLMRuntimeCaches()` for cached convenience-path cleanup.
 - Explicit-environment cleanup is ownership-aware: only MCP registries created by the runtime are shut down, while caller-injected registries remain caller-owned.
@@ -29,4 +30,4 @@ Design boundary:
 - It owns lifecycle cleanup only for runtime-created registries and caches.
 - It does not own message persistence, queueing, transcript policy, or tool-loop state transitions; those remain in callers or in [[src-turn-loop]].
 
-Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For provider-specific search behavior, see [[web-search-across-providers]]. For the April 2026 cleanup boundary and public shutdown APIs, see [[turn-loop-safety-and-lifecycle]].
+Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For provider-specific search behavior, see [[web-search-across-providers]]. For the recommended caller-facing layout of system prompt sections, see [[system-prompt-schema]]. For the April 2026 cleanup boundary and public shutdown APIs, see [[turn-loop-safety-and-lifecycle]].

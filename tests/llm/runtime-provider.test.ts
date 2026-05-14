@@ -373,8 +373,8 @@ describe('llm-runtime runtime provider dispatch', () => {
   it('injects human_intervention_request guidance when the built-in is available', async () => {
     const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
 
-    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use allowSkip only for explicitly dismissible, non-blocking prompts.');
-    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions.');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use `allowSkip` only for non-blocking prompts');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not invent human answers.');
 
     await generate({
       provider: 'openai',
@@ -404,6 +404,86 @@ describe('llm-runtime runtime provider dispatch', () => {
         content: 'I may need clarification.',
       },
     ]);
+  });
+
+  it('injects workspace tool guidance when structured workspace tools are available', async () => {
+    const { DEFAULT_WORKSPACE_TOOL_HINT, generate } = await import('../../src/runtime.js');
+
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory`');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Use `shell_cmd` only for explicit commands, git workflows, or gaps in the structured tools.');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Preferred shell patterns: `rg --files`, `rg "pattern"`, `find`');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Prefer `rg` over `grep`');
+
+    await generate({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Inspect the workspace.',
+        },
+      ],
+      builtIns: {
+        read_file: true,
+        search_files: true,
+        shell_cmd: true,
+      },
+    });
+
+    const request = mockGenerateOpenAIResponse.mock.calls.at(-1)?.[0];
+    expect(request?.messages).toEqual([
+      expect.objectContaining({
+        role: 'system',
+        content: DEFAULT_WORKSPACE_TOOL_HINT,
+      }),
+      {
+        role: 'user',
+        content: 'Inspect the workspace.',
+      },
+    ]);
+  });
+
+  it('merges workspace guidance with other injected tool guidance', async () => {
+    const {
+      DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
+      DEFAULT_WORKSPACE_TOOL_HINT,
+      stream,
+    } = await import('../../src/runtime.js');
+
+    await stream({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'system',
+          content: 'Follow the repo conventions.',
+        },
+        {
+          role: 'user',
+          content: 'Proceed carefully.',
+        },
+      ],
+      builtIns: {
+        human_intervention_request: true,
+        read_file: true,
+        shell_cmd: true,
+      },
+    });
+
+    const request = mockStreamOpenAIResponse.mock.calls.at(-1)?.[0];
+    expect(request?.messages).toHaveLength(2);
+    expect(request?.messages?.[0]).toEqual(expect.objectContaining({
+      role: 'system',
+      content: expect.stringContaining('Follow the repo conventions.'),
+    }));
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_WORKSPACE_TOOL_HINT);
   });
 
   it('merges human_intervention_request guidance into an existing system message', async () => {

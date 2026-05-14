@@ -32,6 +32,7 @@ export * from './turn-loop.js';
 export { runTurnLoop as respondWithTools } from './turn-loop.js';
 export {
   DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
+  DEFAULT_WORKSPACE_TOOL_HINT,
   createLLMEnvironment,
   disposeLLMEnvironment,
   disposeLLMRuntimeCaches,

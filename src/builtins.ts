@@ -131,7 +131,7 @@ const HUMAN_INPUT_PARAMETERS = {
 const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'name' | 'execute'>> = {
   shell_cmd: {
     description:
-      'Execute a user-requested shell command and capture output. Use this only when the user explicitly asks to run a command.',
+      'Execute a user-requested shell command and capture output. Prefer the structured workspace tools (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`) for routine workspace discovery and inspection. Use this tool when the user explicitly asks to run a command, when you need git or other command-specific behavior, or when the structured tools do not cover the task.',
     parameters: {
       type: 'object',
       properties: {
@@ -230,7 +230,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   read_file: {
     description:
-      'Read file contents with bounded line pagination. Relative paths resolve from the trusted working directory.',
+      'Read file contents with bounded line pagination. Relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
     parameters: {
       type: 'object',
       properties: {
@@ -285,7 +285,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   list_files: {
     description:
-      'List file and directory names for quick workspace exploration.',
+      'List file and directory names for quick workspace exploration. Prefer this over `shell_cmd` for routine directory listing inside the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {
@@ -320,7 +320,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   search_files: {
     description:
-      'Search for files by glob-like pattern inside the trusted working-directory scope.',
+      'Search for files by glob-like pattern inside the trusted working-directory scope. Prefer this over `shell_cmd` for routine file discovery.',
     parameters: {
       type: 'object',
       properties: {
@@ -347,7 +347,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   create_directory: {
     description:
-      'Create a directory path inside the trusted working-directory scope, including missing parent directories.',
+      'Create a directory path inside the trusted working-directory scope, including missing parent directories. Prefer this over `shell_cmd` for routine directory creation.',
     parameters: {
       type: 'object',
       properties: {
@@ -362,7 +362,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   path_exists: {
     description:
-      'Check whether a file or directory path exists inside the trusted working-directory scope.',
+      'Check whether a file or directory path exists inside the trusted working-directory scope. Prefer this over `shell_cmd` for routine file or directory existence checks.',
     parameters: {
       type: 'object',
       properties: {
