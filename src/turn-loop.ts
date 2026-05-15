@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Added package-owned default text response handling for `respondWithTools(...)` before any observed tool result.
  * - 2026-03-29: Added the first generic `runTurnLoop(...)` API for host-agnostic tool-loop orchestration.
  */
 
@@ -65,6 +66,8 @@ export type TurnLoopTextResponseClassification =
   | 'verified_final_response'
   | 'intent_only_narration'
   | 'non_progressing';
+
+export type TurnLoopDefaultTextResponseMode = 'permissive' | 'require_tool_result';
 
 export interface TurnLoopTextResponseAssessment {
   classification: TurnLoopTextResponseClassification;
@@ -199,6 +202,7 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
   initialEmptyTextRetryCount?: number;
   rejectedTextRetryLimit?: number;
   initialRejectedTextRetryCount?: number;
+  defaultTextResponseMode?: TurnLoopDefaultTextResponseMode;
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
@@ -293,10 +297,25 @@ export interface RunTurnLoopResult<TState> {
   stop: TurnLoopStopMetadata;
 }
 
-const INTENT_ONLY_NARRATION_PATTERN = /^\s*(?:ok(?:ay)?[,:]?\s+|sure[,:]?\s+|next[,:]?\s+|first[,:]?\s+|then[,:]?\s+)?(?:i\s+will|i['’]ll|let\s+me|i\s+am\s+going\s+to|i'm\s+going\s+to)\s+(?:run|check|search|open|update|inspect|read|look\s+for|review|use|call|execute|try|fetch|edit|write|ask)\b/i;
+const INTENT_ONLY_NARRATION_PATTERNS = [
+  /\b(?:i\s+will|i['’]ll|let\s+me|i\s+am\s+going\s+to|i'm\s+going\s+to)\s+(?:(?:now|then|next|immediately)\s+)?(?:run|check|search|open|update|inspect|read|look\s+for|review|use|call|execute|query|load|save|try|fetch|edit|write|ask)\b/i,
+  /\b(?:proceeding|starting|beginning)\b[^.?!\n]{0,100}\b(run|check|search|lookup|look\s+up|review|call|execute|query|load|save|fetch|read|write|update|inspect)\b/i,
+  /\b(?:i\s+am|i['’]m)\s+(?:starting|beginning|searching|checking|fetching|calling|querying|looking\s+up|running|executing|loading|saving)\b/i,
+];
 
 function looksLikeIntentOnlyNarration(content: string): boolean {
-  return INTENT_ONLY_NARRATION_PATTERN.test(content.trim());
+  const normalizedContent = content.trim();
+  const candidateFragments = [
+    normalizedContent,
+    ...normalizedContent
+      .split(/\r?\n+/)
+      .map((line) => line.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s*)/, '').trim())
+      .filter(Boolean),
+  ];
+
+  return candidateFragments.some((fragment) => (
+    INTENT_ONLY_NARRATION_PATTERNS.some((pattern) => pattern.test(fragment))
+  ));
 }
 
 function normalizeTextAssessment(
@@ -321,6 +340,10 @@ function getDefaultRejectedTextInstruction(
   }
 
   return DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION;
+}
+
+function hasToolResultMessage(messages: LLMChatMessage[]): boolean {
+  return messages.some((message) => message.role === 'tool');
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
@@ -495,6 +518,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
   options: RunTurnLoopOptions<TState, TMessage>,
 ): Promise<RunTurnLoopResult<TState>> {
   const callModel = resolveModelCaller(options);
+  const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
   const maxIterations = normalizePositiveInteger(options.maxIterations, DEFAULT_TURN_LOOP_MAX_ITERATIONS);
   const maxConsecutiveToolTurns = normalizePositiveInteger(
     options.maxConsecutiveToolTurns,
@@ -833,13 +857,15 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
 
     if (response.type === 'text' && String(response.content || '').trim()) {
       const responseText = String(response.content || '');
+      const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'
+        && !hasToolResultMessage(messages);
       const requiresActionEvidence = await options.requiresActionEvidence?.({
         state,
         responseText,
         response,
         messages,
         iteration,
-      }) ?? false;
+      }) ?? packageRequiresActionEvidence;
       const explicitAssessment = normalizeTextAssessment(await options.classifyTextResponse?.({
         state,
         responseText,
@@ -848,10 +874,13 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
         iteration,
         requiresActionEvidence,
       }));
+      const defaultRejectedClassification = looksLikeIntentOnlyNarration(responseText)
+        ? 'intent_only_narration'
+        : 'non_progressing';
       const assessment = explicitAssessment
         ?? {
-          classification: requiresActionEvidence && looksLikeIntentOnlyNarration(responseText)
-            ? 'intent_only_narration'
+          classification: requiresActionEvidence
+            ? defaultRejectedClassification
             : 'verified_final_response',
         } satisfies TurnLoopTextResponseAssessment;
 
@@ -1037,4 +1066,14 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
       },
     });
   }
+}
+
+export async function respondWithTools<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
+  options: RunTurnLoopOptions<TState, TMessage>,
+): Promise<RunTurnLoopResult<TState>> {
+  return await runTurnLoop({
+    ...options,
+    defaultTextResponseMode: options.defaultTextResponseMode ?? 'require_tool_result',
+    rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 1,
+  });
 }

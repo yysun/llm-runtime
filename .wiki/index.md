@@ -4,7 +4,7 @@ type: "index"
 status: "active"
 language: "default"
 last_commit: "29033dd339e5e9df5249fddab7aebf82abd32fb9"
-updated_at: "2026-05-14"
+updated_at: "2026-05-15"
 ---
 
 `llm-runtime` is a TypeScript package that wraps provider calls, built-in tools, MCP integration, skill loading, and a host-owned turn loop behind one publishable runtime boundary.
@@ -32,6 +32,7 @@ Quality and recent changes:
 - [[testing-and-showcases]] summarizes unit coverage, real-provider showcases, and deterministic hardening e2e coverage.
 - [[provider-adapters]] now covers provider-native web search, Gemini schema normalization, and OpenAI-compatible request mapping across Azure, XAI, Ollama, and generic backends.
 - [[action-execution-hardening]] captures the April 2026 fix that prevents narration-only false success in tool-capable turns.
+- [[language-agnostic-continuation]] explains, in layman's terms, how the runtime decides whether work actually happened instead of trusting English progress narration.
 - [[turn-loop-safety-and-lifecycle]] captures the April 2026 expansion that added hard loop limits, trace metadata, synthetic tool-call marking, and public cleanup APIs.
 - [[approval-and-synthetic-tool-call-messages]] explains the difference between host-mediated HITL approval artifacts and runtime-generated synthetic tool-call messages.
 

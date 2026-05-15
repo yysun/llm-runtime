@@ -17,6 +17,7 @@
  * - Serves as the primary import target for `core` and external consumers.
  *
  * Recent changes:
+ * - 2026-05-15: Exported a dedicated `respondWithTools(...)` wrapper with package-owned tool-capable text handling defaults.
  * - 2026-03-29: Exported the generic host-agnostic `runTurnLoop(...)` package API.
  * - 2026-03-27: Initial public API for `packages/llm`.
  */
@@ -29,7 +30,6 @@ export * from './skills.js';
 export * from './tools.js';
 export * from './tool-validation.js';
 export * from './turn-loop.js';
-export { runTurnLoop as respondWithTools } from './turn-loop.js';
 export {
   DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
   DEFAULT_WORKSPACE_TOOL_HINT,

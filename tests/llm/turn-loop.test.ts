@@ -1,3 +1,10 @@
+/**
+ * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
+ * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
+ * Recent changes:
+ * - 2026-05-15: Added package-default continuation coverage for `respondWithTools(...)` with non-English and mixed-language unresolved text.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockGenerate, mockStream } = vi.hoisted(() => ({
@@ -76,23 +83,70 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.state.finalText).toBe('echo:hello');
   });
 
-  it('exports respondWithTools as an additive alias', async () => {
+  it('respondWithTools preserves permissive completion after an observed tool round', async () => {
+    const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
+
     const result = await respondWithTools({
       initialState: {
-        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage],
+        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
         finalText: '',
       },
       emptyTextRetryLimit: 1,
-      callModel: vi.fn(async ({ messages }) => text(`echo:${messages.at(-1)?.content}`)),
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
       buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
       onTextResponse: async ({ state, responseText }) => ({
         state: { ...state, finalText: responseText },
       }),
-      onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
     expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe('echo:hello');
+    expect(result.state.finalText).toBe('完成了');
+  });
+
+  it('respondWithTools still requires evidence after a tool round that did not produce a tool result message', async () => {
+    const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
+
+    const result = await respondWithTools({
+      initialState: {
+        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'non_progressing', requiresActionEvidence: true }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'non_progressing',
+      responseText: '完成了',
+    });
   });
 
   it('uses the package-managed generate path', async () => {
@@ -144,6 +198,206 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.state.rejected).toEqual({
       classification: 'intent_only_narration',
       responseText: 'I will run the command now.',
+    });
+  });
+
+  it('respondWithTools rejects non-English unresolved text before any tool result by default', async () => {
+    const result = await respondWithTools({
+      initialState: {
+        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text('我现在去检查文件。')),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'non_progressing', requiresActionEvidence: true }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'non_progressing',
+      responseText: '我现在去检查文件。',
+    });
+  });
+
+  it('respondWithTools continues internally after non-English unresolved text without client-managed follow-up', async () => {
+    const responses = [
+      text('我现在去检查文件。'),
+      toolCall('read_file', { filePath: 'notes.txt' }),
+      text('完成了'),
+    ];
+
+    const result = await respondWithTools({
+      initialState: {
+        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
+      ),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          finalText: responseText,
+        },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.retries).toEqual([
+      expect.objectContaining({ kind: 'rejected_text', decision: 'retry', classification: 'non_progressing' }),
+    ]);
+    expect(result.state.finalText).toBe('完成了');
+  });
+
+  it('respondWithTools rejects mixed-language unresolved text before any tool result by default', async () => {
+    const result = await respondWithTools({
+      initialState: {
+        messages: [{ role: 'user', content: 'find contact by name Jazz Gill' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text('好的，我先 search 一下。')),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'non_progressing', requiresActionEvidence: true }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'non_progressing',
+      responseText: '好的，我先 search 一下。',
+    });
+  });
+
+  it('treats proceeding-style narration as intent-only when action evidence is still required', async () => {
+    const result = await runTurnLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'Search for Jazz Gill.' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text('Proceeding with contact search now.')),
+      buildMessages: async ({ state }) => state.messages,
+      requiresActionEvidence: () => true,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'intent_only_narration' }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'intent_only_narration',
+      responseText: 'Proceeding with contact search now.',
+    });
+  });
+
+  it('rejects plan-first narration that ends by claiming tool work is proceeding', async () => {
+    const responseText = [
+      'To find **Jazz Gill**, I need to search the CRM using an allowed route from `process/api.yaml`.',
+      '',
+      'I will:',
+      '',
+      '1. Read `.env` to load the required workspace variables.',
+      '2. Inspect `process/api.yaml` to confirm the correct search route.',
+      '3. Call the narrowest valid `GET` route to search by name.',
+      '',
+      'Proceeding with CRM search now.',
+    ].join('\n');
+
+    const result = await runTurnLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'find contact by name Jazz Gill' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text(responseText)),
+      buildMessages: async ({ state }) => state.messages,
+      requiresActionEvidence: () => true,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText: rejectedResponseText }) => ({
+        state: { ...state, rejected: { classification, responseText: rejectedResponseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'intent_only_narration' }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'intent_only_narration',
+      responseText,
+    });
+  });
+
+  it('rejects acknowledgement-prefixed narration that says it will now execute work', async () => {
+    const responseText = [
+      'Great - proceeding with CRM search for **Jazz Gill**.',
+      '',
+      'I will now execute the search and return with a summary of results.',
+    ].join('\n');
+
+    const result = await runTurnLoop({
+      initialState: {
+        messages: [{ role: 'user', content: '1' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text(responseText)),
+      buildMessages: async ({ state }) => state.messages,
+      requiresActionEvidence: () => true,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText: rejectedResponseText }) => ({
+        state: { ...state, rejected: { classification, responseText: rejectedResponseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'intent_only_narration' }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'intent_only_narration',
+      responseText,
     });
   });
 

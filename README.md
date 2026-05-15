@@ -190,7 +190,7 @@ The difference is output delivery:
 
 `respondWithTools(...)` is the preferred user-facing name for the package-owned iterative loop that manages repeated model turns without taking ownership of harness state, persistence, or tool policy.
 
-`runTurnLoop(...)` remains available as the backward-compatible name for the same API.
+`runTurnLoop(...)` remains available as the lower-level backward-compatible API when a harness wants to opt out of some package defaults.
 
 Use it when your harness needs more control than a single `generate(...)` or `stream(...)` call, but still wants one package boundary for:
 
@@ -203,7 +203,7 @@ Use it when your harness needs more control than a single `generate(...)` or `st
 The split of responsibilities is deliberate:
 
 - The package owns loop repetition, hard-stop safety checks, response normalization, trace collection, and lifecycle hook ordering.
-- The harness owns state shape, message construction, tool execution, persistence, replay, and business-specific completion policy.
+- The harness owns state shape, message construction, tool execution, persistence, replay, and business-specific final-answer overrides.
 
 ### Safety And Stop Reasons
 
@@ -213,6 +213,10 @@ The split of responsibilities is deliberate:
 - `maxConsecutiveToolTurns`
 - `maxWallTimeMs`
 - repeated identical tool-call suppression through `repeatedToolCallGuard`
+- `defaultTextResponseMode: 'require_tool_result'`, which rejects unresolved plain text before any observed tool result unless the harness explicitly overrides classification
+- `rejectedTextRetryLimit: 1`, so unresolved tool-capable text gets one internal correction turn by default before the loop stops
+
+`runTurnLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
 
 Terminal reasons are stable string literals suitable for harness branching:
 
@@ -250,14 +254,16 @@ They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the ot
 
 ### Turn-Loop Hardening
 
-For tool-capable turns, `respondWithTools(...)` can reject intent-only narration such as "I will check the file" when the harness still requires action evidence.
+For tool-capable turns, `respondWithTools(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries once internally by default. English intent-only narration such as "I will check the file" is still labeled more specifically when the fallback heuristic matches.
 
 Use these hooks when your harness needs hardening against weak tool users:
 
-- `requiresActionEvidence(...)` tells the package whether a non-empty text reply still needs proof of action before it can be accepted as final.
+- `requiresActionEvidence(...)` lets the harness tighten or relax the package default for whether a non-empty text reply still needs proof of action before it can be accepted as final.
 - `classifyTextResponse(...)` lets the harness override package defaults and explicitly classify replies as `verified_final_response`, `intent_only_narration`, or `non_progressing`.
 - `onRejectedTextResponse(...)` lets the harness persist rejected narration or other non-progressing text before retrying or stopping.
 - `rejectedTextRetryLimit` bounds how many rejected text retries the package should allow before returning `rejected_text_response` instead of false success.
+
+`defaultTextResponseMode` is also available on `runTurnLoop(...)` for callers that want package-owned unresolved-text handling without switching to the `respondWithTools(...)` wrapper.
 
 The package also exports reusable recovery helpers:
 
@@ -281,7 +287,7 @@ When enabled:
 
 When disabled, plain-text normalization still works, but the public tool-call surface is unchanged.
 
-The boundary remains the same: the package can classify and reject narration, but the harness still owns the policy for when a reply is truly verified and how bounded recovery should be persisted.
+The boundary remains the same: the package now owns the default unresolved-text handling for `respondWithTools(...)`, while the harness still owns domain-specific acceptance overrides and how bounded recovery should be persisted.
 
 You can provide either:
 
