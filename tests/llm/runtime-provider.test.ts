@@ -114,14 +114,14 @@ vi.mock('../../src/google-direct.js', () => ({
 
 describe('llm-runtime runtime provider dispatch', () => {
   afterEach(async () => {
-    const { disposeLLMRuntimeCaches } = await import('../../src/runtime.js');
-    await disposeLLMRuntimeCaches();
+    const { disposeRuntimeCaches } = await import('../../src/runtime.js');
+    await disposeRuntimeCaches();
   });
 
   it('dispatches generate requests through an explicit environment', async () => {
-    const { createLLMEnvironment, generate } = await import('../../src/runtime.js');
+    const { createRuntime, generate } = await import('../../src/runtime.js');
 
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       providers: {
         openai: {
           apiKey: 'test-openai-key',
@@ -175,9 +175,9 @@ describe('llm-runtime runtime provider dispatch', () => {
   });
 
   it('dispatches stream requests through an explicit environment', async () => {
-    const { createLLMEnvironment, stream } = await import('../../src/runtime.js');
+    const { createRuntime, stream } = await import('../../src/runtime.js');
 
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       providers: {
         openai: {
           apiKey: 'test-openai-key',
@@ -371,7 +371,7 @@ describe('llm-runtime runtime provider dispatch', () => {
     }));
   });
 
-  it('injects human_intervention_request guidance when the built-in is available', async () => {
+  it('injects ask_user_input guidance when the built-in is available', async () => {
     const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
 
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use `allowSkip` only for non-blocking prompts');
@@ -392,21 +392,18 @@ describe('llm-runtime runtime provider dispatch', () => {
         },
       ],
       builtIns: {
-        human_intervention_request: true,
+        ask_user_input: true,
       },
     });
 
     const request = mockGenerateOpenAIResponse.mock.calls.at(-1)?.[0];
-    expect(request?.messages).toEqual([
-      expect.objectContaining({
-        role: 'system',
-        content: DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
-      }),
-      {
-        role: 'user',
-        content: 'I may need clarification.',
-      },
-    ]);
+    expect(request?.messages?.[0]).toEqual(expect.objectContaining({ role: 'system' }));
+    expect(String(request?.messages?.[0]?.content ?? '').match(/<llm-runtime-loop-contract>/g)?.length ?? 0).toBe(1);
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
+    expect(request?.messages?.[1]).toEqual({
+      role: 'user',
+      content: 'I may need clarification.',
+    });
   });
 
   it('passes search tools and read-only-first HITL guidance to the mocked provider client', async () => {
@@ -479,16 +476,12 @@ describe('llm-runtime runtime provider dispatch', () => {
     });
 
     const request = mockGenerateOpenAIResponse.mock.calls.at(-1)?.[0];
-    expect(request?.messages).toEqual([
-      expect.objectContaining({
-        role: 'system',
-        content: DEFAULT_WORKSPACE_TOOL_HINT,
-      }),
-      {
-        role: 'user',
-        content: 'Inspect the workspace.',
-      },
-    ]);
+    expect(request?.messages?.[0]).toEqual(expect.objectContaining({ role: 'system' }));
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_WORKSPACE_TOOL_HINT);
+    expect(request?.messages?.[1]).toEqual({
+      role: 'user',
+      content: 'Inspect the workspace.',
+    });
   });
 
   it('merges workspace guidance with other injected tool guidance', async () => {
@@ -515,7 +508,7 @@ describe('llm-runtime runtime provider dispatch', () => {
         },
       ],
       builtIns: {
-        human_intervention_request: true,
+        ask_user_input: true,
         read_file: true,
         shell_cmd: true,
       },
@@ -527,11 +520,12 @@ describe('llm-runtime runtime provider dispatch', () => {
       role: 'system',
       content: expect.stringContaining('Follow the repo conventions.'),
     }));
+    expect(String(request?.messages?.[0]?.content ?? '').match(/<llm-runtime-loop-contract>/g)?.length ?? 0).toBe(1);
     expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
     expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_WORKSPACE_TOOL_HINT);
   });
 
-  it('merges human_intervention_request guidance into an existing system message', async () => {
+  it('merges ask_user_input guidance into an existing system message', async () => {
     const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, stream } = await import('../../src/runtime.js');
 
     await stream({
@@ -551,7 +545,7 @@ describe('llm-runtime runtime provider dispatch', () => {
         },
       ],
       builtIns: {
-        human_intervention_request: true,
+        ask_user_input: true,
       },
     });
 

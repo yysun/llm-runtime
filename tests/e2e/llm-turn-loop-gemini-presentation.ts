@@ -17,10 +17,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { config as loadDotEnv } from 'dotenv';
 import {
-  createLLMEnvironment,
-  disposeLLMEnvironment,
+  createRuntime,
   generate,
-  runTurnLoop,
+  runCompletionLoop,
   type LLMChatMessage,
   type LLMResponse,
 } from '../../src/index.js';
@@ -96,7 +95,6 @@ async function runPresentationE2E(dryRun: boolean) {
   const builtIns = {
     read_file: true,
     load_skill: true,
-    human_intervention_request: false,
     shell_cmd: false,
     web_fetch: false,
     write_file: false,
@@ -105,7 +103,7 @@ async function runPresentationE2E(dryRun: boolean) {
     create_directory: false,
     path_exists: false,
   };
-  const environment = createLLMEnvironment({
+  const environment = createRuntime({
     providers: geminiSelection.providers,
     skillRoots: [skillRoot],
   });
@@ -128,7 +126,7 @@ async function runPresentationE2E(dryRun: boolean) {
       return;
     }
 
-    const result = await runTurnLoop<PresentationState>({
+    const result = await runCompletionLoop<PresentationState>({
       initialState: {
         messages: [
           {
@@ -269,7 +267,7 @@ async function runPresentationE2E(dryRun: boolean) {
     console.log(result.state.finalText);
     console.log(`\nstatus: PASS in ${result.iterations} turn(s)`);
   } finally {
-    await disposeLLMEnvironment(environment).catch(() => undefined);
+    await environment.dispose().catch(() => undefined);
   }
 }
 

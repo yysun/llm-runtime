@@ -5,10 +5,10 @@
  * - 2026-05-15: Added a reusable scripted mock LLM scenario helper and a Jazz Gill package-managed flow regression.
  * - 2026-05-15: Added action-evidence separation regressions for HITL tools, bound executors, custom tools, and trace metadata.
  * - 2026-05-15: Added regressions for run-scoped evidence, malformed control-tool retries, and merged loop-contract prompt injection.
- * - 2026-05-15: Added preferred `runCompletionLoop(...)` and `complete(...)` coverage alongside legacy alias coverage.
+ * - 2026-05-15: Added preferred `runCompletionLoop(...)` and `complete(...)` coverage.
  * - 2026-05-15: Added agent control tool coverage for deterministic final, needs-input, and blocked outcomes.
  * - 2026-05-15: Added completion-loop prompt injection, stronger retry defaults, and explicit final-classification coverage.
- * - 2026-05-15: Added package-default continuation coverage for `respondWithTools(...)` with non-English and mixed-language unresolved text.
+ * - 2026-05-15: Added package-default continuation coverage for `complete(...)` with non-English and mixed-language unresolved text.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,13 +34,12 @@ import {
   DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
   DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
-  runTurnLoop,
 } from '../../src/completion-loop.js';
-import { complete, respondWithTools } from '../../src/index.js';
+import { complete } from '../../src/index.js';
 import { createMockLLMScenario } from './mock-llm-scenario.test-support.js';
 import {
-  runTurnLoop as legacyPathRunTurnLoop,
-  respondWithTools as legacyPathRespondWithTools,
+  runCompletionLoop as compatibilityPathRunCompletionLoop,
+  complete as compatibilityPathComplete,
 } from '../../src/turn-loop.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
@@ -217,7 +216,7 @@ describe('llm-runtime completion loop', () => {
   it('uses the package-managed generate path', async () => {
     mockGenerate.mockResolvedValueOnce(text('done'));
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'summarize this' } satisfies LLMChatMessage],
         seenTexts: [] as string[],
@@ -235,8 +234,32 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.seenTexts).toEqual(['done']);
   });
 
+  it('defaults complete() package-managed built-ins to include ask_user_input', async () => {
+    mockGenerate.mockResolvedValueOnce(text('done'));
+
+    await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'summarize this' } satisfies LLMChatMessage],
+      },
+      modelRequest: { provider: 'openai', model: 'gpt-5' },
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'openai',
+      model: 'gpt-5',
+      builtIns: expect.objectContaining({
+        ask_user_input: true,
+        read_file: true,
+        search_files: true,
+      }),
+    }));
+  });
+
   it('supports explicit host classification of intent-only narration', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -295,9 +318,12 @@ describe('llm-runtime completion loop', () => {
       role: 'system',
       content: expect.stringContaining(DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT),
     });
+    expect(String(seenMessages[0]?.[0]?.content ?? '').match(/<llm-runtime-loop-contract>/g)?.length ?? 0).toBe(1);
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
-    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before performing a safe broad search.');
-    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use ask_user_input only when the missing input cannot be safely discovered through read-only tools');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires required user input.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Prefer action over explanation.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before safe discovery.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use ask_user_input only when:');
     expect(seenMessages[0]?.[1]).toEqual({ role: 'user', content: 'inspect the file' });
   });
 
@@ -442,7 +468,7 @@ describe('llm-runtime completion loop', () => {
     });
 
     expect(mockGenerate).toHaveBeenCalledTimes(4);
-    expect(String(scenario.seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before performing a safe broad search.');
+    expect(String(scenario.seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before safe discovery.');
     expect(result.reason).toBe('text_response');
     expect(result.toolCalls).toEqual([
       expect.objectContaining({ toolName: 'ask_user_input', countsAsActionEvidence: false }),
@@ -504,7 +530,9 @@ describe('llm-runtime completion loop', () => {
     expect(result.reason).toBe('text_response');
     expect(seenMessages[0]).toHaveLength(2);
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Follow repo conventions.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '').match(/<llm-runtime-loop-contract>/g)?.length ?? 0).toBe(1);
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('You may stop only by:');
   });
 
   it.each([
@@ -667,7 +695,6 @@ describe('llm-runtime completion loop', () => {
         provider: 'openai',
         model: 'gpt-5',
         builtIns: false,
-        includeDeprecatedBuiltInAliases: true,
         extraTools: [extraTool],
         tools: {
           direct_lookup: directTool,
@@ -703,7 +730,6 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('done');
     expect(mockExecuteToolCall).toHaveBeenCalledWith(expect.objectContaining({
       builtIns: false,
-      includeDeprecatedBuiltInAliases: true,
       extraTools: expect.arrayContaining([
         extraTool,
         expect.objectContaining({ name: 'final_answer' }),
@@ -1248,8 +1274,8 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('Found record 42.');
   });
 
-  it('respondWithTools rejects non-English unresolved text before any tool result under require_tool_result mode', async () => {
-    const result = await respondWithTools({
+  it('complete rejects non-English unresolved text before any tool result under require_tool_result mode', async () => {
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1276,14 +1302,14 @@ describe('llm-runtime completion loop', () => {
     });
   });
 
-  it('respondWithTools continues internally after non-English unresolved text without client-managed follow-up', async () => {
+  it('complete continues internally after non-English unresolved text without client-managed follow-up', async () => {
     const responses = [
       text('我现在去检查文件。'),
       toolCall('read_file', { filePath: 'notes.txt' }),
       text('完成了'),
     ];
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
         finalText: '',
@@ -1321,7 +1347,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('完成了');
   });
 
-  it('respondWithTools retries unresolved action text twice in require_tool_result mode before a tool call succeeds', async () => {
+  it('complete retries unresolved action text twice in require_tool_result mode before a tool call succeeds', async () => {
     const responses = [
       text('我先检查一下文件。'),
       text('先にファイルを確認します。'),
@@ -1329,7 +1355,7 @@ describe('llm-runtime completion loop', () => {
       text('completed'),
     ];
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
         finalText: '',
@@ -1368,8 +1394,8 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('completed');
   });
 
-  it('respondWithTools rejects mixed-language unresolved text before any tool result under require_tool_result mode', async () => {
-    const result = await respondWithTools({
+  it('complete rejects mixed-language unresolved text before any tool result under require_tool_result mode', async () => {
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'find contact by name Jazz Gill' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1396,8 +1422,8 @@ describe('llm-runtime completion loop', () => {
     });
   });
 
-  it('respondWithTools rejects Japanese unresolved text before any tool result under require_tool_result mode', async () => {
-    const result = await respondWithTools({
+  it('complete rejects Japanese unresolved text before any tool result under require_tool_result mode', async () => {
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1425,7 +1451,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('treats bare text as protocol-invalid in agent control mode by default', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1456,7 +1482,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('treats proceeding-style narration as intent-only when action evidence is still required', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'Search for Jazz Gill.' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1499,7 +1525,7 @@ describe('llm-runtime completion loop', () => {
       'Proceeding with CRM search now.',
     ].join('\n');
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'find contact by name Jazz Gill' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1536,7 +1562,7 @@ describe('llm-runtime completion loop', () => {
       'I will now execute the search and return with a summary of results.',
     ].join('\n');
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: '1' } satisfies LLMChatMessage],
         rejected: null as null | { classification: string; responseText: string },
@@ -1572,7 +1598,7 @@ describe('llm-runtime completion loop', () => {
       text('Here is the verified answer.'),
     ];
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
         finalText: '',
@@ -1614,7 +1640,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('stops deterministically on need_user_input control tool calls', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
         missingQuestion: '',
@@ -1644,7 +1670,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('stops deterministically on blocked control tool calls', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
         blockReason: '',
@@ -1675,7 +1701,7 @@ describe('llm-runtime completion loop', () => {
     const responses = [text('Calling tool: read_file'), text('File read successfully.')];
     const events: string[] = [];
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect file' } satisfies LLMChatMessage] as LLMChatMessage[],
         toolRuns: 0,
@@ -1753,7 +1779,7 @@ describe('llm-runtime completion loop', () => {
       next: { control: 'continue' as const },
     }));
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
         toolRuns: 0,
@@ -1780,7 +1806,7 @@ describe('llm-runtime completion loop', () => {
   it('stops on max_iterations_exceeded', async () => {
     const callModel = vi.fn(async () => text(''));
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: { messages: [{ role: 'user', content: 'keep trying' } satisfies LLMChatMessage] },
       emptyTextRetryLimit: 5,
       maxIterations: 2,
@@ -1796,7 +1822,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('stops on tool_calls_response when the host does not request continuation after tool execution', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'use tools until done' } satisfies LLMChatMessage],
       },
@@ -1821,7 +1847,7 @@ describe('llm-runtime completion loop', () => {
       next: { control: 'continue' as const },
     }));
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: { messages: [{ role: 'user', content: 'use tools until done' } satisfies LLMChatMessage] },
       emptyTextRetryLimit: 0,
       maxConsecutiveToolTurns: 1,
@@ -1843,7 +1869,7 @@ describe('llm-runtime completion loop', () => {
       next: { control: 'continue' as const },
     }));
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: { messages: [{ role: 'user', content: 'loop the same tool call' } satisfies LLMChatMessage] },
       emptyTextRetryLimit: 0,
       repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
@@ -1865,7 +1891,7 @@ describe('llm-runtime completion loop', () => {
     vi.useFakeTimers();
 
     let seenAbortSignal: AbortSignal | undefined;
-    const resultPromise = runTurnLoop({
+    const resultPromise = runCompletionLoop({
       initialState: { messages: [{ role: 'user', content: 'wait forever' } satisfies LLMChatMessage] },
       emptyTextRetryLimit: 0,
       maxWallTimeMs: 25,
@@ -1887,10 +1913,8 @@ describe('llm-runtime completion loop', () => {
     expect(seenAbortSignal?.aborted).toBe(true);
   });
 
-  it('keeps the legacy aliases wired to the preferred completion-loop APIs', async () => {
-    expect(runTurnLoop).toBe(runCompletionLoop);
-    expect(respondWithTools).toBe(complete);
-    expect(legacyPathRunTurnLoop).toBe(runCompletionLoop);
-    expect(legacyPathRespondWithTools).toBe(complete);
+  it('keeps the compatibility import path wired to the preferred completion-loop APIs', async () => {
+    expect(compatibilityPathRunCompletionLoop).toBe(runCompletionLoop);
+    expect(compatibilityPathComplete).toBe(complete);
   });
 });

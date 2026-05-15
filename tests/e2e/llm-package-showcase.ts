@@ -26,16 +26,14 @@ import path from 'node:path';
 import process from 'node:process';
 import { config as loadDotEnv } from 'dotenv';
 import {
-  createLLMEnvironment,
-  disposeLLMEnvironment,
+  createRuntime,
   generate,
-  stream,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
   type LLMStreamChunk,
 } from '../../src/index.js';
-import { resolveToolsAsync } from '../../src/runtime.js';
+import { resolveToolsAsync, stream } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
   resolveShowcaseProviderSelection,
@@ -93,12 +91,6 @@ async function assertHitlStrictSchema(environment: LLMEnvironment) {
   });
 
   assert(tools.ask_user_input?.execute, 'ask_user_input should be executable');
-  assert(tools.human_intervention_request?.execute, 'human_intervention_request should be executable');
-  assert.deepEqual(
-    tools.ask_user_input.parameters,
-    tools.human_intervention_request.parameters,
-    'HITL alias names should expose the same schema',
-  );
 
   const structuredResult = parseToolJsonResult(await tools.ask_user_input.execute({
     type: 'multiple-select',
@@ -129,22 +121,6 @@ async function assertHitlStrictSchema(environment: LLMEnvironment) {
     { id: 'unit', label: 'Unit' },
     { id: 'types', label: 'Types' },
   ]);
-
-  const aliasStructuredResult = parseToolJsonResult(await tools.human_intervention_request.execute({
-    questions: [{
-      header: 'Checks',
-      id: 'checks',
-      question: 'Which checks should run?',
-      options: [
-        { id: 'unit', label: 'Unit' },
-        { id: 'types', label: 'Types' },
-      ],
-    }],
-  }, {
-    toolCallId: 'e2e-hitl-alias-structured',
-  }), 'structured human_intervention_request');
-  assert.equal(aliasStructuredResult.status, 'pending');
-  assert.deepEqual(aliasStructuredResult.questions, structuredResult.questions);
 
   const unknownFieldResult = parseToolJsonResult(await tools.ask_user_input.execute({
     question: 'Continue?',
@@ -246,7 +222,7 @@ async function runToolLoop(
 
 async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelection, dryRun: boolean) {
   const workspace = await createShowcaseWorkspace();
-  const environment = createLLMEnvironment({
+  const environment = createRuntime({
     providers: providerSelection.providers,
     mcpConfig: {
       servers: {
@@ -263,7 +239,6 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
   const showcaseBuiltIns = {
     read_file: true,
     load_skill: true,
-    human_intervention_request: false,
     shell_cmd: false,
     web_fetch: false,
     write_file: false,
@@ -310,7 +285,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
 
     console.log('\nshowcase status: PASS');
   } finally {
-    await disposeLLMEnvironment(environment).catch(() => undefined);
+    await environment.dispose().catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }

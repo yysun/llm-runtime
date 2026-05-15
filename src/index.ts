@@ -5,7 +5,7 @@
  * - Export the public API for the publishable `llm-runtime` workspace.
  *
  * Key features:
- * - Per-call `generate(...)` and `stream(...)`, plus explicit runtime-facade agentic helpers.
+ * - Per-call `generate(...)`, plus explicit runtime-facade agentic helpers.
  * - Package-owned provider configuration helpers.
  * - Package-owned built-in tool catalog and runtime helpers.
  * - Generic host-agnostic turn-loop orchestration helpers.
@@ -33,19 +33,19 @@ export * from './tools.js';
 export * from './tool-validation.js';
 export * from './completion-loop.js';
 export {
+  createAskUserInputResult,
+  createHumanInputToolResult,
+} from './agentic-complete.js';
+export {
   DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
   DEFAULT_WORKSPACE_TOOL_HINT,
   createRuntime,
-  createLLMEnvironment,
   disposeRuntimeCaches,
-  disposeLLMEnvironment,
-  disposeLLMRuntimeCaches,
   executeToolCall,
   executeToolCalls,
   generate,
   resolveTools,
   resolveToolsAsync,
-  stream,
 } from './runtime.js';
 export * from './openai-direct.js';
 export * from './anthropic-direct.js';

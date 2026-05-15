@@ -16,9 +16,9 @@ The published package targets Node.js 18 and later and exposes a single root ent
 
 ## What This Package Owns
 
-- Provider dispatch for `generate(...)` and `stream(...)`
+- Provider dispatch for `generate(...)`
 - Bound runtime-facade agentic helpers through `runtime.complete(...)` and `runtime.streamComplete(...)`
-- Generic host-agnostic completion orchestration through `complete(...)`, with `runCompletionLoop(...)` as the lower-level API and legacy aliases kept for backward compatibility
+- Generic host-agnostic completion orchestration through `complete(...)`, with `runCompletionLoop(...)` as the lower-level API
 - Intrinsic completion-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
@@ -29,6 +29,8 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## Public API
 
 - `createRuntime(...)`
+- `createHumanInputToolResult(...)`
+- `createAskUserInputResult(...)`
 - `runtime.generate(...)`
 - `runtime.complete(...)`
 - `runtime.streamComplete(...)`
@@ -39,13 +41,10 @@ The published package targets Node.js 18 and later and exposes a single root ent
 - `executeToolCalls(...)`
 - `resolveTools(...)`
 - `resolveToolsAsync(...)`
-- `stream(...)`
 - `complete(...)`
 - `runCompletionLoop(...)`
 
-Deprecated compatibility aliases remain exported: `createLLMEnvironment(...)`, `disposeLLMEnvironment(...)`, `disposeLLMRuntimeCaches()`, `respondWithTools(...)`, and `runTurnLoop(...)`.
-
-The package is per-call first. You can call `generate(...)` or `stream(...)` directly, use `complete(...)` or `runCompletionLoop(...)` for callback-driven orchestration, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies plus bound agentic helpers.
+The package is per-call first. You can call `generate(...)` directly, use `complete(...)` or `runCompletionLoop(...)` for callback-driven orchestration, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies plus bound agentic helpers.
 
 ## Cleanup
 
@@ -132,9 +131,7 @@ Treat `shell_cmd` as a fallback for explicit command execution, git workflows, a
 
 `search_files` is the built-in file-discovery tool for glob-like path matching. `create_directory` creates directories recursively inside the trusted working directory. `path_exists` reports whether a file or directory currently exists and, when it does, whether it is a file or directory.
 
-`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` and `ask_user_question` remain supported as legacy aliases for backward compatibility, but they are not exposed to the model by default. Pass `includeDeprecatedBuiltInAliases: true` when you need the old alias surface exposed explicitly.
-
-For new prompts, skills, and harness code, prefer `ask_user_input`.
+`ask_user_input` is the public built-in human-intervention tool. The older `human_intervention_request` and `ask_user_question` names are no longer part of the public tool surface.
 
 When the built-in human-intervention tool is enabled, the runtime also injects a small system-level hint telling the model to prefer that tool for clarification, approval, and other human-in-the-loop decisions. This helps generic skills that say things like "ask the user" or "use an ask-question tool" map onto the built-in HITL tool without each skill naming it explicitly.
 
@@ -165,8 +162,6 @@ Omitting `type` defaults to `single-select`. Omitting `allowSkip` defaults to `f
 
 Flat `question` / `options` payloads are not supported. Use `questions[]` for all HITL prompts.
 
-Deprecation note: `human_intervention_request` and `ask_user_question` are kept for compatibility with existing clients, but new integrations should treat them as legacy aliases and prefer `ask_user_input` instead.
-
 ### Extra Tools
 
 Extra tools are application-specific additions such as `lookup_customer` or `create_ticket`. They are additive only and cannot override reserved built-in names.
@@ -178,19 +173,6 @@ MCP tools come from configured external servers. The runtime discovers them, nam
 ### Skills
 
 Skills are reusable instruction assets discovered from skill roots and loaded through `load_skill`. Skills are not executable tools; they add instruction context for the model.
-
-## `generate(...)` vs `stream(...)`
-
-Both APIs share the same runtime model:
-
-- same provider config shape
-- same tool orchestration
-- same MCP and skill semantics
-
-The difference is output delivery:
-
-- `generate(...)` returns the final result
-- `stream(...)` emits chunks and still returns the final result at the end
 
 ## Web Search
 
@@ -205,13 +187,82 @@ The difference is output delivery:
 - `searchContextSize` is forwarded for OpenAI-style requests and ignored by Anthropic and Gemini.
 - Omit `webSearch` to leave web search disabled.
 
+## `runtime.complete(...)` / `runtime.streamComplete(...)`
+
+The runtime facade exposes a package-owned agentic helper for harnesses that want one bounded tool loop without wiring `runCompletionLoop(...)` callbacks by hand.
+
+The runtime helper contract is intentionally simple:
+
+- If the assistant returns one or more normal tool calls, the runtime executes them, appends tool results, and continues the loop.
+- If the assistant calls `ask_user_input` as the only tool call in the turn, the runtime pauses and returns `status: 'waiting_for_human'` instead of executing that tool.
+- If the assistant mixes `ask_user_input` with any other tool call in the same turn, the runtime fails the turn instead of partially executing tools before pausing.
+- If the assistant returns plain text without tool calls, that text is terminal for the run, even if it narrates future work like "I will...".
+- If the assistant returns neither tool calls nor non-empty text, the runtime fails the turn.
+- If the loop does not reach a terminal state before `maxIterations`, it returns `status: 'max_iterations'`.
+
+This simple runtime helper does not apply the generic `complete(...)` hardening and text-classification callbacks described later in this README. Use `complete(...)` or `runCompletionLoop(...)` when your harness needs callback-driven recovery, custom text classification, or package-managed control-tool handling.
+
+When a run pauses for human input, resume it by appending a tool-result message created with `createHumanInputToolResult(...)` or `createAskUserInputResult(...)` and then calling `runtime.complete(...)` or `runtime.streamComplete(...)` again.
+
+Minimal resume pattern:
+
+```ts
+import {
+  createHumanInputToolResult,
+  createRuntime,
+} from 'llm-runtime';
+
+const runtime = createRuntime({
+  providers: {
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY!,
+    },
+  },
+});
+
+const firstPass = await runtime.complete({
+  provider: 'openai',
+  model: 'gpt-5',
+  messages: [{ role: 'user', content: 'Do the task and ask me if you need a choice.' }],
+  builtIns: {
+    ask_user_input: true,
+    read_file: true,
+  },
+});
+
+if (firstPass.status === 'waiting_for_human') {
+  const resumedMessages = [
+    ...firstPass.messages,
+    createHumanInputToolResult(firstPass.pendingHumanInput, {
+      answers: {
+        scope: 'all',
+      },
+    }),
+  ];
+
+  const resumed = await runtime.complete({
+    provider: 'openai',
+    model: 'gpt-5',
+    messages: resumedMessages,
+    builtIns: {
+      ask_user_input: true,
+      read_file: true,
+    },
+  });
+
+  if (resumed.status === 'completed') {
+    console.log(resumed.output);
+  }
+}
+```
+
 ## `complete(...)` / `runCompletionLoop(...)`
 
 `complete(...)` is the preferred user-facing name for the package-owned iterative loop that manages repeated model turns without taking ownership of harness state, persistence, or tool policy.
 
-`runCompletionLoop(...)` is the preferred lower-level API when a harness wants to opt out of some package defaults. `respondWithTools(...)` and `runTurnLoop(...)` remain available as deprecated compatibility aliases.
+`runCompletionLoop(...)` is the preferred lower-level API when a harness wants to opt out of some package defaults.
 
-Use it when your harness needs more control than a single `generate(...)` or `stream(...)` call, but still wants one package boundary for:
+Use it when your harness needs more control than a single `generate(...)` call, but still wants one package boundary for:
 
 - repeated model invocation
 - empty-text retry handling
@@ -341,7 +392,7 @@ The boundary remains the same: the package now owns the default unresolved-text 
 
 You can provide either:
 
-- `modelRequest` when the package should call `generate(...)` or `stream(...)` for you
+- `modelRequest` when the package should call `generate(...)` for you
 - `callModel` when the harness wants to control model invocation directly
 
 Minimal shape:
@@ -529,7 +580,7 @@ const result = await runCompletionLoop({
 ## Example
 
 ```ts
-import { createRuntime } from 'llm-runtime';
+import { createHumanInputToolResult, createRuntime } from 'llm-runtime';
 
 const runtime = createRuntime({
   providers: {
@@ -582,6 +633,7 @@ const completion = await runtime.complete({
     },
   ],
   builtIns: {
+    ask_user_input: true,
     read_file: true,
     search_files: true,
   },
@@ -589,6 +641,32 @@ const completion = await runtime.complete({
 
 if (completion.status === 'completed') {
   console.log(completion.output);
+}
+
+if (completion.status === 'waiting_for_human') {
+  console.log(completion.pendingHumanInput.request);
+
+  const resumed = await runtime.complete({
+    provider: 'openai',
+    model: 'gpt-5',
+    messages: [
+      ...completion.messages,
+      createHumanInputToolResult(completion.pendingHumanInput, {
+        answers: {
+          scope: 'all',
+        },
+      }),
+    ],
+    builtIns: {
+      ask_user_input: true,
+      read_file: true,
+      search_files: true,
+    },
+  });
+
+  if (resumed.status === 'completed') {
+    console.log(resumed.output);
+  }
 }
 
 for await (const event of runtime.streamComplete({

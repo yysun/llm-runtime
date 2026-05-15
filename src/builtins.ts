@@ -12,18 +12,22 @@
  * Implementation notes:
  * - The package owns the built-in catalog and enablement policy.
  * - File, shell, web, and skill built-ins execute inside the package.
- * - `ask_user_input` is the preferred HITL built-in; legacy aliases stay synchronized.
+ * - `ask_user_input` is the public HITL built-in.
  *
  * Recent changes:
  * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
- * - 2026-05-15: Changed the default built-in exposure to a read-only set and gated deprecated HITL alias exposure behind an explicit option.
- * - 2026-05-15: Added the deprecated `ask_user_question` HITL alias and kept all HITL aliases synchronized.
+ * - 2026-05-15: Removed deprecated HITL alias tools from the public built-in surface.
+ * - 2026-05-15: Changed the default built-in exposure to a read-only set.
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
 
 import { wrapToolWithValidation } from './tool-validation.js';
 import { createBuiltInExecutors } from './builtin-executors.js';
+import {
+  ASK_USER_INPUT_TOOL_DESCRIPTION,
+  ASK_USER_INPUT_TOOL_PARAMETERS,
+} from './human-input-contract.js';
 import type {
   BuiltInToolName,
   BuiltInToolSelection,
@@ -34,8 +38,6 @@ import type {
 export const BUILT_IN_TOOL_NAMES = [
   'shell_cmd',
   'load_skill',
-  'human_intervention_request',
-  'ask_user_question',
   'ask_user_input',
   'web_fetch',
   'read_file',
@@ -47,8 +49,6 @@ export const BUILT_IN_TOOL_NAMES = [
 ] as const satisfies readonly BuiltInToolName[];
 
 export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
-  'human_intervention_request',
-  'ask_user_question',
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
 export const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES = [
@@ -58,93 +58,11 @@ export const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES = [
   'search_files',
   'path_exists',
 ] as const satisfies readonly BuiltInToolName[];
-export const DEPRECATED_BUILT_IN_ALIAS_NAMES = [
-  'human_intervention_request',
-  'ask_user_question',
-] as const satisfies readonly BuiltInToolName[];
 const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
 const BUILT_IN_TOOL_NAME_SET = new Set<string>(BUILT_IN_TOOL_NAMES);
 const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES);
-const DEPRECATED_BUILT_IN_ALIAS_NAME_SET = new Set<BuiltInToolName>(DEPRECATED_BUILT_IN_ALIAS_NAMES);
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
-
-const HUMAN_INPUT_PARAMETERS = {
-  type: 'object',
-  description:
-    'Provide questions[] with stable ids and options. Flat question/options payloads are not supported.',
-  properties: {
-    type: {
-      type: 'string',
-      enum: ['single-select', 'multiple-select'],
-      description:
-        'Selection mode for all questions. Use single-select for exactly one choice, multiple-select when the human may choose more than one. Omit to default to single-select. Do not use kind or approval.',
-    },
-    allowSkip: {
-      type: 'boolean',
-      description:
-        'Set true only for explicitly dismissible, non-blocking prompts when it is acceptable for the human to skip without choosing. Do not use allowSkip for approval-gated or otherwise blocking decisions. Omit or false when an answer is required before continuing.',
-    },
-    questions: {
-      type: 'array',
-      description:
-        'Required field. Provide one or more structured questions; each question must include at least two options.',
-      items: {
-        type: 'object',
-        description: 'One question to show to the human.',
-        properties: {
-          header: {
-            type: 'string',
-            description:
-              'Short UI header, usually 1-3 words, such as "Approval", "Scope", or "Tests".',
-          },
-          id: {
-            type: 'string',
-            description:
-              'Stable machine-readable question id. Use lowercase kebab-case or snake_case, such as "test-scope" or "deploy_approval".',
-          },
-          question: {
-            type: 'string',
-            description:
-              'Clear question shown to the human. Ask for the missing decision or input directly.',
-          },
-          options: {
-            type: 'array',
-            description:
-              'Selectable options. Provide at least two options. Use stable option ids for answer handling; labels are display text.',
-            items: {
-              type: 'object',
-              description: 'One selectable option.',
-              properties: {
-                id: {
-                  type: 'string',
-                  description:
-                    'Stable machine-readable option id. Prefer lowercase kebab-case or snake_case, such as "approve", "reject", "run-tests", or "skip-tests".',
-                },
-                label: {
-                  type: 'string',
-                  description:
-                    'Short user-facing option label, such as "Approve", "Reject", or "Run tests".',
-                },
-                description: {
-                  type: 'string',
-                  description:
-                    'Optional one-sentence clarification of what selecting this option means.',
-                },
-              },
-              required: ['id', 'label'],
-              additionalProperties: false,
-            },
-          },
-        },
-        required: ['header', 'id', 'question', 'options'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['questions'],
-  additionalProperties: false,
-} as const;
 
 const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'name' | 'execute'>> = {
   shell_cmd: {
@@ -205,20 +123,9 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
       additionalProperties: false,
     },
   },
-  human_intervention_request: {
-    description:
-      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. Use this only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
-    parameters: HUMAN_INPUT_PARAMETERS,
-  },
-  ask_user_question: {
-    description:
-      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. Use this only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
-    parameters: HUMAN_INPUT_PARAMETERS,
-  },
   ask_user_input: {
-    description:
-      'Ask a human one or more structured choice questions. Use this tool only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision such as a required confirmation. Do not ask the human to disambiguate before performing a safe broad search. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported. Legacy alias names: `human_intervention_request` and `ask_user_question`.',
-    parameters: HUMAN_INPUT_PARAMETERS,
+    description: ASK_USER_INPUT_TOOL_DESCRIPTION,
+    parameters: ASK_USER_INPUT_TOOL_PARAMETERS,
   },
   web_fetch: {
     description:
@@ -431,9 +338,7 @@ function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolTo
     ? true
     : selectionMode === 'read-only' || selectionMode === 'none'
       ? false
-      : selectionMap?.human_intervention_request === true
-      || selectionMap?.ask_user_question === true
-      || selectionMap?.ask_user_input === true;
+      : selectionMap?.ask_user_input === true;
 
   for (const toolName of BUILT_IN_TOOL_NAMES) {
     if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {
@@ -481,7 +386,6 @@ export function intersectBuiltInToolSelections(
 
 export function createBuiltInToolDefinitions(options: {
   builtIns?: BuiltInToolSelection;
-  includeDeprecatedBuiltInAliases?: boolean;
   skillRegistry: SkillRegistry;
 }): Record<string, LLMToolDefinition> {
   const enabled = toToggleMap(options.builtIns);
@@ -492,7 +396,6 @@ export function createBuiltInToolDefinitions(options: {
   return Object.fromEntries(
     BUILT_IN_TOOL_NAMES
       .filter((toolName) => enabled[toolName])
-      .filter((toolName) => options.includeDeprecatedBuiltInAliases === true || !DEPRECATED_BUILT_IN_ALIAS_NAME_SET.has(toolName))
       .map((toolName) => {
         const catalogEntry = BUILT_IN_TOOL_CATALOG[toolName];
 

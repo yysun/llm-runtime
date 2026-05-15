@@ -15,7 +15,7 @@
  *
  * Recent changes:
  * - 2026-05-15: Updated showcase coverage to prefer `createRuntime(...)`, `disposeRuntimeCaches()`, and `runCompletionLoop(...)`.
- * - 2026-03-29: Added mocked `runTurnLoop(...)` showcase coverage.
+ * - 2026-03-29: Added mocked `runCompletionLoop(...)` showcase coverage.
  * - 2026-03-27: Initial terminal showcase suite for `llm-runtime`.
  * - 2026-03-27: Re-labeled as the mocked showcase after adding the real e2e showcase runner.
  */

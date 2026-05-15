@@ -31,7 +31,13 @@
  */
 
 import { executeToolCall, executeToolCalls, generate, stream } from './runtime.js';
+import { DEFAULT_COMPLETE_BUILT_INS } from './complete-defaults.js';
+import {
+  DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT,
+  upsertManagedSystemPrompt,
+} from './prompt-contracts.js';
 import type {
+  BuiltInToolSelection,
   LLMChatMessage,
   LLMExecuteToolCallOptions,
   LLMGenerateOptions,
@@ -60,8 +66,6 @@ export type AgentControlToolName = typeof AGENT_CONTROL_TOOL_NAMES[number];
 const AGENT_CONTROL_TOOL_NAME_SET = new Set<string>(AGENT_CONTROL_TOOL_NAMES);
 const INTERACTION_TOOL_NAME_SET = new Set<string>([
   'ask_user_input',
-  'ask_user_question',
-  'human_intervention_request',
 ]);
 const READ_EVIDENCE_TOOL_NAME_SET = new Set<string>([
   'load_skill',
@@ -271,32 +275,8 @@ export interface TurnLoopControlToolCallEvent<TState, TMessage extends LLMChatMe
   iteration: number;
 }
 
-export const DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT = [
-  'You are operating inside an agent run loop.',
-  '',
-  'You may briefly tell the user what you are about to do, but narration is not completion.',
-  '',
-  'If the task requires workspace inspection, tool use, file access, search, command execution, or external lookup, you must call the appropriate tool.',
-  '',
-  'For read-only inspection, lookup, search, summarization, and analysis, call the appropriate read-only tool without asking for confirmation.',
-  '',
-  'Do not ask the user to disambiguate before performing a safe broad search. If multiple entity types, locations, files, or records could match, search broadly first and present matches.',
-  '',
-  'Use ask_user_input only when the missing input cannot be safely discovered through read-only tools, or when the next step requires approval, preference, or a side effect.',
-  '',
-  'Stop only by:',
-  '- calling tools,',
-  '- producing a final answer supported by run evidence,',
-  '- requesting required missing user input,',
-  '- reporting a permission or safety block.',
-  '',
-  'If you call a human-interaction tool such as ask_user_input, do not restate the same question in plain assistant text while waiting.',
-  'After the user answers, use that answer immediately and call the next task tool in the same turn unless the task is already complete.',
-  '',
-  'Do not stop after merely announcing intent.',
-].join('\n');
 export const DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT = DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT;
-export const COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG = 'llm-runtime-loop-contract';
+export { COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG } from './prompt-contracts.js';
 export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'The last response announced work but did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool in this turn. If prior tool results already contain enough evidence, provide the final answer based on those results.';
 export const DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION = 'The last response claimed search, inspection, or other tool-backed results without run evidence. Do not claim unsupported results. Call the appropriate tool now, or answer only from existing tool results.';
 export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last response did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool. If prior tool results already contain enough evidence, provide the final answer based on those results.';
@@ -664,42 +644,10 @@ function assertNoAgentControlToolNameCollisions(
   }
 }
 
-function formatCompletionLoopContractBlock(): string {
-  return [
-    `<${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`,
-    DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT,
-    `</${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`,
-  ].join('\n');
-}
-
 function mergeCompletionLoopSystemPrompt<TMessage extends LLMChatMessage>(messages: TMessage[]): TMessage[] {
-  const contractBlock = formatCompletionLoopContractBlock();
-  const systemMessageIndex = messages.findIndex((message) => message.role === 'system');
-
-  if (systemMessageIndex >= 0) {
-    const systemMessage = messages[systemMessageIndex];
-    const existingContent = String(systemMessage?.content ?? '');
-    if (
-      existingContent.includes(`<${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`)
-      || existingContent === DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT
-    ) {
-      return messages;
-    }
-
-    const nextMessages = messages.slice();
-    nextMessages[systemMessageIndex] = {
-      ...systemMessage,
-      content: existingContent.trim()
-        ? `${existingContent}\n\n${contractBlock}`
-        : contractBlock,
-    };
-    return nextMessages;
-  }
-
-  return [
-    { role: 'system', content: contractBlock } as TMessage,
-    ...messages,
-  ];
+  return upsertManagedSystemPrompt(messages, {
+    includeAgentRunLoopContract: true,
+  });
 }
 
 function parseToolArgumentsObject(argumentsText: string): Record<string, unknown> {
@@ -780,6 +728,17 @@ function withAgentControlTools(request: TurnLoopPackageModelRequest): TurnLoopPa
       ...(request.extraTools ?? []),
       ...createAgentControlToolDefinitions(),
     ],
+  };
+}
+
+function withDefaultCompleteBuiltIns(request: TurnLoopPackageModelRequest): TurnLoopPackageModelRequest {
+  if (request.builtIns !== undefined) {
+    return request;
+  }
+
+  return {
+    ...request,
+    builtIns: DEFAULT_COMPLETE_BUILT_INS,
   };
 }
 
@@ -977,7 +936,6 @@ function createCompletionToolExecutor(
     mcpConfig: request.mcpConfig,
     skillRoots: request.skillRoots,
     builtIns: request.builtIns,
-    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
     extraTools: request.extraTools,
     tools: request.tools,
   };
@@ -1181,7 +1139,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
 
     const timeoutPromise = new Promise<{ kind: 'timeout' }>((resolve) => {
       timeoutHandle = setTimeout(() => {
-        modelAbortController.abort(new Error(`runTurnLoop timed out after ${maxWallTimeMs}ms`));
+        modelAbortController.abort(new Error(`runCompletionLoop timed out after ${maxWallTimeMs}ms`));
         resolve({ kind: 'timeout' });
       }, remainingWallTimeMs);
     });
@@ -1784,9 +1742,12 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
   );
   const agentControlMode = options.agentControlMode ?? hasAgentControlHandlers;
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
-  const modelRequest = options.modelRequest && agentControlMode
-    ? withAgentControlTools(options.modelRequest)
-    : options.modelRequest;
+  const packageModelRequest = options.modelRequest
+    ? withDefaultCompleteBuiltIns(options.modelRequest)
+    : undefined;
+  const modelRequest = packageModelRequest && agentControlMode
+    ? withAgentControlTools(packageModelRequest)
+    : packageModelRequest;
   const configuredToolDefinitions = createConfiguredToolDefinitionMap(modelRequest);
   const classificationObservations = new Map<number, {
     observedInteractionProgress: boolean;
@@ -1858,16 +1819,3 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
 
   return result;
 }
-
-/** @deprecated Use RunCompletionLoopOptions */
-export type RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> =
-  RunCompletionLoopOptions<TState, TMessage>;
-
-/** @deprecated Use RunCompletionLoopResult */
-export type RunTurnLoopResult<TState> = RunCompletionLoopResult<TState>;
-
-/** @deprecated Use runCompletionLoop */
-export const runTurnLoop = runCompletionLoop;
-
-/** @deprecated Use complete */
-export const respondWithTools = complete;

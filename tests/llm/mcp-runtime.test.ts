@@ -19,9 +19,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  createLLMEnvironment,
-  disposeLLMEnvironment,
-  disposeLLMRuntimeCaches,
+  createRuntime,
+  disposeRuntimeCaches,
   resolveToolsAsync,
 } from '../../src/index.js';
 
@@ -101,7 +100,7 @@ describe('llm-runtime MCP runtime', () => {
   });
 
   afterEach(async () => {
-    await disposeLLMRuntimeCaches();
+    await disposeRuntimeCaches();
   });
 
   it('resolves executable MCP tools through an explicit environment', async () => {
@@ -117,7 +116,7 @@ describe('llm-runtime MCP runtime', () => {
       },
     });
 
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       mcpConfig: {
         servers: {
           demo: {
@@ -149,7 +148,7 @@ describe('llm-runtime MCP runtime', () => {
       },
     });
 
-    await disposeLLMEnvironment(environment);
+    await environment.dispose();
     expect(mockClientClose).toHaveBeenCalledTimes(1);
   });
 
@@ -218,7 +217,7 @@ describe('llm-runtime MCP runtime', () => {
       mcpConfig,
       builtIns: false,
     });
-    await disposeLLMRuntimeCaches();
+    await disposeRuntimeCaches();
     await resolveToolsAsync({
       mcpConfig,
       builtIns: false,

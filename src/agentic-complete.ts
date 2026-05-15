@@ -17,6 +17,11 @@
  * You supply a ModelAdapter that knows how to call your provider.
  */
 
+import {
+  ASK_USER_INPUT_TOOL_DESCRIPTION,
+  ASK_USER_INPUT_TOOL_PARAMETERS,
+} from './human-input-contract.js';
+
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -140,15 +145,9 @@ export interface CompleteOptions {
   tools?: RuntimeTool[];
 
   /**
-   * Safety valve. Prevents infinite "I will..." loops or broken tool loops.
+  * Safety valve. Prevents broken tool loops from spinning forever.
    */
   maxIterations?: number;
-
-  /**
-   * If true, the runtime tries to push the model forward when it returns
-   * vague future-intent text like "I can search..." instead of doing the work.
-   */
-  nudgeOnFutureIntent?: boolean;
 
   /**
    * Name of the special human-input tool.
@@ -201,7 +200,6 @@ export type StreamCompleteEvent =
   | { type: "tool_result"; toolCall: ToolCall; result: unknown; iteration: number }
   | { type: "tool_error"; toolCall: ToolCall; error: string; iteration: number }
   | { type: "waiting_for_human"; pendingHumanInput: PendingHumanInput; messages: ChatMessage[]; iteration: number }
-  | { type: "nudge"; message: ChatMessage; iteration: number }
   | { type: "completed"; result: CompleteResult; iteration: number }
   | { type: "failed"; result: CompleteResult; iteration: number }
   | { type: "raw"; raw: unknown; iteration: number };
@@ -236,8 +234,7 @@ export async function generate(options: GenerateOptions): Promise<ModelResponse>
  * - call model
  * - if normal tool calls: execute tools, append tool results, continue
  * - if ask_user_input: pause and return waiting_for_human
- * - if final assistant text: complete
- * - if vague future-intent text: optionally nudge model to continue
+ * - if assistant text: treat it as the terminal answer for this run
  */
 export async function complete(options: CompleteOptions): Promise<CompleteResult> {
   let finalResult: CompleteResult | undefined;
@@ -277,7 +274,6 @@ export async function* streamComplete(options: CompleteOptions): AsyncGenerator<
     model,
     tools = [],
     maxIterations = 30,
-    nudgeOnFutureIntent = true,
     humanInputToolName = "ask_user_input",
     signal,
   } = options;
@@ -322,28 +318,45 @@ export async function* streamComplete(options: CompleteOptions): AsyncGenerator<
     const toolCalls = assistantMessage.tool_calls ?? [];
 
     if (toolCalls.length > 0) {
+      const humanInputToolCalls = toolCalls.filter((toolCall) => {
+        const runtimeTool = toolMap.get(toolCall.function.name);
+        return toolCall.function.name === humanInputToolName || runtimeTool?.kind === "human_input";
+      });
+
+      if (humanInputToolCalls.length > 0) {
+        if (toolCalls.length !== 1 || humanInputToolCalls.length !== 1) {
+          const result: CompleteResult = {
+            status: "failed",
+            messages,
+            error: `Assistant mixed ask_user_input with other tool calls in the same turn. ask_user_input must be the only tool call when pausing for human input.`,
+            raw: response.raw,
+          };
+
+          yield { type: "failed", result, iteration };
+          return;
+        }
+
+        const humanInputToolCall = humanInputToolCalls[0];
+        const pendingHumanInput: PendingHumanInput = {
+          toolCallId: humanInputToolCall.id,
+          toolName: humanInputToolCall.function.name,
+          request: parseToolArguments(humanInputToolCall.function.arguments),
+        };
+
+        yield {
+          type: "waiting_for_human",
+          pendingHumanInput,
+          messages,
+          iteration,
+        };
+
+        return;
+      }
+
       for (const toolCall of toolCalls) {
         const toolName = toolCall.function.name;
         const args = parseToolArguments(toolCall.function.arguments);
         const runtimeTool = toolMap.get(toolName);
-        const isHumanInputTool = toolName === humanInputToolName || runtimeTool?.kind === "human_input";
-
-        if (isHumanInputTool) {
-          const pendingHumanInput: PendingHumanInput = {
-            toolCallId: toolCall.id,
-            toolName,
-            request: args,
-          };
-
-          yield {
-            type: "waiting_for_human",
-            pendingHumanInput,
-            messages,
-            iteration,
-          };
-
-          return;
-        }
 
         if (!runtimeTool) {
           const error = `Unknown tool: ${toolName}`;
@@ -383,16 +396,16 @@ export async function* streamComplete(options: CompleteOptions): AsyncGenerator<
 
     const text = assistantMessage.content ?? null;
 
-    if (nudgeOnFutureIntent && looksLikeFutureIntent(text)) {
-      const nudgeMessage: ChatMessage = {
-        role: "system",
-        content:
-          "The user asked you to complete the task, not describe what you could do. Continue now with the next concrete action. Use tools if needed. Only stop when the task is completed, blocked, failed, or requires ask_user_input.",
+    if (!text?.trim()) {
+      const result: CompleteResult = {
+        status: "failed",
+        messages,
+        error: "Assistant returned neither tool calls nor non-empty text.",
+        raw: response.raw,
       };
 
-      messages.push(nudgeMessage);
-      yield { type: "nudge", message: nudgeMessage, iteration };
-      continue;
+      yield { type: "failed", result, iteration };
+      return;
     }
 
     const result: CompleteResult = {
@@ -466,6 +479,13 @@ export function createHumanInputToolResult(
   };
 }
 
+export function createAskUserInputResult(
+  pending: PendingHumanInput,
+  answer: unknown,
+): ChatMessage {
+  return createHumanInputToolResult(pending, answer);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Suggested ask_user_input tool definition                                    */
 /* -------------------------------------------------------------------------- */
@@ -477,45 +497,8 @@ export const askUserInputTool: RuntimeTool = {
     type: "function",
     function: {
       name: "ask_user_input",
-      description:
-        "Ask the human for required input only when the task cannot safely or correctly continue without it. This pauses the run.",
-      parameters: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          type: {
-            type: "string",
-            enum: ["single-select", "multi-select", "text", "confirm"],
-          },
-          questions: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                id: { type: "string" },
-                header: { type: "string" },
-                question: { type: "string" },
-                options: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    properties: {
-                      id: { type: "string" },
-                      label: { type: "string" },
-                      description: { type: "string" },
-                    },
-                    required: ["id", "label"],
-                  },
-                },
-              },
-              required: ["id", "question"],
-            },
-          },
-        },
-        required: ["type", "questions"],
-      },
+      description: ASK_USER_INPUT_TOOL_DESCRIPTION,
+      parameters: ASK_USER_INPUT_TOOL_PARAMETERS,
     },
   },
 };
@@ -589,50 +572,6 @@ function stringifyError(error: unknown): string {
   }
 
   return String(error);
-}
-
-/**
- * Guardrail for weak model behavior:
- * If the assistant says "I can/will do X" without tool calls, this is probably
- * not a final answer in an agentic runtime.
- */
-function looksLikeFutureIntent(text: string | null | undefined): boolean {
-  if (!text) return false;
-
-  const normalized = text.trim().toLowerCase();
-
-  if (normalized.length > 800) {
-    return false;
-  }
-
-  const futureIntentPatterns = [
-    /\bi can\b/,
-    /\bi could\b/,
-    /\bi will\b/,
-    /\bi would\b/,
-    /\bi'll\b/,
-    /\blet me\b/,
-    /\bnext,? i\b/,
-    /\bfirst,? i\b/,
-    /\bto do this\b/,
-    /\bi need to\b/,
-    /\bi can help\b/,
-    /\bplease confirm\b/,
-  ];
-
-  const hasFutureIntent = futureIntentPatterns.some((pattern) => pattern.test(normalized));
-
-  const hasCompletionSignal =
-    /\bdone\b/.test(normalized) ||
-    /\bcompleted\b/.test(normalized) ||
-    /\bcreated\b/.test(normalized) ||
-    /\bsaved\b/.test(normalized) ||
-    /\bfound\b/.test(normalized) ||
-    /\battached\b/.test(normalized) ||
-    /\bhere is\b/.test(normalized) ||
-    /\bhere are\b/.test(normalized);
-
-  return hasFutureIntent && !hasCompletionSignal;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

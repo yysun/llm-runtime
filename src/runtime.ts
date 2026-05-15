@@ -18,7 +18,7 @@
  * - 2026-05-15: Replaced runtime-facade `stream(...)` with agentic `complete(...)` and `streamComplete(...)` wired directly through `agentic-complete.ts` while preserving tool resolution and execution behavior.
  * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
- * - 2026-05-15: Changed default built-in exposure to read-only, added package-owned tool execution helpers, and gated deprecated HITL alias exposure.
+ * - 2026-05-15: Changed default built-in exposure to read-only and added package-owned tool execution helpers.
  * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
  * - 2026-03-28: Added explicit environment injection and removed runtime-constructor dependency from the public API.
  */
@@ -55,6 +55,11 @@ import {
   generateOpenAIResponse,
   streamOpenAIResponse,
 } from './openai-direct.js';
+import { DEFAULT_COMPLETE_BUILT_INS } from './complete-defaults.js';
+import {
+  containsAgentRunLoopSystemPrompt,
+  upsertManagedSystemPrompt,
+} from './prompt-contracts.js';
 import { createSkillRegistry } from './skills.js';
 import { createToolRegistry } from './tools.js';
 import type {
@@ -88,6 +93,11 @@ import type {
   ToolPermission,
 } from './types.js';
 
+export {
+  DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
+  DEFAULT_WORKSPACE_TOOL_HINT,
+} from './prompt-contracts.js';
+
 const DEFAULT_REASONING_EFFORT: ReasoningEffort = 'default';
 const DEFAULT_TOOL_PERMISSION: ToolPermission = 'auto';
 const WEB_SEARCH_OPTION_PROVIDERS = new Set<LLMProviderName>([
@@ -102,22 +112,6 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'path_exists',
   'create_directory',
 ] as const;
-export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
-  'Use `ask_user_input` only for required human decisions. Do not use it as a substitute for safe read-only lookup, search, or inspection. `human_intervention_request` and `ask_user_question` are the same tool.',
-  'Do not ask the user to disambiguate before performing a safe broad read-only search. If ambiguity can be resolved safely through read-only tools, search first and present matches.',
-  'Treat phrases such as "ask the user", "request approval", or "HITL" as referring to this tool when present.',
-  'Use `allowSkip` only for non-blocking prompts, not required approvals or blocking decisions.',
-  'Do not invent human answers.',
-].join(' ');
-export const DEFAULT_WORKSPACE_TOOL_HINT = [
-  'Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory` for normal workspace exploration.',
-  'Use `shell_cmd` only for explicit commands, git workflows, or gaps in the structured tools.',
-  'With `shell_cmd`, send one command plus `parameters`, not a pipeline string.',
-  'Preferred shell patterns: `rg --files`, `rg "pattern"`, `find`, `sed -n "1,200p" path`, `head -n 200 path`, `tail -n 100 path`.',
-  'Prefer `rg` over `grep`, and `head` or `sed -n` over `cat` for bounded reads.',
-  'On Windows, use PowerShell-native commands only if they still fit the same single-command model.',
-].join(' ');
-
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
   toolPermission: ToolPermission;
@@ -304,7 +298,14 @@ function mergeAbortSignal(
   };
 }
 
-function createAgenticRuntimeTool(definition: LLMToolDefinition): AgenticRuntimeTool {
+function getCompleteBuiltIns(selection: BuiltInToolSelection | undefined): BuiltInToolSelection | undefined {
+  return selection === undefined ? DEFAULT_COMPLETE_BUILT_INS : selection;
+}
+
+function createAgenticRuntimeTool(
+  definition: LLMToolDefinition,
+  requestContext: LLMToolExecutionContext | undefined,
+): AgenticRuntimeTool {
   const isHumanInputTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(definition.name as any);
 
   return {
@@ -322,7 +323,7 @@ function createAgenticRuntimeTool(definition: LLMToolDefinition): AgenticRuntime
       ? async (args, context) => await definition.execute?.(
         normalizeAgenticToolArgs(args),
         {
-          abortSignal: context.signal,
+          ...(mergeAbortSignal(requestContext, context.signal) ?? {}),
           messages: context.messages.map((message) => ({
             ...normalizeAgenticMessageToLLM(message),
             ...(typeof message.name === 'string' ? { name: message.name } : {}),
@@ -351,8 +352,7 @@ function createAgenticModelAdapter(
         providers: request.providers,
         mcpConfig: request.mcpConfig,
         skillRoots: request.skillRoots,
-        builtIns: request.builtIns,
-        includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
+        builtIns: getCompleteBuiltIns(request.builtIns),
         extraTools: request.extraTools,
         tools: request.tools,
         environment,
@@ -373,18 +373,18 @@ async function createAgenticCompleteOptions(
 ): Promise<AgenticCompleteOptions> {
   const resolvedTools = await buildResolvedToolSetAsync({
     environment,
-    builtIns: request.builtIns,
-    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
+    builtIns: getCompleteBuiltIns(request.builtIns),
     extraTools: request.extraTools,
     tools: request.tools,
   });
 
   return {
     model: createAgenticModelAdapter(environment, request),
-    messages: request.messages.map(normalizeLLMMessageToAgentic),
-    tools: Object.values(resolvedTools).map(createAgenticRuntimeTool),
+    messages: upsertManagedSystemPrompt(request.messages, {
+      includeAgentRunLoopContract: true,
+    }).map(normalizeLLMMessageToAgentic),
+    tools: Object.values(resolvedTools).map((tool) => createAgenticRuntimeTool(tool, request.context)),
     ...(request.maxIterations !== undefined ? { maxIterations: request.maxIterations } : {}),
-    ...(request.nudgeOnFutureIntent !== undefined ? { nudgeOnFutureIntent: request.nudgeOnFutureIntent } : {}),
     ...(request.humanInputToolName ? { humanInputToolName: request.humanInputToolName } : {}),
     signal: request.context?.abortSignal,
   };
@@ -462,15 +462,6 @@ export async function disposeRuntimeCaches(): Promise<void> {
   skillRegistryCache.clear();
   providerConfigStoreCache.clear();
 }
-
-/** @deprecated Use createRuntime */
-export const createLLMEnvironment = createRuntime;
-
-/** @deprecated Use runtime.dispose() */
-export const disposeLLMEnvironment = disposeRuntime;
-
-/** @deprecated Use disposeRuntimeCaches */
-export const disposeLLMRuntimeCaches = disposeRuntimeCaches;
 
 function buildCachedEnvironment(options: {
   provider?: LLMGenerateOptions['provider'] | LLMStreamOptions['provider'];
@@ -624,55 +615,32 @@ function injectToolGuidance(
   messages: LLMChatMessage[],
   tools: Record<string, LLMToolDefinition>,
 ): LLMChatMessage[] {
-  const guidanceParts: string[] = [];
-
   const hasHumanInterventionTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.some((toolName) => Boolean(tools[toolName]));
-  if (hasHumanInterventionTool) {
-    guidanceParts.push(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
-  }
-
   const hasWorkspaceGuidanceTools = WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES.some((toolName) => Boolean(tools[toolName]));
-  if (hasWorkspaceGuidanceTools) {
-    guidanceParts.push(DEFAULT_WORKSPACE_TOOL_HINT);
-  }
 
-  if (guidanceParts.length === 0) {
+  const includesAgentRunLoopContract = messages.some((message) => message.role === 'system'
+    && containsAgentRunLoopSystemPrompt(String(message.content ?? '')));
+
+  if (!includesAgentRunLoopContract && !hasHumanInterventionTool && !hasWorkspaceGuidanceTools) {
     return messages;
   }
 
-  const guidanceText = guidanceParts.join('\n\n');
-
-  const systemMessageIndex = messages.findIndex((message) => message.role === 'system');
-  if (systemMessageIndex >= 0) {
-    const systemMessage = messages[systemMessageIndex];
-    const existingContent = String(systemMessage?.content ?? '');
-    if (existingContent.includes(guidanceText)) {
-      return messages;
-    }
-
-    const nextMessages = messages.slice();
-    nextMessages[systemMessageIndex] = {
-      ...systemMessage,
-      content: existingContent.trim()
-        ? `${existingContent}\n\n${guidanceText}`
-        : guidanceText,
-    };
-    return nextMessages;
+  if (includesAgentRunLoopContract) {
+    return upsertManagedSystemPrompt(messages, {
+      includeAgentRunLoopContract: true,
+    });
   }
 
-  return [
-    {
-      role: 'system',
-      content: guidanceText,
-    },
-    ...messages,
-  ];
+  return upsertManagedSystemPrompt(messages, {
+    includeAgentRunLoopContract: false,
+    includeHumanInterventionHint: hasHumanInterventionTool,
+    includeWorkspaceToolHint: hasWorkspaceGuidanceTools,
+  });
 }
 
 function buildResolvedToolSet(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
-  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
 }): Record<string, LLMToolDefinition> {
@@ -681,7 +649,6 @@ function buildResolvedToolSet(options: {
 
   const builtInTools = createBuiltInToolDefinitions({
     builtIns: options.builtIns,
-    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     skillRegistry: options.environment.skillRegistry,
   });
 
@@ -709,7 +676,6 @@ function buildResolvedToolSet(options: {
 async function buildResolvedToolSetAsync(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
-  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
 }): Promise<Record<string, LLMToolDefinition>> {
@@ -801,7 +767,6 @@ export async function executeToolCall(options: LLMExecuteToolCallOptions): Promi
   const tools = await buildResolvedToolSetAsync({
     environment,
     builtIns: options.builtIns,
-    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases ?? true,
     extraTools: options.extraTools,
     tools: options.tools,
   });
@@ -875,7 +840,6 @@ export function resolveTools(options: LLMResolveToolsOptions = {}): Record<strin
   return buildResolvedToolSet({
     environment,
     builtIns: options.builtIns,
-    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     extraTools: options.extraTools,
     tools: options.tools,
   });
@@ -891,7 +855,6 @@ export async function resolveToolsAsync(options: LLMResolveToolsOptions = {}): P
   return await buildResolvedToolSetAsync({
     environment,
     builtIns: options.builtIns,
-    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     extraTools: options.extraTools,
     tools: options.tools,
   });
@@ -909,7 +872,6 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
   const tools = await buildResolvedToolSetAsync({
     environment,
     builtIns: request.builtIns,
-    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
     extraTools: request.extraTools,
     tools: request.tools,
   });
@@ -978,7 +940,6 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
   const tools = await buildResolvedToolSetAsync({
     environment,
     builtIns: request.builtIns,
-    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
     extraTools: request.extraTools,
     tools: request.tools,
   });

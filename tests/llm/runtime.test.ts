@@ -15,8 +15,8 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
- * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, deprecated alias exposure, and abort-aware built-ins.
- * - 2026-05-15: Added `createRuntime(...)` facade coverage and synchronized deprecated HITL alias coverage.
+ * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
+ * - 2026-05-15: Added `createRuntime(...)` facade coverage.
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
  * - 2026-03-27: Added built-in tool enablement, narrowing, and host-adapter coverage.
@@ -46,9 +46,9 @@ vi.mock('../../src/openai-direct.js', async () => {
 });
 
 import {
+  createAskUserInputResult,
+  createHumanInputToolResult,
   createRuntime,
-  createLLMEnvironment,
-  disposeLLMEnvironment,
   executeToolCall,
   executeToolCalls,
   intersectBuiltInToolSelections,
@@ -57,6 +57,7 @@ import {
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
 } from '../../src/index.js';
+import { askUserInputTool } from '../../src/agentic-complete.js';
 
 function createMockSkillFileSystem(files: Record<string, string>): SkillFileSystemAdapter {
   const normalizedFiles = new Map(
@@ -212,7 +213,7 @@ describe('llm-runtime runtime', () => {
       '/project/find/SKILL.md': '---\nname: find-skills\ndescription: project description\n---\n# Project',
     });
 
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       skillRoots: ['/global', '/project'],
       skillFileSystem: fileSystem,
     });
@@ -260,7 +261,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('keeps provider configuration isolated per explicit environments', async () => {
-    const firstEnvironment = createLLMEnvironment({
+    const firstEnvironment = createRuntime({
       providers: {
         openai: {
           apiKey: 'first-openai-key',
@@ -268,7 +269,7 @@ describe('llm-runtime runtime', () => {
       },
     } satisfies LLMEnvironmentOptions);
 
-    const secondEnvironment = createLLMEnvironment({
+    const secondEnvironment = createRuntime({
       providers: {
         anthropic: {
           apiKey: 'second-anthropic-key',
@@ -297,7 +298,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('accepts provider config through the explicit environment options', () => {
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       providers: {
         azure: {
           apiKey: 'azure-key',
@@ -355,8 +356,14 @@ describe('llm-runtime runtime', () => {
         arguments: '{"query":"token"}',
       },
     };
+    const seenSystemPrompts: string[] = [];
 
     mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      const systemPrompt = String(
+        request.messages.find((message: any) => message.role === 'system')?.content ?? '',
+      );
+      seenSystemPrompts.push(systemPrompt);
+
       const hasLookupResult = request.messages.some((message: any) => (
         message.role === 'tool' && message.tool_call_id === 'lookup-1'
       ));
@@ -422,30 +429,21 @@ describe('llm-runtime runtime', () => {
       }),
     ]));
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    expect(seenSystemPrompts[0]).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires required user input.');
+    expect(seenSystemPrompts[0]).toContain('Prefer action over explanation.');
 
     await runtime.dispose();
   });
 
-  it('treats deprecated HITL aliases as waiting_for_human in runtime.complete', async () => {
+  it('treats plain assistant text as terminal even when it announces future work', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
-    const hitlToolCall = {
-      id: 'hitl-1',
-      type: 'function' as const,
-      function: {
-        name: 'human_intervention_request',
-        arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope should I use?","options":[{"id":"a","label":"Option A"},{"id":"b","label":"Option B"}]}]}',
-      },
-    };
-
-    mockGenerateOpenAIResponse.mockResolvedValueOnce({
-      type: 'tool_calls',
-      content: '',
-      tool_calls: [hitlToolCall],
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'text',
+      content: 'I will inspect the project files next.',
       assistantMessage: {
         role: 'assistant',
-        content: '',
-        tool_calls: [hitlToolCall],
+        content: 'I will inspect the project files next.',
       },
     });
 
@@ -460,20 +458,261 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      messages: [{ role: 'user', content: 'Ask me for the missing scope.' }],
-      builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
+      messages: [{ role: 'user', content: 'Inspect the project files.' }],
     });
 
     expect(result).toMatchObject({
-      status: 'waiting_for_human',
-      pendingHumanInput: {
-        toolCallId: 'hitl-1',
-        toolName: 'human_intervention_request',
+      status: 'completed',
+      output: 'I will inspect the project files next.',
+    });
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('fails runtime.complete when ask_user_input is mixed with other tool calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const executeLookup = vi.fn(async () => ({ token: 'project-token' }));
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [
+        {
+          id: 'lookup-mixed-1',
+          type: 'function' as const,
+          function: {
+            name: 'project_lookup',
+            arguments: '{"query":"token"}',
+          },
+        },
+        {
+          id: 'hitl-mixed-1',
+          type: 'function' as const,
+          function: {
+            name: 'ask_user_input',
+            arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
+          },
+        },
+      ],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'lookup-mixed-1',
+            type: 'function' as const,
+            function: {
+              name: 'project_lookup',
+              arguments: '{"query":"token"}',
+            },
+          },
+          {
+            id: 'hitl-mixed-1',
+            type: 'function' as const,
+            function: {
+              name: 'ask_user_input',
+              arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
+            },
+          },
+        ],
       },
     });
 
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token and ask me about scope.' }],
+      builtIns: {
+        ask_user_input: true,
+      },
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: executeLookup,
+      }],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('ask_user_input must be the only tool call');
+    expect(executeLookup).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
     await runtime.dispose();
+  });
+
+  it('fails runtime.complete on empty assistant text without tool calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'text',
+      content: '',
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Do the task.' }],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Assistant returned neither tool calls nor non-empty text.');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('defaults runtime.complete to ask_user_input and passes request context into agentic tools', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const abortController = new AbortController();
+    const lookupToolCall = {
+      id: 'lookup-context-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+    let seenContext: any;
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      expect(request.tools).toEqual(expect.objectContaining({
+        ask_user_input: expect.objectContaining({ name: 'ask_user_input' }),
+      }));
+
+      const hasLookupResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'lookup-context-1'
+      ));
+
+      if (!hasLookupResult) {
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [lookupToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [lookupToolCall],
+          },
+        };
+      }
+
+      return {
+        type: 'text',
+        content: 'done',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'done',
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      context: {
+        workingDirectory: '/tmp/project',
+        abortSignal: abortController.signal,
+        metadata: { requestId: 'request-1' },
+      },
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async (_args, context) => {
+          seenContext = context;
+          return { token: 'project-token' };
+        },
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(seenContext).toEqual(expect.objectContaining({
+      workingDirectory: '/tmp/project',
+      abortSignal: abortController.signal,
+      metadata: { requestId: 'request-1' },
+      toolCallId: 'lookup-context-1',
+    }));
+    expect(seenContext.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant', tool_calls: [lookupToolCall] }),
+    ]));
+
+    await runtime.dispose();
+  });
+
+  it('exports human-input result helpers for resuming ask_user_input runs', () => {
+    const pending = {
+      toolCallId: 'hitl-1',
+      toolName: 'ask_user_input',
+      request: { questions: [] },
+    };
+    const answer = { answers: { scope: 'all' } };
+
+    expect(createHumanInputToolResult(pending, answer)).toEqual({
+      role: 'tool',
+      tool_call_id: 'hitl-1',
+      name: 'ask_user_input',
+      content: JSON.stringify(answer),
+    });
+    expect(createAskUserInputResult(pending, answer)).toEqual(createHumanInputToolResult(pending, answer));
+  });
+
+  it('reuses the canonical ask_user_input contract in the agentic helper tool', () => {
+    const tool = resolveTools({
+      builtIns: {
+        ask_user_input: true,
+      },
+    }).ask_user_input;
+
+    expect(tool).toBeDefined();
+    expect(askUserInputTool.definition.function.description).toBe(tool?.description);
+    expect(askUserInputTool.definition.function.parameters).toEqual(tool?.parameters);
   });
 
   it('streams agentic lifecycle events through runtime.streamComplete', async () => {
@@ -570,19 +809,17 @@ describe('llm-runtime runtime', () => {
     ]);
   });
 
-  it('exposes deprecated HITL aliases only when explicitly requested', () => {
+  it('exposes only ask_user_input for human input', () => {
     expect(Object.keys(resolveTools({ builtIns: { ask_user_input: true } }))).toEqual([
       'ask_user_input',
     ]);
 
-    expect(Object.keys(resolveTools({
-      builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
-    })).sort()).toEqual([
-      'ask_user_input',
-      'ask_user_question',
-      'human_intervention_request',
-    ]);
+    expect(() => resolveTools({
+      builtIns: { human_intervention_request: true } as any,
+    })).toThrow('Unknown built-in tool name "human_intervention_request".');
+    expect(() => resolveTools({
+      builtIns: { ask_user_question: true } as any,
+    })).toThrow('Unknown built-in tool name "ask_user_question".');
   });
 
   it('supports per-call built-in selection', () => {
@@ -717,56 +954,26 @@ describe('llm-runtime runtime', () => {
     });
   });
 
-  it('keeps ask_user_input and the deprecated HITL aliases synchronized', () => {
-    const resolvedFromCanonical = resolveTools({
-      builtIns: {
-        human_intervention_request: true,
-      },
-    });
-
-    expect(Object.keys(resolvedFromCanonical).sort()).toEqual(['ask_user_input']);
-
-    const resolvedFromPreferred = resolveTools({
+  it('keeps ask_user_input selection explicit', () => {
+    const resolved = resolveTools({
       builtIns: {
         ask_user_input: true,
       },
     });
 
-    expect(Object.keys(resolvedFromPreferred).sort()).toEqual(['ask_user_input']);
-
-    const resolvedFromDeprecatedAlias = resolveTools({
-      builtIns: {
-        ask_user_question: true,
-      },
-    });
-
-    expect(Object.keys(resolvedFromDeprecatedAlias).sort()).toEqual(['ask_user_input']);
+    expect(Object.keys(resolved).sort()).toEqual(['ask_user_input']);
   });
 
-  it('keeps the ask_user_input alias synchronized in built-in intersection helpers', () => {
+  it('keeps ask_user_input selection in built-in intersection helpers', () => {
     expect(intersectBuiltInToolSelections(true, {
       ask_user_input: true,
     })).toMatchObject({
       ask_user_input: true,
-      ask_user_question: true,
-      human_intervention_request: true,
     });
 
-    expect(intersectBuiltInToolSelections(true, {
+    expect(() => intersectBuiltInToolSelections(true, {
       human_intervention_request: true,
-    })).toMatchObject({
-      ask_user_input: true,
-      ask_user_question: true,
-      human_intervention_request: true,
-    });
-
-    expect(intersectBuiltInToolSelections(true, {
-      ask_user_question: true,
-    })).toMatchObject({
-      ask_user_input: true,
-      ask_user_question: true,
-      human_intervention_request: true,
-    });
+    } as any)).toThrow('Unknown built-in tool name "human_intervention_request".');
   });
 
   it('executes built-in tools through the public helper', async () => {
@@ -904,8 +1111,8 @@ describe('llm-runtime runtime', () => {
     ]);
   });
 
-  it('accepts deprecated HITL aliases during public tool execution when ask_user_input is enabled', async () => {
-    const result = await executeToolCall({
+  it('rejects removed HITL aliases during public tool execution', async () => {
+    await expect(executeToolCall({
       toolCall: {
         id: 'tool-hitl-1',
         type: 'function',
@@ -927,12 +1134,7 @@ describe('llm-runtime runtime', () => {
       builtIns: {
         ask_user_input: true,
       },
-    });
-
-    expect(JSON.parse(String(result))).toEqual(expect.objectContaining({
-      pending: true,
-      requestId: 'tool-hitl-1',
-    }));
+    })).rejects.toThrow('Tool "human_intervention_request" is not available in the current runtime.');
   });
 
   it('honors abort signals in package-owned shell, search, and fetch executors', async () => {
@@ -989,9 +1191,8 @@ describe('llm-runtime runtime', () => {
   it('returns a pending HITL request artifact without requiring an adapter', async () => {
     const tools = resolveTools({
       builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
     });
-    const result = await tools.human_intervention_request?.execute?.({
+    const result = await tools.ask_user_input?.execute?.({
       questions: [{
         header: 'Approval',
         id: 'approval',
@@ -1026,46 +1227,19 @@ describe('llm-runtime runtime', () => {
         ],
       }],
     }, {
-      toolCallId: 'hitl-call-alias-1',
+      toolCallId: 'hitl-call-ask-1',
     });
 
     expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"requestId": "hitl-call-alias-1"');
+    expect(result).toContain('"requestId": "hitl-call-ask-1"');
     expect(result).toContain('"question": "Continue?"');
   });
 
-  it('lets ask_user_question execute the same HITL pending flow', async () => {
+  it('exposes the structured ask_user_input choice schema', () => {
     const tools = resolveTools({
       builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
-    });
-    const result = await tools.ask_user_question?.execute?.({
-      questions: [{
-        header: 'Continue',
-        id: 'continue',
-        question: 'Continue?',
-        options: [
-          { id: 'yes', label: 'Yes' },
-          { id: 'no', label: 'No' },
-        ],
-      }],
-    }, {
-      toolCallId: 'hitl-call-alias-2',
-    });
-
-    expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"requestId": "hitl-call-alias-2"');
-    expect(result).toContain('"question": "Continue?"');
-  });
-
-  it('exposes the structured ask_user_input choice schema on both HITL aliases', () => {
-    const tools = resolveTools({
-      builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
     });
     const askSchema = tools.ask_user_input?.parameters as any;
-    const legacySchema = tools.human_intervention_request?.parameters as any;
-    const deprecatedSchema = tools.ask_user_question?.parameters as any;
 
     expect(tools.ask_user_input?.description).toContain('Use questions[]');
     expect(tools.ask_user_input?.description).toContain('do not use allowSkip for approval-gated or otherwise blocking decisions');
@@ -1090,10 +1264,6 @@ describe('llm-runtime runtime', () => {
       description: { type: 'string', description: expect.any(String) },
     });
     expect(askSchema.required).toEqual(['questions']);
-    expect(legacySchema).toEqual(askSchema);
-    expect(deprecatedSchema).toEqual(askSchema);
-    expect(tools.human_intervention_request?.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
-    expect(tools.ask_user_question?.description).toContain('Prefer `ask_user_input` for new prompts');
   });
 
   it('returns structured single-select HITL artifacts by default', async () => {
@@ -1207,37 +1377,6 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain("Parameter 'type' must be one of single-select, multiple-select");
   });
 
-  it('keeps both HITL aliases equivalent for structured calls', async () => {
-    const tools = resolveTools({
-      builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
-    });
-    const payload = {
-      type: 'multiple-select',
-      allowSkip: true,
-      questions: [{
-        header: 'Checks',
-        id: 'checks',
-        question: 'Which checks?',
-        options: [
-          { id: 'unit', label: 'Unit' },
-          { id: 'types', label: 'Types' },
-        ],
-      }],
-    };
-
-    const askResult = JSON.parse(String(await tools.ask_user_input?.execute?.(payload, {
-      toolCallId: 'ask-call',
-    })));
-    const legacyResult = JSON.parse(String(await tools.human_intervention_request?.execute?.(payload, {
-      toolCallId: 'legacy-call',
-    })));
-
-    delete askResult.requestId;
-    delete legacyResult.requestId;
-    expect(legacyResult).toEqual(askResult);
-  });
-
   it('rejects flat HITL payload fields', async () => {
     const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
@@ -1277,30 +1416,12 @@ describe('llm-runtime runtime', () => {
     );
   });
 
-  it('rejects removed HITL aliases before execution', async () => {
-    const tools = resolveTools({
-      builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
-    });
-
-    const aliasResult = await tools.human_intervention_request?.execute?.({
-      prompt: 'Continue?',
-      default_option: 'Yes',
-    } as any);
-
-    expect(aliasResult).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(aliasResult).toContain('"path": "prompt"');
-    expect(aliasResult).toContain('"code": "unknown_parameter"');
-    expect(aliasResult).toContain("Unknown parameter 'prompt' is not allowed");
-  });
-
   it('returns a durable validation artifact for missing required parameters', async () => {
     const tools = resolveTools({
       builtIns: { ask_user_input: true },
-      includeDeprecatedBuiltInAliases: true,
     });
 
-    const missingQuestionsResult = await tools.human_intervention_request?.execute?.({} as any);
+    const missingQuestionsResult = await tools.ask_user_input?.execute?.({} as any);
 
     expect(missingQuestionsResult).toContain('"errorType": "tool_parameter_validation_failed"');
     expect(missingQuestionsResult).toContain('"path": "questions"');
@@ -1309,7 +1430,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('creates an explicit environment without relying on convenience caches', () => {
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       providers: {
         openai: {
           apiKey: 'env-openai-key',
@@ -1324,7 +1445,7 @@ describe('llm-runtime runtime', () => {
 
   it('does not dispose caller-owned registries through the public environment cleanup API', async () => {
     let shutdownCalls = 0;
-    const environment = createLLMEnvironment({
+    const environment = createRuntime({
       mcpRegistry: {
         getConfig: () => null,
         setConfig: () => undefined,
@@ -1336,8 +1457,8 @@ describe('llm-runtime runtime', () => {
       },
     });
 
-    await expect(disposeLLMEnvironment(environment)).resolves.toBeUndefined();
-    await expect(disposeLLMEnvironment(environment)).resolves.toBeUndefined();
+    await expect(environment.dispose()).resolves.toBeUndefined();
+    await expect(environment.dispose()).resolves.toBeUndefined();
     expect(shutdownCalls).toBe(0);
   });
 });

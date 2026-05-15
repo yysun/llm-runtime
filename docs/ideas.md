@@ -5,7 +5,7 @@
 
 By the end of the session, developers should be able to:
 - explain the difference between `environment` and per-call inputs
-- map stable harness state and request-specific state into one `generate(...)` or `stream(...)` call
+- map stable harness state and request-specific state into one `generate(...)` or `complete(...)` call
 - explain how built-ins, MCP tools, extra tools, and skills differ
 - use `environment.skillRegistry` and `environment.mcpRegistry` to inspect configured discovery surfaces
 - know when to update skill roots and when not to rebuild the environment
@@ -22,7 +22,7 @@ By the end of the session, developers should be able to:
 
 ### 0:05-0:12 Package Mental Model
 
-- `generate(...)` vs `stream(...)`
+- `generate(...)` vs `complete(...)`
 - per-call API with optional explicit `environment`
 - what the package owns:
   - provider dispatch
@@ -57,9 +57,9 @@ By the end of the session, developers should be able to:
 
 ### 0:38-0:48 API Walkthrough
 
-- `createLLMEnvironment(...)`
+- `createRuntime(...)`
 - `generate(...)`
-- `stream(...)`
+- `runtime.streamComplete(...)`
 - `environment.skillRegistry` / `environment.mcpRegistry`
 - concrete harness usage pattern
 
@@ -67,7 +67,7 @@ By the end of the session, developers should be able to:
 
 - create one harness environment
 - run one `generate(...)`
-- run one `stream(...)`
+- run one `runtime.streamComplete(...)`
 - show one built-in, one skill, and one MCP tool
 
 ### 0:55-1:00 Q&A and Recap
@@ -105,7 +105,7 @@ Emphasize that this package exists so application code does not need to own prov
 - built-in tools
 - MCP tool discovery and execution
 - skill loading
-- `generate(...)`, `stream(...)`, and tool resolution
+- `generate(...)`, `complete(...)`, and tool resolution
 
 **Speaker notes**
 
@@ -113,9 +113,9 @@ This is the package boundary. If a developer asks whether something belongs in t
 
 ### Slide 4: Public API
 
-- `createLLMEnvironment(...)`
+- `createRuntime(...)`
 - `generate(...)`
-- `stream(...)`
+- `runtime.streamComplete(...)`
 - `environment.skillRegistry`
 - `environment.mcpRegistry`
 
@@ -146,13 +146,13 @@ This is the most important behavior rule in the package. It explains both the si
 
 This is the backbone of the runtime. Tool calling is not a side feature. It is the normal loop for non-trivial assistant workflows.
 
-### Slide 7: `generate(...)` vs `stream(...)`
+### Slide 7: `generate(...)` vs `complete(...)`
 
 - same config model
 - same orchestration path
 - different delivery mode
 - `generate(...)` returns final result
-- `stream(...)` emits chunks and still returns the final result
+- `runtime.streamComplete(...)` emits chunks and still returns the final result
 
 **Speaker notes**
 
@@ -201,12 +201,12 @@ This is the recommended ownership rule for a generic integration. Keep one stabl
 
 - `shell_cmd`
 - `load_skill`
-- `human_intervention_request`
+- `ask_user_input`
 - `web_fetch`
 - `read_file`
 - `write_file`
 - `list_files`
-- `grep`
+- `search_files`
 
 **Speaker notes**
 
@@ -288,7 +288,7 @@ This is the operational rule developers need in a generic harness. A cwd change 
 ### Slide 18: Generic Harness Usage Pattern
 
 ```ts
-const environment = createLLMEnvironment({
+const environment = createRuntime({
   providers,
   mcpConfig,
   skillRoots,
@@ -375,7 +375,7 @@ End on the ownership model and the package boundary. That is the main conceptual
 - one per-call provider and model selection
 - one request-level `workingDirectory`, reasoning, and permission set
 
-### Demo 3: Run `stream(...)`
+### Demo 3: Run `runtime.streamComplete(...)`
 
 - same inputs
 - different output mode

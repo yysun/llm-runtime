@@ -14,7 +14,7 @@
  * - Both the per-call showcase and the turn-loop showcase reuse the same scenarios.
  *
  * Recent changes:
- * - 2026-03-29: Extracted shared showcase fixtures for the new `runTurnLoop(...)` e2e runner.
+ * - 2026-03-29: Extracted shared showcase fixtures for the new `runCompletionLoop(...)` e2e runner.
  */
 
 import assert from 'node:assert/strict';

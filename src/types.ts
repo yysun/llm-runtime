@@ -17,13 +17,13 @@
  * Recent changes:
  * - 2026-05-15: Replaced the runtime-facade `stream(...)` method with agentic `complete(...)` and `streamComplete(...)` method contracts backed by `agentic-complete.ts`.
  * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
- * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
+ * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
  * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
  * - 2026-03-27: Added package-native message/response/provider invocation contracts.
  * - 2026-05-14: Replaced the built-in `grep` tool name with `search_files`, `create_directory`, and `path_exists`.
- * - 2026-05-15: Added runtime-facade types and the deprecated `ask_user_question` HITL alias.
+ * - 2026-05-15: Added runtime-facade types.
  */
 
 import type {
@@ -47,10 +47,6 @@ export type HitlSelectionType = 'single-select' | 'multiple-select';
 export type BuiltInToolName =
   | 'shell_cmd'
   | 'load_skill'
-  /** @deprecated Use 'ask_user_input' */
-  | 'human_intervention_request'
-  /** @deprecated Use 'ask_user_input' */
-  | 'ask_user_question'
   | 'ask_user_input'
   | 'web_fetch'
   | 'read_file'
@@ -355,14 +351,11 @@ export interface LLMEnvironmentOptions {
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
 export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
   maxIterations?: number;
-  nudgeOnFutureIntent?: boolean;
   humanInputToolName?: string;
 }
 export type LLMRuntimeStreamCompleteOptions = LLMRuntimeCompleteOptions;
 export type LLMRuntimeCompleteResult = AgenticCompleteResult;
 export type LLMRuntimeStreamCompleteEvent = AgenticStreamCompleteEvent;
-/** @deprecated Use runtime.streamComplete(...) or the top-level stream(...) helper. */
-export type LLMRuntimeStreamOptions = Omit<LLMStreamOptions, 'environment'>;
 export type LLMRuntimeResolveToolsOptions = Omit<LLMResolveToolsOptions, 'environment'>;
 export type LLMRuntimeExecuteToolOptions = LLMRuntimeResolveToolsOptions & LLMToolExecutionOptions;
 
@@ -388,7 +381,6 @@ export interface LLMPerCallProviderOptions {
   mcpConfig?: MCPConfig | null;
   skillRoots?: string[];
   builtIns?: BuiltInToolSelection;
-  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
   environment?: LLMEnvironment;
@@ -405,7 +397,6 @@ export interface LLMResolveToolsOptions {
   mcpConfig?: MCPConfig | null;
   skillRoots?: string[];
   builtIns?: BuiltInToolSelection;
-  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
   environment?: LLMEnvironment;

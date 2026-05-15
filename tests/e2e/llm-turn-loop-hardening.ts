@@ -5,7 +5,7 @@
  * - Exercise the action-execution hardening behavior end-to-end with deterministic scripted model replies.
  *
  * Key features:
- * - Runs the real package `runTurnLoop(...)` implementation with real built-in tool resolution/execution.
+ * - Runs the real package `runCompletionLoop(...)` implementation with real built-in tool resolution/execution.
  * - Covers intent-only narration recovery on direct and continuation paths.
  * - Covers durable validation-failure artifacts plus caller-driven self-correction.
  *
@@ -21,12 +21,11 @@ import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
-  createLLMEnvironment,
+  createRuntime,
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
-  disposeLLMEnvironment,
   parseToolValidationFailureArtifact,
-  runTurnLoop,
+  runCompletionLoop,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
@@ -119,7 +118,7 @@ async function runScenario(
 ): Promise<HardeningScenarioResult> {
   let modelIteration = 0;
 
-  const result = await runTurnLoop<HardeningState>({
+  const result = await runCompletionLoop<HardeningState>({
     initialState: {
       messages: [...scenario.messages],
       finalText: '',
@@ -163,7 +162,6 @@ async function runScenario(
         builtIns: {
           read_file: true,
           load_skill: false,
-          human_intervention_request: false,
           shell_cmd: false,
           web_fetch: false,
           write_file: true,
@@ -343,7 +341,7 @@ function buildHardeningScenarios(): HardeningScenario[] {
 
 async function main() {
   const workspace = await createShowcaseWorkspace();
-  const environment = createLLMEnvironment({
+  const environment = createRuntime({
     skillRoots: workspace.skillRoots,
   });
 
@@ -366,7 +364,7 @@ async function main() {
 
     console.log('\nhardening e2e status: PASS');
   } finally {
-    await disposeLLMEnvironment(environment).catch(() => undefined);
+    await environment.dispose().catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }

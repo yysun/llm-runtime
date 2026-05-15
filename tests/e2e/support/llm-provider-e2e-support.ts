@@ -17,10 +17,8 @@ import { access, rm } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import {
-  createLLMEnvironment,
-  disposeLLMEnvironment,
+  createRuntime,
   generate,
-  stream,
   type BuiltInToolSelection,
   type LLMChatMessage,
   type LLMEnvironment,
@@ -30,7 +28,7 @@ import {
   type ReasoningEffort,
   type ToolPermission,
 } from '../../../src/index.js';
-import { resolveToolsAsync } from '../../../src/runtime.js';
+import { resolveToolsAsync, stream } from '../../../src/runtime.js';
 import {
   createShowcaseWorkspace,
   summarizeChunks,
@@ -491,7 +489,7 @@ export async function runProviderE2ESuite(options: {
   dryRun: boolean;
 }) {
   const workspace = await createShowcaseWorkspace();
-  const environment = createLLMEnvironment({
+  const environment = createRuntime({
     providers: options.selection.providers,
     mcpConfig: {
       servers: {
@@ -517,7 +515,6 @@ export async function runProviderE2ESuite(options: {
         read_file: true,
         load_skill: true,
         write_file: true,
-        human_intervention_request: false,
         shell_cmd: false,
         web_fetch: false,
         list_files: false,
@@ -556,7 +553,7 @@ export async function runProviderE2ESuite(options: {
 
     console.log('\nprovider e2e status: PASS');
   } finally {
-    await disposeLLMEnvironment(environment).catch(() => undefined);
+    await environment.dispose().catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }

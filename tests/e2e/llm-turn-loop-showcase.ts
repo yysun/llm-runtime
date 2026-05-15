@@ -2,11 +2,11 @@
  * LLM Package Turn Loop Real Showcase Runner
  *
  * Purpose:
- * - Run a real end-to-end terminal showcase for the generic `runTurnLoop(...)` API in `llm-runtime`.
+ * - Run a real end-to-end terminal showcase for the generic `runCompletionLoop(...)` API in `llm-runtime`.
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.
- * - Exercises `runTurnLoop(...)` across built-ins, MCP tool use, and streaming callbacks.
+ * - Exercises `runCompletionLoop(...)` across built-ins, MCP tool use, and streaming callbacks.
  * - Prints a terminal-friendly walkthrough with assertions for each scenario.
  *
  * Implementation notes:
@@ -15,7 +15,7 @@
  * - `--dry-run` validates setup without making real provider calls.
  *
  * Recent changes:
- * - 2026-03-29: Added the real terminal showcase runner for `runTurnLoop(...)`.
+ * - 2026-03-29: Added the real terminal showcase runner for `runCompletionLoop(...)`.
  * - 2026-05-14: Updated showcase built-in selections for the filesystem tool surface.
  */
 
@@ -25,17 +25,15 @@ import path from 'node:path';
 import process from 'node:process';
 import { config as loadDotEnv } from 'dotenv';
 import {
-  createLLMEnvironment,
-  disposeLLMEnvironment,
+  createRuntime,
   generate,
-  runTurnLoop,
-  stream,
+  runCompletionLoop,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
   type LLMStreamChunk,
 } from '../../src/index.js';
-import { resolveToolsAsync } from '../../src/runtime.js';
+import { resolveToolsAsync, stream } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
   resolveShowcaseProviderSelection,
@@ -99,7 +97,7 @@ async function runShowcaseScenario(
     finalText: '',
   };
 
-  const result = await runTurnLoop({
+  const result = await runCompletionLoop({
     initialState,
     emptyTextRetryLimit: 0,
     buildMessages: async ({ state }) => state.messages,
@@ -201,7 +199,7 @@ async function runShowcaseScenario(
 
 async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelection, dryRun: boolean) {
   const workspace = await createShowcaseWorkspace();
-  const environment = createLLMEnvironment({
+  const environment = createRuntime({
     providers: providerSelection.providers,
     mcpConfig: {
       servers: {
@@ -218,7 +216,6 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
   const showcaseBuiltIns = {
     read_file: true,
     load_skill: true,
-    human_intervention_request: false,
     shell_cmd: false,
     web_fetch: false,
     write_file: false,
@@ -263,7 +260,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
 
     console.log('\nturn-loop showcase status: PASS');
   } finally {
-    await disposeLLMEnvironment(environment).catch(() => undefined);
+    await environment.dispose().catch(() => undefined);
     await rm(path.dirname(workspace.rootPath), { recursive: true, force: true }).catch(() => undefined);
   }
 }
