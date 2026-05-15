@@ -134,6 +134,8 @@ For new prompts, skills, and harness code, prefer `ask_user_input`.
 
 When the built-in human-intervention tool is enabled, the runtime also injects a small system-level hint telling the model to prefer that tool for clarification, approval, and other human-in-the-loop decisions. This helps generic skills that say things like "ask the user" or "use an ask-question tool" map onto the built-in HITL tool without each skill naming it explicitly.
 
+The tool descriptions and the loop-contract system prompt both instruct the model to reach for `ask_user_input` only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. Safe broad searches should happen before HITL disambiguation prompts.
+
 `ask_user_input` should usually be enabled for interactive harnesses that can pause, surface a question to a human, and then resume with the selected answer. It should usually be disabled for unattended batch runs, deterministic tests, or autonomous workflows that are not allowed to wait for human input.
 
 The `ask_user_input` parameter shape is:

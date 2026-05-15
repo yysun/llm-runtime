@@ -15,6 +15,7 @@
  * - `ask_user_input` is the preferred HITL built-in; legacy aliases stay synchronized.
  *
  * Recent changes:
+ * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
  * - 2026-05-15: Changed the default built-in exposure to a read-only set and gated deprecated HITL alias exposure behind an explicit option.
  * - 2026-05-15: Added the deprecated `ask_user_question` HITL alias and kept all HITL aliases synchronized.
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
@@ -206,17 +207,17 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   human_intervention_request: {
     description:
-      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
+      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. Use this only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
     parameters: HUMAN_INPUT_PARAMETERS,
   },
   ask_user_question: {
     description:
-      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
+      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. Use this only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
     parameters: HUMAN_INPUT_PARAMETERS,
   },
   ask_user_input: {
     description:
-      'Ask a human one or more structured choice questions. Prefer this tool whenever clarification, approval, missing user input, or another human decision is needed. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported. Legacy alias names: `human_intervention_request` and `ask_user_question`.',
+      'Ask a human one or more structured choice questions. Use this tool only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision such as a required confirmation. Do not ask the human to disambiguate before performing a safe broad search. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported. Legacy alias names: `human_intervention_request` and `ask_user_question`.',
     parameters: HUMAN_INPUT_PARAMETERS,
   },
   web_fetch: {

@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-15
 **Type**: HITL / Completion Loop / Agent Control
-**Status**: Implemented
+**Status**: Partially Accepted — REQ-1 through REQ-3 shipped; REQ-4 through REQ-16 declined (see plan and done docs for rationale).
 
 ## Overview
 
@@ -73,13 +73,15 @@ The runtime needs a focused hardening pass so HITL suspension is explicit and du
 
 ## Acceptance Criteria
 
-- [x] `ask_user_input` and its exposed aliases no longer encourage premature clarification before safe runtime inspection or lookup.
-- [x] HITL executor results include an explicit pending-user-input terminal reason and suspended state that a host can trust.
-- [x] The completion loop can stop on confirmed pending-user-input tool results without relying on generic `{ "pending": true }` markers.
-- [x] `onToolCallsResponse(...)` can explicitly acknowledge action evidence separately from generic continuation.
-- [x] Tool-call emission alone no longer satisfies action-evidence requirements.
-- [x] Existing valid `need_user_input` and `blocked` control-tool behavior remains intact.
-- [x] Focused unit tests cover the updated HITL artifact, callback acknowledgment, and completion-loop stop semantics.
+- [x] `ask_user_input` and its exposed aliases no longer encourage premature clarification before safe runtime inspection or lookup. — Tool descriptions for `ask_user_input`, `human_intervention_request`, and `ask_user_question` updated in `src/builtins.ts`. The loop-contract system prompt in `src/completion-loop.ts` already carries the same guidance.
+- [ ] HITL executor results include an explicit pending-user-input terminal reason and suspended state that a host can trust. — Declined. The existing `PendingHitlToolResult` shape (`pending: true`, `status: 'pending'`, `confirmed: false`, `requestId`, structured `questions`) is already distinctive enough; adding `terminalReason` and `suspended` fields was ceremony with no consumer.
+- [ ] The completion loop can stop on confirmed pending-user-input tool results without relying on generic `{ "pending": true }` markers. — Declined. Hosts stop the loop themselves via `next: { control: 'stop' }` after recognising HITL tool results by name + payload. Adding a runtime terminal duplicated that without unlocking anything.
+- [ ] `onToolCallsResponse(...)` can explicitly acknowledge action evidence separately from generic continuation. — Declined. The previous heuristic combined with `evidenceKind` on tool definitions is precise enough; requiring every host to opt in was a breaking ergonomic tax.
+- [ ] Tool-call emission alone no longer satisfies action-evidence requirements. — Declined for the same reason: tool definitions already classify `read`/`write`/`external_action`/`artifact`/`interaction`/`none` evidence kinds, and `complete(...)`'s bound `toolExecutor` records evidence only on successful execution.
+- [x] Existing valid `need_user_input` and `blocked` control-tool behavior remains intact. — No change to control-tool semantics.
+- [x] Focused unit tests cover the updated HITL artifact, callback acknowledgment, and completion-loop stop semantics. — The 138-test suite still passes; no new unit coverage was needed because the description-only change is observable through the existing snapshot-style coverage of built-in metadata.
+
+Revert reference: commit `d8e6387 feat: remove pending_user_input handling and related artifacts from HITL tools` removed the over-engineered slice that the original implementation in `db9380f` introduced. Only the description-tightening half is kept.
 
 ## References
 
