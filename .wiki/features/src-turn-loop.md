@@ -1,11 +1,13 @@
 ---
-title: "Turn Loop"
+title: "Turn Loop Compatibility Path"
 type: "feature"
 status: "active"
 language: "default"
 source_paths:
   - "src/index.ts"
   - "src/turn-loop.ts"
+  - "src/completion-loop.ts"
+  - ".docs/done/2026/05/15/runtime-api-rename.md"
   - ".docs/reqs/2026/05/14/req-natural-language-continuation.md"
   - ".docs/plans/2026/05/14/plan-natural-language-continuation.md"
   - "tests/llm/turn-loop.test.ts"
@@ -13,19 +15,12 @@ source_paths:
 updated_at: "2026-05-15"
 ---
 
-`runTurnLoop(...)` is the lower-level host-agnostic model and tool loop. `respondWithTools(...)` is now the preferred wrapper when a caller wants package-owned defaults for tool-capable continuation.
+`src/turn-loop.ts` is now a compatibility file. The canonical implementation lives in [[src-completion-loop]], while this path re-exports the same surface so older imports keep working.
 
 Facts from source:
-- Callers can supply either `modelRequest` to reuse package `generate(...)` / `stream(...)` or `callModel` to invoke the model themselves.
-- `buildMessages(...)` rebuilds prompt state each iteration and can receive a transient recovery instruction.
-- Plain-text tool intent normalization is optional through `parsePlainTextToolIntent(...)`, and `markSyntheticToolCalls` can annotate normalized tool calls on the public response surface.
-- The loop now applies intrinsic hard bounds for iterations, consecutive tool rounds, wall-clock duration, and repeated identical tool-call batches.
-- Text responses may be accepted, retried, or rejected based on `requiresActionEvidence(...)`, `classifyTextResponse(...)`, and the additive `defaultTextResponseMode` option.
-- `RunTurnLoopResult` now includes `steps`, `toolCalls`, `classifications`, `retries`, `stop`, and `elapsedMs` in addition to the final `state`, `response`, and `reason`.
-- Additive lifecycle hooks `onIterationStart(...)`, `onModelResponse(...)`, `onClassification(...)`, and `onStop(...)` expose deterministic trace points without taking ownership of host state.
-- Terminal reasons now include hard-stop paths such as `max_iterations_exceeded`, `max_tool_rounds_exceeded`, `timeout`, and `repeated_tool_call_stopped`.
-- `respondWithTools(...)` now defaults `defaultTextResponseMode` to `require_tool_result` and `rejectedTextRetryLimit` to `1`, so unresolved tool-capable text gets one internal recovery turn before the loop stops.
-- The package-owned default is evidence-first rather than phrase-first: before any `tool` result message appears in the prompt state, unresolved plain text is rejected as `non_progressing` unless the English narration fallback matches, in which case it is labeled `intent_only_narration`.
-- Once prior tool-result evidence exists, plain text can still complete normally, and hosts can always tighten or relax the default through the existing classification hooks.
+- The legacy names `runTurnLoop(...)`, `respondWithTools(...)`, `RunTurnLoopOptions`, and `RunTurnLoopResult` remain exported as deprecated aliases of `runCompletionLoop(...)`, `complete(...)`, `RunCompletionLoopOptions`, and `RunCompletionLoopResult`.
+- The root entrypoint continues to export both the preferred and deprecated names, so existing callers can upgrade incrementally instead of rewriting imports all at once.
+- Because the file re-exports the canonical implementation, older import paths still see the same terminal reasons, lifecycle hook types, trace summaries, control-tool outputs, and plain-text intent normalization behavior documented in [[src-completion-loop]].
+- README examples and focused tests now use the preferred completion-loop names, while alias coverage remains in place to prevent accidental breakage.
 
-April 2026 first added action-proof rejection for narration-only replies, then extended that work with intrinsic stop bounds, synthetic tool-call marking, and structured trace history. May 2026 added language-agnostic continuation defaults so tool-capable turns no longer depend on English narration patterns for safe internal retry. See [[action-execution-hardening]], [[language-agnostic-continuation]], [[turn-loop-safety-and-lifecycle]], [[approval-and-synthetic-tool-call-messages]], and [[src-tool-validation]] for the related recovery and hardening paths.
+Use this page when you need to understand the backward-compatibility contract for older path or symbol names. For the actual loop behavior, defaults, and control-tool semantics, read [[src-completion-loop]]. Related pages: [[action-execution-hardening]], [[language-agnostic-continuation]], [[turn-loop-safety-and-lifecycle]], [[approval-and-synthetic-tool-call-messages]], and [[src-tool-validation]].
