@@ -23,6 +23,7 @@ import type {
   AnthropicConfig,
   LLMChatMessage,
   LLMResponse,
+  LLMStopKind,
   LLMStreamChunk,
   LLMToolDefinition,
   LLMWebSearchOptions,
@@ -180,6 +181,19 @@ function extractSystemPrompt(messages: LLMChatMessage[]): string {
   return systemMessage?.content || 'You are a helpful assistant.';
 }
 
+function normalizeAnthropicStopKind(stopReason: string | null | undefined): LLMStopKind {
+  switch (stopReason) {
+    case 'end_turn':
+      return 'natural_stop';
+    case 'tool_use':
+      return 'tool_call';
+    case 'max_tokens':
+      return 'length';
+    default:
+      return 'unknown';
+  }
+}
+
 export async function streamAnthropicResponse(request: AnthropicProviderStreamRequest): Promise<LLMResponse> {
   const toolNameTranslator = createProviderToolNameTranslator(request.tools, {
     reservedProviderNames: request.webSearch ? ['web_search'] : [],
@@ -201,6 +215,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
   );
 
   let fullResponse = '';
+  let stopReason: string | null | undefined;
   const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
 
   try {
@@ -208,6 +223,10 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
       if (request.abortSignal?.aborted) {
         throw new DOMException('Anthropic stream aborted', 'AbortError');
       }
+
+      stopReason = (chunk as { delta?: { stop_reason?: string | null }; message?: { stop_reason?: string | null } }).delta?.stop_reason
+        ?? (chunk as { message?: { stop_reason?: string | null } }).message?.stop_reason
+        ?? stopReason;
 
       if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
         fullResponse += chunk.delta.text;
@@ -231,6 +250,8 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
           content: fullResponse || '',
           tool_calls: toolCalls,
         },
+        stopKind: normalizeAnthropicStopKind(stopReason),
+        providerStopReason: stopReason ?? undefined,
       };
     }
 
@@ -241,6 +262,8 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
         role: 'assistant',
         content: fullResponse,
       },
+      stopKind: normalizeAnthropicStopKind(stopReason),
+      providerStopReason: stopReason ?? undefined,
     };
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
@@ -275,6 +298,7 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
   );
 
   let content = '';
+  const stopReason = response.stop_reason;
   const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
 
   response.content.forEach((block) => {
@@ -299,6 +323,8 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
         content,
         tool_calls: toolCalls,
       },
+      stopKind: normalizeAnthropicStopKind(stopReason),
+      providerStopReason: stopReason ?? undefined,
       usage: response.usage
         ? {
           inputTokens: response.usage.input_tokens,
@@ -315,6 +341,8 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
       role: 'assistant',
       content,
     },
+    stopKind: normalizeAnthropicStopKind(stopReason),
+    providerStopReason: stopReason ?? undefined,
     usage: response.usage
       ? {
         inputTokens: response.usage.input_tokens,

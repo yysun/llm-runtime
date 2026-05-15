@@ -23,6 +23,7 @@ import type {
   GoogleConfig,
   LLMChatMessage,
   LLMResponse,
+  LLMStopKind,
   LLMStreamChunk,
   LLMToolDefinition,
   LLMWarning,
@@ -480,6 +481,20 @@ function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, war
   };
 }
 
+function normalizeGoogleStopKind(finishReason: string | null | undefined): LLMStopKind {
+  switch (finishReason) {
+    case 'STOP':
+      return 'natural_stop';
+    case 'MAX_TOKENS':
+      return 'length';
+    case 'SAFETY':
+    case 'RECITATION':
+      return 'content_filter';
+    default:
+      return 'unknown';
+  }
+}
+
 export async function streamGoogleResponse(request: GoogleProviderStreamRequest): Promise<LLMResponse> {
   const resolvedGoogleTools = buildGoogleTools(request.tools, request.webSearch);
   const converted = convertMessagesToGoogle(request.messages);
@@ -497,6 +512,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
   });
 
   let fullResponse = '';
+  let finishReason: string | null | undefined;
   const functionCalls: any[] = [];
 
   try {
@@ -513,6 +529,8 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
       if (request.abortSignal?.aborted) {
         throw new DOMException('Google stream aborted', 'AbortError');
       }
+
+      finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
 
       const parts = Array.isArray(chunk.candidates?.[0]?.content?.parts)
         ? chunk.candidates[0].content.parts
@@ -565,6 +583,10 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
           content: fullResponse || '',
           tool_calls: validCalls,
         },
+        stopKind: validCalls.length > 0 && !finishReason
+          ? 'tool_call'
+          : normalizeGoogleStopKind(finishReason),
+        providerStopReason: finishReason ?? undefined,
       }, resolvedGoogleTools.warnings);
     }
 
@@ -575,6 +597,8 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
         role: 'assistant',
         content: fullResponse,
       },
+      stopKind: normalizeGoogleStopKind(finishReason),
+      providerStopReason: finishReason ?? undefined,
     }, resolvedGoogleTools.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
@@ -614,6 +638,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
   );
   const response = result.response;
   const content = response.text() || '';
+  const finishReason = response.candidates?.[0]?.finishReason;
   const functionCalls: any[] = [];
 
   if (response.candidates?.[0]?.content?.parts) {
@@ -645,6 +670,10 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
         content,
         tool_calls: validCalls,
       },
+      stopKind: validCalls.length > 0 && !finishReason
+        ? 'tool_call'
+        : normalizeGoogleStopKind(finishReason),
+      providerStopReason: finishReason ?? undefined,
     }, resolvedGoogleTools.warnings);
   }
 
@@ -655,5 +684,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
       role: 'assistant',
       content,
     },
+    stopKind: normalizeGoogleStopKind(finishReason),
+    providerStopReason: finishReason ?? undefined,
   }, resolvedGoogleTools.warnings);
 }

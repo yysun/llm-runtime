@@ -827,6 +827,59 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('fails runtime.streamComplete on plain assistant narration that only announces future work', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'text',
+      content: 'I will inspect the project files next.',
+      assistantMessage: {
+        role: 'assistant',
+        content: 'I will inspect the project files next.',
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const eventTypes: string[] = [];
+    let finalEvent: RuntimeStreamCompleteEvent | undefined;
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Inspect the project files.' }],
+    })) {
+      eventTypes.push(event.type);
+      finalEvent = event;
+    }
+
+    expect(eventTypes).toEqual([
+      'model_start',
+      'assistant_message',
+      'model_start',
+      'assistant_message',
+      'model_start',
+      'assistant_message',
+      'failed',
+    ]);
+    expect(finalEvent).toEqual(expect.objectContaining({
+      type: 'failed',
+      result: expect.objectContaining({
+        status: 'failed',
+        error: expect.stringContaining('required evidence'),
+      }),
+    }));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
   it('includes only the read-only built-ins by default', () => {
     expect(Object.keys(resolveTools()).sort()).toEqual([
       'list_files',

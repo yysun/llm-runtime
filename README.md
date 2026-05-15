@@ -204,6 +204,10 @@ The runtime helper behavior is:
 
 `runtime.complete(...)` and `runtime.streamComplete(...)` keep the simple runtime result and event contract, but they no longer bypass the generic `complete(...)` hardening described later in this README. Use `complete(...)` or `runCompletionLoop(...)` when your harness needs callback-driven lifecycle hooks, host-owned classification logic, or direct access to the lower-level loop result metadata.
 
+`runtime.streamComplete(...)` is a lifecycle event stream, not a true token-by-token text stream. The hardened runtime wrapper emits events such as `model_start`, `assistant_message`, `tool_start`, `tool_result`, `waiting_for_human`, `completed`, and `failed`. It does not currently forward text token deltas from the hardened completion loop.
+
+Provider adapters may still stream internally. For example, the OpenAI provider helper can consume streaming chunks and assemble a final response while emitting chunk callbacks at the provider layer, but the runtime-level completion wrapper currently exposes only the higher-level lifecycle events.
+
 When a run pauses for human input, resume it by appending a tool-result message created with `createHumanInputToolResult(...)` or `createAskUserInputResult(...)` and then calling `runtime.complete(...)` or `runtime.streamComplete(...)` again.
 
 Minimal resume pattern:
@@ -684,6 +688,8 @@ for await (const event of runtime.streamComplete({
     read_file: true,
   },
 })) {
+  // runtime.streamComplete() emits lifecycle events for the hardened loop.
+  // It does not currently forward provider token deltas.
   if (event.type === 'completed') {
     console.log(event.result.output);
   }

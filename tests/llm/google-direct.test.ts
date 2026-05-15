@@ -23,6 +23,7 @@ describe('llm-runtime google-direct', () => {
           response: {
             text: () => '',
             candidates: [{
+              finishReason: 'STOP',
               content: {
                 parts: [{
                   functionCall: {
@@ -67,6 +68,8 @@ describe('llm-runtime google-direct', () => {
     expect(providerToolName.length).toBeLessThanOrEqual(64);
     expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
     expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.stopKind).toBe('natural_stop');
+    expect(response.providerStopReason).toBe('STOP');
   });
 
   it('adds Gemini Google Search grounding when web search is enabled', async () => {
@@ -76,7 +79,7 @@ describe('llm-runtime google-direct', () => {
       generateContent: async () => ({
         response: {
           text: () => 'google search enabled',
-          candidates: [],
+          candidates: [{ finishReason: 'STOP' }],
         },
       }),
     };
@@ -116,7 +119,7 @@ describe('llm-runtime google-direct', () => {
       generateContent: async () => ({
         response: {
           text: () => 'google tools enabled',
-          candidates: [],
+          candidates: [{ finishReason: 'STOP' }],
         },
       }),
     };
@@ -211,7 +214,7 @@ describe('llm-runtime google-direct', () => {
         stream: (async function* createStream() {
           yield {
             text: () => 'google-streamed',
-            candidates: [],
+            candidates: [{ finishReason: 'STOP' }],
           };
         }()),
       }),
@@ -261,6 +264,8 @@ describe('llm-runtime google-direct', () => {
         provider: 'google',
       }),
     ]);
+    expect(response.stopKind).toBe('natural_stop');
+    expect(response.providerStopReason).toBe('STOP');
   });
 
   it('does not emit warning chunks when Gemini streaming aborts before start', async () => {
@@ -273,7 +278,7 @@ describe('llm-runtime google-direct', () => {
           stream: (async function* createStream() {
             yield {
               text: () => 'unused',
-              candidates: [],
+              candidates: [{ finishReason: 'STOP' }],
             };
           }()),
         }),
@@ -315,7 +320,7 @@ describe('llm-runtime google-direct', () => {
       generateContent: async () => ({
         response: {
           text: () => 'google tools enabled',
-          candidates: [],
+          candidates: [{ finishReason: 'STOP' }],
         },
       }),
     };
@@ -411,5 +416,52 @@ describe('llm-runtime google-direct', () => {
     expect(serialized).not.toContain('additionalProperties');
     expect(serialized).not.toContain('title');
     expect(serialized).not.toContain('default');
+  });
+
+  it('preserves Gemini stop metadata on streamed function-call responses', async () => {
+    const fakeModel = {
+      generateContentStream: async () => ({
+        stream: (async function* createStream() {
+          yield {
+            candidates: [{
+              finishReason: 'STOP',
+              content: {
+                parts: [{
+                  functionCall: {
+                    name: 'lookup',
+                    args: { query: 'hello' },
+                  },
+                }],
+              },
+            }],
+            text: () => '',
+          };
+        }()),
+      }),
+    };
+
+    const response = await streamGoogleResponse({
+      client: {
+        getGenerativeModel: () => fakeModel,
+      } as any,
+      model: 'gemini-2.5-flash',
+      messages: [
+        {
+          role: 'user',
+          content: 'Call a tool',
+        },
+      ],
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Look something up',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+      onChunk: () => undefined,
+    });
+
+    expect(response.stopKind).toBe('natural_stop');
+    expect(response.providerStopReason).toBe('STOP');
   });
 });

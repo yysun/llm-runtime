@@ -22,6 +22,7 @@ describe('llm-runtime anthropic-direct', () => {
           capturedRequest = request;
           const providerToolName = request.tools[0].name;
           return {
+            stop_reason: 'tool_use',
             content: [
               {
                 id: 'anthropic-tool-1',
@@ -76,6 +77,8 @@ describe('llm-runtime anthropic-direct', () => {
     ]);
     expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
     expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.stopKind).toBe('tool_call');
+    expect(response.providerStopReason).toBe('tool_use');
   });
 
   it('adds Anthropic web search when webSearch is enabled', async () => {
@@ -86,6 +89,7 @@ describe('llm-runtime anthropic-direct', () => {
         create: async (request: Record<string, unknown>) => {
           capturedRequest = request;
           return {
+            stop_reason: 'end_turn',
             content: [
               {
                 type: 'text',
@@ -131,6 +135,7 @@ describe('llm-runtime anthropic-direct', () => {
         create: async (request: Record<string, unknown>) => {
           capturedRequest = request;
           return {
+            stop_reason: 'end_turn',
             content: [
               {
                 type: 'text',
@@ -183,6 +188,7 @@ describe('llm-runtime anthropic-direct', () => {
       client: {
         messages: {
           create: async () => ({
+            stop_reason: 'end_turn',
             content: [
               {
                 id: 'server-web-search-1',
@@ -227,6 +233,8 @@ describe('llm-runtime anthropic-direct', () => {
     expect(response).toEqual(expect.objectContaining({
       type: 'text',
       content: 'TypeScript 5.9 is available.',
+      stopKind: 'natural_stop',
+      providerStopReason: 'end_turn',
       assistantMessage: {
         role: 'assistant',
         content: 'TypeScript 5.9 is available.',
@@ -267,6 +275,12 @@ describe('llm-runtime anthropic-direct', () => {
               },
             };
             yield {
+              type: 'message_delta',
+              delta: {
+                stop_reason: 'end_turn',
+              },
+            };
+            yield {
               type: 'content_block_delta',
               delta: {
                 type: 'text_delta',
@@ -293,11 +307,57 @@ describe('llm-runtime anthropic-direct', () => {
     expect(response).toEqual(expect.objectContaining({
       type: 'text',
       content: 'TypeScript 5.9 is available.',
+      stopKind: 'natural_stop',
+      providerStopReason: 'end_turn',
       assistantMessage: {
         role: 'assistant',
         content: 'TypeScript 5.9 is available.',
       },
     }));
     expect(response).not.toHaveProperty('tool_calls');
+  });
+
+  it('preserves Anthropic stop metadata on streamed tool-use responses', async () => {
+    const response = await streamAnthropicResponse({
+      client: {
+        messages: {
+          create: async function* () {
+            yield {
+              type: 'content_block_start',
+              content_block: {
+                id: 'anthropic-tool-2',
+                input: { query: 'hello' },
+                name: 'lookup',
+                type: 'tool_use',
+              },
+            };
+            yield {
+              type: 'message_delta',
+              delta: {
+                stop_reason: 'tool_use',
+              },
+            };
+          },
+        },
+      } as any,
+      model: 'claude-sonnet-4-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Call the tool',
+        },
+      ],
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Lookup tool',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+      onChunk: () => undefined,
+    });
+
+    expect(response.stopKind).toBe('tool_call');
+    expect(response.providerStopReason).toBe('tool_use');
   });
 });
