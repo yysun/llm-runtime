@@ -286,7 +286,7 @@ They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the ot
 
 ### Turn-Loop Hardening
 
-For tool-capable turns, `complete(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries twice internally by default. The package default treats unresolved text as missing required evidence, regardless of language. If a host wants the more specific `intent_only_narration` label, it should return that classification explicitly from `classifyTextResponse(...)`.
+For tool-capable turns, `complete(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any current-run tool progress and retries twice internally by default. The package default treats unresolved text as missing required evidence, regardless of language. If a host wants the more specific `intent_only_narration` label, it should return that classification explicitly from `classifyTextResponse(...)`.
 
 Use these hooks when your harness needs hardening against weak tool users:
 
@@ -312,6 +312,10 @@ The package also exports reusable recovery helpers:
 These are default exported strings, not mutable runtime settings. A harness should treat them as convenient starting points and override the effective recovery text by returning its own `transientInstruction` from `onRejectedTextResponse(...)`, by returning a custom assessment from `classifyTextResponse(...)`, or by supplying its own validation-recovery instruction after parsing a validation artifact.
 
 `onToolCallsResponse(...)` must return `next: { control: 'continue' }` after tool execution when the loop should re-enter the model. If it omits that continuation request, the runtime stops with `tool_calls_response` by design.
+
+When `complete(...)` uses `modelRequest`, `onToolCallsResponse(...)` receives a `toolExecutor` that is already bound to the same effective tool surface as the model request, including per-call `builtIns`, `extraTools`, direct `tools`, MCP config, skill roots, and runtime environment. Use `toolExecutor.executeToolCall(...)` or `toolExecutor.executeToolCalls(...)` in that callback to avoid resolving one tool surface for the model and a different one for execution.
+
+Tool execution helpers throw by default. Agent loops that want recoverable model-readable tool results can pass `errorMode: 'return-artifact'` to return a durable JSON-compatible error artifact for invalid arguments, missing tools, non-executable tools, or execution failures.
 
 Tool validation failures now return durable JSON artifacts instead of opaque error strings. Use `parseToolValidationFailureArtifact(...)` when the harness wants to detect a validation failure from a tool result and prompt the model to emit a corrected tool call.
 
@@ -374,11 +378,15 @@ const result = await runtime.complete({
       { role: 'system', content: transientInstruction },
     ];
   },
-  onToolCallsResponse: async ({ state, response }) => {
+  onToolCallsResponse: async ({ state, response, toolExecutor }) => {
     const nextMessages = [...state.messages, response.assistantMessage];
 
     for (const toolCall of response.tool_calls ?? []) {
-      const toolResult = await runtime.executeToolCall(toolCall);
+      const toolResult = await toolExecutor?.executeToolCall(
+        toolCall,
+        { workingDirectory: process.cwd() },
+        { errorMode: 'return-artifact' },
+      );
       nextMessages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
@@ -462,6 +470,7 @@ const result = await runCompletionLoop({
         builtIns: {
           read_file: true,
         },
+        errorMode: 'return-artifact',
         context: {
           workingDirectory: process.cwd(),
         },

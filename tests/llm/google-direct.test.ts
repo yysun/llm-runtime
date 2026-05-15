@@ -3,12 +3,72 @@
  *
  * Purpose:
  * - Validate the package-owned Google provider helper request mapping without real SDK traffic.
+ *
+ * Recent changes:
+ * - 2026-05-15: Added provider-safe function-name translation and reverse-mapping coverage.
  */
 
 import { describe, expect, it } from 'vitest';
 import { createGoogleModel, generateGoogleResponse, streamGoogleResponse } from '../../src/google-direct.js';
 
 describe('llm-runtime google-direct', () => {
+  it('sanitizes Gemini function names and maps function calls back to runtime names', async () => {
+    let capturedOptions: Record<string, any> | undefined;
+    const runtimeToolName = 'demo.server.lookup.tool.with.invalid.characters.and.a.very.long.suffix.that.must.be.shortened.for.google';
+
+    const fakeModel = {
+      generateContent: async () => {
+        const providerToolName = capturedOptions?.tools?.[0]?.functionDeclarations?.[0]?.name ?? '';
+        return {
+          response: {
+            text: () => '',
+            candidates: [{
+              content: {
+                parts: [{
+                  functionCall: {
+                    name: providerToolName,
+                    args: { query: 'hello' },
+                  },
+                }],
+              },
+            }],
+          },
+        };
+      },
+    };
+
+    const fakeClient = {
+      getGenerativeModel: (options: Record<string, any>) => {
+        capturedOptions = options;
+        return fakeModel;
+      },
+    } as any;
+
+    const response = await generateGoogleResponse({
+      client: fakeClient,
+      model: 'gemini-2.5-flash',
+      messages: [
+        {
+          role: 'user',
+          content: 'Call a tool',
+        },
+      ],
+      tools: {
+        [runtimeToolName]: {
+          name: runtimeToolName,
+          description: 'Lookup tool',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+    });
+
+    const providerToolName = capturedOptions?.tools?.[0]?.functionDeclarations?.[0]?.name ?? '';
+    expect(providerToolName).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(providerToolName.length).toBeLessThanOrEqual(64);
+    expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+  });
+
   it('adds Gemini Google Search grounding when web search is enabled', async () => {
     let capturedOptions: Record<string, unknown> | undefined;
 

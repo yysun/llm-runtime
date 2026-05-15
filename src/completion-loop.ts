@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Added bound tool executors for package-managed completion loops and guarded malformed control retries with normal tool-loop stop checks.
  * - 2026-05-15: Made completion evidence run-scoped, merged the loop contract into the first system message, and rejected malformed control-tool payloads.
  * - 2026-05-15: Added agent-mode control tools and deterministic stop handling for final answers, user-input requests, and blocked outcomes.
  * - 2026-05-15: Added a package-owned completion-loop system prompt, evidence-based recovery wording, and stronger default rejected-text retries.
@@ -23,14 +24,17 @@
  * - 2026-03-29: Added the first generic completion-loop API for host-agnostic tool-loop orchestration.
  */
 
-import { generate, stream } from './runtime.js';
+import { executeToolCall, executeToolCalls, generate, stream } from './runtime.js';
 import type {
   LLMChatMessage,
+  LLMExecuteToolCallOptions,
   LLMGenerateOptions,
   LLMResponse,
   LLMStreamOptions,
   LLMToolDefinition,
   LLMToolCall,
+  LLMToolExecutionContext,
+  LLMToolExecutionErrorMode,
 } from './types.js';
 
 type ParsedToolIntent = {
@@ -271,6 +275,23 @@ export type TurnLoopPackageModelRequest =
   | ({ mode?: 'generate' } & Omit<LLMGenerateOptions, 'messages'>)
   | ({ mode: 'stream' } & Omit<LLMStreamOptions, 'messages'>);
 
+export interface TurnLoopBoundToolExecutorOptions {
+  errorMode?: LLMToolExecutionErrorMode;
+}
+
+export interface TurnLoopToolExecutor {
+  executeToolCall: (
+    toolCall: LLMToolCall,
+    context?: LLMToolExecutionContext,
+    options?: TurnLoopBoundToolExecutorOptions
+  ) => Promise<unknown>;
+  executeToolCalls: (
+    toolCalls: LLMToolCall[],
+    context?: LLMToolExecutionContext,
+    options?: TurnLoopBoundToolExecutorOptions
+  ) => Promise<unknown[]>;
+}
+
 export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> {
   initialState: TState;
   emptyTextRetryLimit: number;
@@ -340,6 +361,7 @@ export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessag
     response: LLMResponse;
     messages: TMessage[];
     iteration: number;
+    toolExecutor?: TurnLoopToolExecutor;
   }) => Promise<TurnLoopStepResult<TState> | void>;
   onFinalAnswerToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
   onNeedUserInputToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
@@ -773,6 +795,48 @@ function resolveModelCaller<TState, TMessage extends LLMChatMessage>(
   throw new Error('runCompletionLoop requires either callModel or modelRequest.');
 }
 
+function createCompletionToolExecutor(
+  request: TurnLoopPackageModelRequest | undefined,
+  markObservedRunToolProgress: () => void,
+): TurnLoopToolExecutor | undefined {
+  if (!request) {
+    return undefined;
+  }
+
+  const resolveOptions: Omit<LLMExecuteToolCallOptions, 'toolCall' | 'context' | 'errorMode'> = {
+    environment: request.environment,
+    mcpConfig: request.mcpConfig,
+    skillRoots: request.skillRoots,
+    builtIns: request.builtIns,
+    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
+    extraTools: request.extraTools,
+    tools: request.tools,
+  };
+
+  return {
+    executeToolCall: async (toolCall, context, options = {}) => {
+      const result = await executeToolCall({
+        ...resolveOptions,
+        ...options,
+        toolCall,
+        context,
+      });
+      markObservedRunToolProgress();
+      return result;
+    },
+    executeToolCalls: async (toolCalls, context, options = {}) => {
+      const result = await executeToolCalls({
+        ...resolveOptions,
+        ...options,
+        toolCalls,
+        context,
+      });
+      markObservedRunToolProgress();
+      return result;
+    },
+  };
+}
+
 export async function runCompletionLoop<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
   options: RunCompletionLoopOptions<TState, TMessage>,
 ): Promise<RunCompletionLoopResult<TState>> {
@@ -1048,10 +1112,69 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
       }));
       toolCalls.push(...currentToolCallSummaries);
 
+      const stopForRepeatedToolCall = async () => {
+        if (!repeatedToolCallStopped) {
+          return null;
+        }
+
+        recordStep(iteration, response, 'repeated_tool_call_stop');
+        return await finalize({
+          reason: 'repeated_tool_call_stopped',
+          response,
+          stop: {
+            reason: 'repeated_tool_call_stopped',
+            iteration,
+            elapsedMs: getElapsedMs(),
+            maxIterations,
+            maxConsecutiveToolTurns,
+            maxWallTimeMs,
+            repeatedToolCall: {
+              batchSignature,
+              consecutiveSameBatchCount: consecutiveSameToolBatchCount,
+              maxConsecutiveSameBatches: repeatedToolCallGuard.maxConsecutiveSameBatches,
+              toolNames: currentToolCallSummaries.map((toolCall) => toolCall.toolName),
+            },
+          },
+        });
+      };
+
+      const stopForMaxToolRounds = async () => {
+        if (consecutiveToolTurns <= maxConsecutiveToolTurns) {
+          return null;
+        }
+
+        recordStep(iteration, response, 'max_tool_rounds_stop');
+        return await finalize({
+          reason: 'max_tool_rounds_exceeded',
+          response,
+          stop: {
+            reason: 'max_tool_rounds_exceeded',
+            iteration,
+            elapsedMs: getElapsedMs(),
+            maxIterations,
+            maxConsecutiveToolTurns,
+            maxWallTimeMs,
+          },
+        });
+      };
+
+      const stopForToolGuards = async () => {
+        const repeatedStop = await stopForRepeatedToolCall();
+        if (repeatedStop) {
+          return repeatedStop;
+        }
+
+        return await stopForMaxToolRounds();
+      };
+
       if (agentControlMode) {
         const controlToolCalls = (response.tool_calls ?? []).filter((toolCall) => AGENT_CONTROL_TOOL_NAME_SET.has(toolCall.function.name));
         if (controlToolCalls.length > 0) {
           if (controlToolCalls.length !== 1 || (response.tool_calls?.length ?? 0) !== 1) {
+            const guardStop = await stopForToolGuards();
+            if (guardStop) {
+              return guardStop;
+            }
             recordStep(iteration, response, 'tool_calls_continue');
             transientInstruction = DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
             continue;
@@ -1059,6 +1182,10 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
 
           const controlOutput = tryParseControlToolOutput(controlToolCalls[0]);
           if (!controlOutput) {
+            const guardStop = await stopForToolGuards();
+            if (guardStop) {
+              return guardStop;
+            }
             recordStep(iteration, response, 'tool_calls_continue');
             transientInstruction = DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
             continue;
@@ -1074,6 +1201,10 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             });
             state = next?.state ?? state;
             if (next?.next?.control === 'continue') {
+              const guardStop = await stopForToolGuards();
+              if (guardStop) {
+                return guardStop;
+              }
               recordStep(iteration, response, 'tool_calls_continue');
               transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
               continue;
@@ -1106,6 +1237,10 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             });
             state = next?.state ?? state;
             if (next?.next?.control === 'continue') {
+              const guardStop = await stopForToolGuards();
+              if (guardStop) {
+                return guardStop;
+              }
               recordStep(iteration, response, 'tool_calls_continue');
               transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
               continue;
@@ -1138,6 +1273,10 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             });
             state = next?.state ?? state;
             if (next?.next?.control === 'continue') {
+              const guardStop = await stopForToolGuards();
+              if (guardStop) {
+                return guardStop;
+              }
               recordStep(iteration, response, 'tool_calls_continue');
               transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
               continue;
@@ -1162,42 +1301,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         }
       }
 
-      if (repeatedToolCallStopped) {
-        recordStep(iteration, response, 'repeated_tool_call_stop');
-        return await finalize({
-          reason: 'repeated_tool_call_stopped',
-          response,
-          stop: {
-            reason: 'repeated_tool_call_stopped',
-            iteration,
-            elapsedMs: getElapsedMs(),
-            maxIterations,
-            maxConsecutiveToolTurns,
-            maxWallTimeMs,
-            repeatedToolCall: {
-              batchSignature,
-              consecutiveSameBatchCount: consecutiveSameToolBatchCount,
-              maxConsecutiveSameBatches: repeatedToolCallGuard.maxConsecutiveSameBatches,
-              toolNames: currentToolCallSummaries.map((toolCall) => toolCall.toolName),
-            },
-          },
-        });
-      }
-
-      if (consecutiveToolTurns > maxConsecutiveToolTurns) {
-        recordStep(iteration, response, 'max_tool_rounds_stop');
-        return await finalize({
-          reason: 'max_tool_rounds_exceeded',
-          response,
-          stop: {
-            reason: 'max_tool_rounds_exceeded',
-            iteration,
-            elapsedMs: getElapsedMs(),
-            maxIterations,
-            maxConsecutiveToolTurns,
-            maxWallTimeMs,
-          },
-        });
+      const guardStop = await stopForToolGuards();
+      if (guardStop) {
+        return guardStop;
       }
 
       const next = await options.onToolCallsResponse({
@@ -1449,12 +1555,17 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
 ): Promise<RunCompletionLoopResult<TState>> {
   const callerBuildMessages = options.buildMessages;
   const callerRequiresActionEvidence = options.requiresActionEvidence;
+  const callerOnToolCallsResponse = options.onToolCallsResponse;
   const agentControlMode = options.agentControlMode ?? Boolean(options.modelRequest);
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'require_tool_result';
   const modelRequest = options.modelRequest && agentControlMode
     ? withAgentControlTools(options.modelRequest)
     : options.modelRequest;
-  let baselineToolResultCount: number | null = null;
+  let observedRunToolProgress = false;
+  const markObservedRunToolProgress = () => {
+    observedRunToolProgress = true;
+  };
+  const toolExecutor = createCompletionToolExecutor(modelRequest, markObservedRunToolProgress);
 
   return await runCompletionLoop({
     ...options,
@@ -1463,15 +1574,21 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
     agentControlMode,
     buildMessages: async (params) => {
       const messages = mergeCompletionLoopSystemPrompt(await callerBuildMessages(params));
-      if (baselineToolResultCount === null) {
-        baselineToolResultCount = countToolResultMessages(messages);
-      }
       return messages;
     },
+    onToolCallsResponse: async (params) => {
+      const next = await callerOnToolCallsResponse({
+        ...params,
+        toolExecutor,
+      });
+      if (next?.next?.control === 'continue') {
+        markObservedRunToolProgress();
+      }
+      return next;
+    },
     requiresActionEvidence: async (params) => {
-      const baselineCount = baselineToolResultCount ?? countToolResultMessages(params.messages);
       const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'
-        && countToolResultMessages(params.messages) <= baselineCount;
+        && !observedRunToolProgress;
       return await callerRequiresActionEvidence?.(params) ?? packageRequiresActionEvidence;
     },
     defaultTextResponseMode,

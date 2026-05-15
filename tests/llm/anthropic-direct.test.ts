@@ -3,12 +3,81 @@
  *
  * Purpose:
  * - Validate the package-owned Anthropic provider helper request mapping without real SDK traffic.
+ *
+ * Recent changes:
+ * - 2026-05-15: Added provider-safe tool-name translation and reverse-mapping coverage.
  */
 
 import { describe, expect, it } from 'vitest';
 import { generateAnthropicResponse, streamAnthropicResponse } from '../../src/anthropic-direct.js';
 
 describe('llm-runtime anthropic-direct', () => {
+  it('sanitizes Anthropic tool names and maps tool uses back to runtime names', async () => {
+    let capturedRequest: Record<string, any> | undefined;
+    const runtimeToolName = 'demo.server.lookup.tool.with.invalid.characters.and.a.very.long.suffix.that.must.be.shortened.for.anthropic';
+
+    const fakeClient = {
+      messages: {
+        create: async (request: Record<string, any>) => {
+          capturedRequest = request;
+          const providerToolName = request.tools[0].name;
+          return {
+            content: [
+              {
+                id: 'anthropic-tool-1',
+                input: { query: 'hello' },
+                name: providerToolName,
+                type: 'tool_use',
+              },
+            ],
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+            },
+          };
+        },
+      },
+    } as any;
+
+    const response = await generateAnthropicResponse({
+      client: fakeClient,
+      model: 'claude-sonnet-4-5',
+      messages: [
+        { role: 'user', content: 'Replay and call the tool' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: 'previous-tool-1',
+            type: 'function',
+            function: { name: runtimeToolName, arguments: JSON.stringify({ query: 'previous' }) },
+          }],
+        },
+        { role: 'tool', tool_call_id: 'previous-tool-1', content: 'previous result' },
+      ],
+      tools: {
+        [runtimeToolName]: {
+          name: runtimeToolName,
+          description: 'Lookup tool',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+    });
+
+    const providerToolName = capturedRequest?.tools?.[0]?.name ?? '';
+    expect(providerToolName).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(providerToolName.length).toBeLessThanOrEqual(64);
+    const replayedAssistant = capturedRequest?.messages?.find((message: any) => message.role === 'assistant');
+    expect(replayedAssistant?.content).toEqual([
+      expect.objectContaining({
+        type: 'tool_use',
+        name: providerToolName,
+      }),
+    ]);
+    expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+  });
+
   it('adds Anthropic web search when webSearch is enabled', async () => {
     let capturedRequest: Record<string, unknown> | undefined;
 

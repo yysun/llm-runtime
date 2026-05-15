@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
  * - 2026-05-15: Changed default built-in exposure to read-only, added package-owned tool execution helpers, and gated deprecated HITL alias exposure.
  * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
  * - 2026-03-28: Added explicit environment injection and removed runtime-constructor dependency from the public API.
@@ -57,6 +58,8 @@ import type {
   LLMEnvironmentOptions,
   LLMExecuteToolCallOptions,
   LLMExecuteToolCallsOptions,
+  LLMToolExecutionFailureArtifact,
+  LLMToolExecutionFailureCode,
   LLMGenerateOptions,
   LLMProviderName,
   LLMProviderConfigStore,
@@ -558,24 +561,36 @@ async function buildResolvedToolSetAsync(options: {
   );
 }
 
-function parseToolCallArguments(toolCall: LLMToolCall): Record<string, unknown> {
+type ParsedToolCallArgumentsResult =
+  | { ok: true; args: Record<string, unknown> }
+  | { ok: false; code: Extract<LLMToolExecutionFailureCode, 'invalid_arguments_json' | 'invalid_arguments_shape'>; message: string };
+
+function parseToolCallArguments(toolCall: LLMToolCall): ParsedToolCallArgumentsResult {
   const rawArguments = String(toolCall.function.arguments || '').trim();
   if (!rawArguments) {
-    return {};
+    return { ok: true, args: {} };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawArguments);
   } catch (error) {
-    throw new Error(`Tool "${toolCall.function.name}" arguments are not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    return {
+      ok: false,
+      code: 'invalid_arguments_json',
+      message: `Tool "${toolCall.function.name}" arguments are not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`Tool "${toolCall.function.name}" arguments must decode to an object.`);
+    return {
+      ok: false,
+      code: 'invalid_arguments_shape',
+      message: `Tool "${toolCall.function.name}" arguments must decode to an object.`,
+    };
   }
 
-  return parsed as Record<string, unknown>;
+  return { ok: true, args: parsed as Record<string, unknown> };
 }
 
 function augmentToolExecutionContext(context: LLMToolExecutionContext | undefined, toolCall: LLMToolCall): LLMToolExecutionContext {
@@ -583,6 +598,35 @@ function augmentToolExecutionContext(context: LLMToolExecutionContext | undefine
     ...(context ?? {}),
     toolCallId: context?.toolCallId ?? toolCall.id,
   };
+}
+
+function createToolExecutionFailureArtifact(params: {
+  toolCall: LLMToolCall;
+  code: LLMToolExecutionFailureCode;
+  message: string;
+}): LLMToolExecutionFailureArtifact {
+  return {
+    ok: false,
+    status: 'error',
+    errorType: 'tool_execution_failed',
+    toolCallId: params.toolCall.id,
+    toolName: String(params.toolCall.function.name || '').trim(),
+    code: params.code,
+    message: params.message,
+  };
+}
+
+function handleToolExecutionFailure(
+  options: LLMExecuteToolCallOptions,
+  toolCall: LLMToolCall,
+  code: LLMToolExecutionFailureCode,
+  message: string,
+): LLMToolExecutionFailureArtifact {
+  if (options.errorMode === 'return-artifact') {
+    return createToolExecutionFailureArtifact({ toolCall, code, message });
+  }
+
+  throw new Error(message);
 }
 
 export async function executeToolCall(options: LLMExecuteToolCallOptions): Promise<unknown> {
@@ -602,17 +646,49 @@ export async function executeToolCall(options: LLMExecuteToolCallOptions): Promi
   const definition = tools[toolName];
 
   if (!definition) {
-    throw new Error(`Tool "${toolName}" is not available in the current runtime.`);
+    return handleToolExecutionFailure(
+      options,
+      options.toolCall,
+      'unknown_tool',
+      `Tool "${toolName}" is not available in the current runtime.`,
+    );
   }
 
   if (typeof definition.execute !== 'function') {
-    throw new Error(`Tool "${toolName}" is not executable.`);
+    return handleToolExecutionFailure(
+      options,
+      options.toolCall,
+      'non_executable_tool',
+      `Tool "${toolName}" is not executable.`,
+    );
   }
 
-  return await definition.execute(
-    parseToolCallArguments(options.toolCall),
-    augmentToolExecutionContext(options.context, options.toolCall),
-  );
+  const parsedArguments = parseToolCallArguments(options.toolCall);
+  if (!parsedArguments.ok) {
+    return handleToolExecutionFailure(
+      options,
+      options.toolCall,
+      parsedArguments.code,
+      parsedArguments.message,
+    );
+  }
+
+  try {
+    return await definition.execute(
+      parsedArguments.args,
+      augmentToolExecutionContext(options.context, options.toolCall),
+    );
+  } catch (error) {
+    if (options.errorMode === 'return-artifact') {
+      return createToolExecutionFailureArtifact({
+        toolCall: options.toolCall,
+        code: 'execution_failed',
+        message: `Tool "${toolName}" execution failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+
+    throw error;
+  }
 }
 
 export async function executeToolCalls(options: LLMExecuteToolCallsOptions): Promise<unknown[]> {

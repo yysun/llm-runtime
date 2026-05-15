@@ -32,6 +32,7 @@ import {
   createLLMEnvironment,
   disposeLLMEnvironment,
   executeToolCall,
+  executeToolCalls,
   intersectBuiltInToolSelections,
   parseMCPConfigJson,
   resolveTools,
@@ -558,6 +559,114 @@ describe('llm-runtime runtime', () => {
         content: 'hello from helper',
       }));
     });
+  });
+
+  it('keeps public tool execution throwing by default for setup errors', async () => {
+    await expect(executeToolCall({
+      builtIns: false,
+      toolCall: {
+        id: 'missing-tool-1',
+        type: 'function',
+        function: { name: 'missing_tool', arguments: '{}' },
+      },
+    })).rejects.toThrow('Tool "missing_tool" is not available in the current runtime.');
+
+    await expect(executeToolCall({
+      builtIns: false,
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Lookup',
+          parameters: { type: 'object' },
+          execute: async () => 'unused',
+        },
+      },
+      toolCall: {
+        id: 'bad-json-1',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{bad-json' },
+      },
+    })).rejects.toThrow('Tool "lookup" arguments are not valid JSON');
+
+    await expect(executeToolCall({
+      builtIns: false,
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Lookup',
+          parameters: { type: 'object' },
+        },
+      },
+      toolCall: {
+        id: 'non-executable-1',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{}' },
+      },
+    })).rejects.toThrow('Tool "lookup" is not executable.');
+  });
+
+  it('can return durable tool-execution artifacts instead of throwing', async () => {
+    const invalidJsonResult = await executeToolCall({
+      builtIns: false,
+      errorMode: 'return-artifact',
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Lookup',
+          parameters: { type: 'object' },
+          execute: async () => 'unused',
+        },
+      },
+      toolCall: {
+        id: 'bad-json-2',
+        type: 'function',
+        function: { name: 'lookup', arguments: '{bad-json' },
+      },
+    });
+
+    expect(invalidJsonResult).toEqual(expect.objectContaining({
+      ok: false,
+      status: 'error',
+      errorType: 'tool_execution_failed',
+      toolCallId: 'bad-json-2',
+      toolName: 'lookup',
+      code: 'invalid_arguments_json',
+    }));
+
+    const batchResult = await executeToolCalls({
+      builtIns: false,
+      errorMode: 'return-artifact',
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Lookup',
+          parameters: { type: 'object' },
+          execute: async (args) => `lookup:${args.id}`,
+        },
+      },
+      toolCalls: [
+        {
+          id: 'missing-tool-2',
+          type: 'function',
+          function: { name: 'missing_tool', arguments: '{}' },
+        },
+        {
+          id: 'lookup-1',
+          type: 'function',
+          function: { name: 'lookup', arguments: JSON.stringify({ id: '42' }) },
+        },
+      ],
+    });
+
+    expect(batchResult).toEqual([
+      expect.objectContaining({
+        errorType: 'tool_execution_failed',
+        toolCallId: 'missing-tool-2',
+        toolName: 'missing_tool',
+        code: 'unknown_tool',
+      }),
+      'lookup:42',
+    ]);
   });
 
   it('accepts deprecated HITL aliases during public tool execution when ask_user_input is enabled', async () => {

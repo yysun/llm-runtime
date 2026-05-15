@@ -14,6 +14,7 @@
  * - Historical tool results are converted into Anthropic `tool_result` blocks.
  *
  * Recent changes:
+ * - 2026-05-15: Added provider-facing tool-name translation with reverse mapping for Anthropic tool calls.
  * - 2026-03-27: Initial package-owned Anthropic provider implementation.
  */
 
@@ -26,6 +27,7 @@ import type {
   LLMToolDefinition,
   LLMWebSearchOptions,
 } from './types.js';
+import { createProviderToolNameTranslator, type ProviderToolNameTranslator } from './provider-tool-names.js';
 import { createPackageLogger } from './provider-utils.js';
 
 const logger = createPackageLogger();
@@ -61,7 +63,10 @@ export function createAnthropicClient(config: AnthropicConfig): Anthropic {
   });
 }
 
-function convertMessagesToAnthropic(messages: LLMChatMessage[]): Anthropic.Messages.MessageParam[] {
+function convertMessagesToAnthropic(
+  messages: LLMChatMessage[],
+  toolNameTranslator: ProviderToolNameTranslator,
+): Anthropic.Messages.MessageParam[] {
   return messages
     .filter((message) => message.role !== 'system')
     .map((message) => {
@@ -92,7 +97,7 @@ function convertMessagesToAnthropic(messages: LLMChatMessage[]): Anthropic.Messa
           content.push({
             type: 'tool_use',
             id: toolCall.id,
-            name: toolCall.function.name,
+            name: toolNameTranslator.toProviderName(toolCall.function.name),
             input: JSON.parse(toolCall.function.arguments || '{}'),
           });
         });
@@ -110,9 +115,12 @@ function convertMessagesToAnthropic(messages: LLMChatMessage[]): Anthropic.Messa
     });
 }
 
-function convertToolsToAnthropic(tools: Record<string, LLMToolDefinition>): Anthropic.Messages.Tool[] {
+function convertToolsToAnthropic(
+  tools: Record<string, LLMToolDefinition>,
+  toolNameTranslator: ProviderToolNameTranslator,
+): Anthropic.Messages.Tool[] {
   return Object.entries(tools).map(([name, tool]) => ({
-    name,
+    name: toolNameTranslator.toProviderName(name),
     description: tool.description || '',
     input_schema: (tool.parameters || { type: 'object', properties: {} }) as Anthropic.Messages.Tool.InputSchema,
   }));
@@ -121,11 +129,12 @@ function convertToolsToAnthropic(tools: Record<string, LLMToolDefinition>): Anth
 function buildAnthropicTools(
   tools: Record<string, LLMToolDefinition> | undefined,
   webSearch: LLMWebSearchOptions | undefined,
+  toolNameTranslator: ProviderToolNameTranslator,
 ): Anthropic.Messages.ToolUnion[] | undefined {
   const anthropicTools: Anthropic.Messages.ToolUnion[] = [];
 
   if (tools && Object.keys(tools).length > 0) {
-    anthropicTools.push(...convertToolsToAnthropic(tools));
+    anthropicTools.push(...convertToolsToAnthropic(tools, toolNameTranslator));
   }
 
   if (webSearch) {
@@ -150,14 +159,17 @@ function isAnthropicServerToolBlock(
   return block.type === 'server_tool_use' || block.type === 'web_search_tool_result';
 }
 
-function mapAnthropicToolUses(toolUses: Anthropic.Messages.ToolUseBlock[]) {
+function mapAnthropicToolUses(
+  toolUses: Anthropic.Messages.ToolUseBlock[],
+  toolNameTranslator: ProviderToolNameTranslator,
+) {
   return toolUses
     .filter((toolUse) => toolUse.name && toolUse.name.trim() !== '')
     .map((toolUse) => ({
       id: toolUse.id,
       type: 'function' as const,
       function: {
-        name: toolUse.name,
+        name: toolNameTranslator.toRuntimeName(toolUse.name),
         arguments: JSON.stringify(toolUse.input),
       },
     }));
@@ -169,8 +181,11 @@ function extractSystemPrompt(messages: LLMChatMessage[]): string {
 }
 
 export async function streamAnthropicResponse(request: AnthropicProviderStreamRequest): Promise<LLMResponse> {
-  const anthropicMessages = convertMessagesToAnthropic(request.messages);
-  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch);
+  const toolNameTranslator = createProviderToolNameTranslator(request.tools, {
+    reservedProviderNames: request.webSearch ? ['web_search'] : [],
+  });
+  const anthropicMessages = convertMessagesToAnthropic(request.messages, toolNameTranslator);
+  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch, toolNameTranslator);
 
   const stream = await request.client.messages.create(
     {
@@ -205,7 +220,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
     }
 
     if (toolUses.length > 0) {
-      const toolCalls = mapAnthropicToolUses(toolUses);
+      const toolCalls = mapAnthropicToolUses(toolUses, toolNameTranslator);
 
       return {
         type: 'tool_calls',
@@ -241,8 +256,11 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
 }
 
 export async function generateAnthropicResponse(request: AnthropicProviderRequest): Promise<LLMResponse> {
-  const anthropicMessages = convertMessagesToAnthropic(request.messages);
-  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch);
+  const toolNameTranslator = createProviderToolNameTranslator(request.tools, {
+    reservedProviderNames: request.webSearch ? ['web_search'] : [],
+  });
+  const anthropicMessages = convertMessagesToAnthropic(request.messages, toolNameTranslator);
+  const anthropicTools = buildAnthropicTools(request.tools, request.webSearch, toolNameTranslator);
 
   const response = await request.client.messages.create(
     {
@@ -270,7 +288,7 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
   });
 
   if (toolUses.length > 0) {
-    const toolCalls = mapAnthropicToolUses(toolUses);
+    const toolCalls = mapAnthropicToolUses(toolUses, toolNameTranslator);
 
     return {
       type: 'tool_calls',

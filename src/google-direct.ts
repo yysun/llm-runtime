@@ -14,6 +14,7 @@
  * - Reasoning effort maps to Gemini `thinkingConfig` budgets when explicitly provided.
  *
  * Recent changes:
+ * - 2026-05-15: Added provider-facing tool-name translation with reverse mapping for Gemini function calls.
  * - 2026-03-27: Initial package-owned Google provider implementation.
  */
 
@@ -28,6 +29,7 @@ import type {
   LLMWebSearchOptions,
   ReasoningEffort,
 } from './types.js';
+import { createProviderToolNameTranslator, type ProviderToolNameTranslator } from './provider-tool-names.js';
 import { createPackageLogger, generateId } from './provider-utils.js';
 
 const logger = createPackageLogger();
@@ -388,9 +390,12 @@ function convertMessagesToGoogle(messages: LLMChatMessage[]): { messages: any[];
   return { messages: googleMessages, systemInstruction };
 }
 
-function convertToolsToGoogle(tools: Record<string, LLMToolDefinition>): any[] {
+function convertToolsToGoogle(
+  tools: Record<string, LLMToolDefinition>,
+  toolNameTranslator: ProviderToolNameTranslator,
+): any[] {
   return Object.entries(tools).map(([name, tool]) => ({
-    name,
+    name: toolNameTranslator.toProviderName(name),
     description: tool.description || '',
     parameters: stripUnsupportedGoogleSchemaFields(tool.parameters || { type: 'object', properties: {} }),
   }));
@@ -399,13 +404,14 @@ function convertToolsToGoogle(tools: Record<string, LLMToolDefinition>): any[] {
 function buildGoogleTools(
   tools: Record<string, LLMToolDefinition> | undefined,
   webSearch: LLMWebSearchOptions | undefined,
-): { googleTools?: any[]; warnings: LLMWarning[] } {
+): { googleTools?: any[]; warnings: LLMWarning[]; toolNameTranslator: ProviderToolNameTranslator } {
   const googleTools: any[] = [];
   const functionTools = tools && Object.keys(tools).length > 0 ? tools : undefined;
   const warnings: LLMWarning[] = [];
+  const toolNameTranslator = createProviderToolNameTranslator(tools);
 
   if (functionTools) {
-    googleTools.push({ functionDeclarations: convertToolsToGoogle(functionTools) });
+    googleTools.push({ functionDeclarations: convertToolsToGoogle(functionTools, toolNameTranslator) });
   }
 
   if (webSearch && !functionTools) {
@@ -425,6 +431,7 @@ function buildGoogleTools(
   return {
     googleTools: googleTools.length > 0 ? googleTools : undefined,
     warnings,
+    toolNameTranslator,
   };
 }
 
@@ -527,7 +534,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
               id: generateId(),
               type: 'function',
               function: {
-                name: part.functionCall.name,
+                name: resolvedGoogleTools.toolNameTranslator.toRuntimeName(part.functionCall.name),
                 arguments: JSON.stringify(part.functionCall.args || {}),
               },
             });
@@ -616,7 +623,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
           id: generateId(),
           type: 'function',
           function: {
-            name: part.functionCall.name,
+            name: resolvedGoogleTools.toolNameTranslator.toRuntimeName(part.functionCall.name),
             arguments: JSON.stringify(part.functionCall.args || {}),
           },
         });

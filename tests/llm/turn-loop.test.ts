@@ -11,14 +11,18 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockGenerate, mockStream } = vi.hoisted(() => ({
+const { mockGenerate, mockStream, mockExecuteToolCall, mockExecuteToolCalls } = vi.hoisted(() => ({
   mockGenerate: vi.fn(),
   mockStream: vi.fn(),
+  mockExecuteToolCall: vi.fn(),
+  mockExecuteToolCalls: vi.fn(),
 }));
 
 vi.mock('../../src/runtime.js', () => ({
   generate: mockGenerate,
   stream: mockStream,
+  executeToolCall: mockExecuteToolCall,
+  executeToolCalls: mockExecuteToolCalls,
 }));
 
 import {
@@ -28,6 +32,10 @@ import {
   runTurnLoop,
 } from '../../src/completion-loop.js';
 import { complete, respondWithTools } from '../../src/index.js';
+import {
+  runTurnLoop as legacyPathRunTurnLoop,
+  respondWithTools as legacyPathRespondWithTools,
+} from '../../src/turn-loop.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
 function text(content: string): LLMResponse {
@@ -62,6 +70,10 @@ function toolCall(name: string, args: Record<string, unknown>, id = 'tool-1'): L
 describe('llm-runtime completion loop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGenerate.mockReset();
+    mockStream.mockReset();
+    mockExecuteToolCall.mockReset();
+    mockExecuteToolCalls.mockReset();
   });
 
   afterEach(() => {
@@ -123,13 +135,13 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('完成了');
   });
 
-  it('complete still requires evidence after a tool round that did not produce a tool result message', async () => {
+  it('complete accepts final text after current-run tool progress even when history is compacted', async () => {
     const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
 
     const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
-        rejected: null as null | { classification: string; responseText: string },
+        finalText: '',
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 0,
@@ -138,24 +150,22 @@ describe('llm-runtime completion loop', () => {
       onToolCallsResponse: async ({ state, response }) => ({
         state: {
           ...state,
-          messages: [...state.messages, response.assistantMessage],
+          messages: [
+            { role: 'user', content: `Compacted summary of ${response.tool_calls?.[0]?.function.name} result.` } satisfies LLMChatMessage,
+          ],
         },
         next: { control: 'continue' },
       }),
-      onTextResponse: async ({ state }) => ({ state }),
-      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
-        state: { ...state, rejected: { classification, responseText } },
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
       }),
     });
 
-    expect(result.reason).toBe('rejected_text_response');
+    expect(result.reason).toBe('text_response');
     expect(result.classifications).toEqual([
-      expect.objectContaining({ classification: 'non_progressing', requiresActionEvidence: true }),
+      expect.objectContaining({ classification: 'verified_final_response', requiresActionEvidence: false }),
     ]);
-    expect(result.state.rejected).toEqual({
-      classification: 'non_progressing',
-      responseText: '完成了',
-    });
+    expect(result.state.finalText).toBe('完成了');
   });
 
   it('complete ignores pre-existing tool results when enforcing default evidence', async () => {
@@ -369,6 +379,58 @@ describe('llm-runtime completion loop', () => {
     expect(seenInstructions).toContain(DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION);
   });
 
+  it('stops repeated malformed control tool calls through the repeated-call guard', async () => {
+    const onToolCallsResponse = vi.fn(async ({ state }) => ({ state }));
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
+      },
+      emptyTextRetryLimit: 0,
+      agentControlMode: true,
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      callModel: vi.fn(async () => toolCall('final_answer', {}, 'malformed-final')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse,
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('repeated_tool_call_stopped');
+    expect(result.steps.map((step) => step.branch)).toEqual(['tool_calls_continue', 'repeated_tool_call_stop']);
+    expect(result.stop.repeatedToolCall).toEqual(expect.objectContaining({
+      consecutiveSameBatchCount: 2,
+      maxConsecutiveSameBatches: 1,
+      toolNames: ['final_answer'],
+    }));
+    expect(onToolCallsResponse).not.toHaveBeenCalled();
+  });
+
+  it('stops changing malformed control tool calls through the max-tool-round guard', async () => {
+    const responses = [
+      toolCall('final_answer', { nonce: 1 }, 'malformed-final-1'),
+      toolCall('need_user_input', { nonce: 2 }, 'malformed-input-2'),
+    ];
+    const onToolCallsResponse = vi.fn(async ({ state }) => ({ state }));
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
+      },
+      emptyTextRetryLimit: 0,
+      agentControlMode: true,
+      maxConsecutiveToolTurns: 1,
+      repeatedToolCallGuard: false,
+      callModel: vi.fn(async () => responses.shift() ?? toolCall('blocked', { nonce: 3 }, 'malformed-blocked-3')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse,
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('max_tool_rounds_exceeded');
+    expect(result.steps.map((step) => step.branch)).toEqual(['tool_calls_continue', 'max_tool_rounds_stop']);
+    expect(onToolCallsResponse).not.toHaveBeenCalled();
+  });
+
   it('complete injects agent control tools on the package model path and stops on final_answer', async () => {
     mockGenerate.mockResolvedValueOnce(toolCall('final_answer', {
       answer: 'Verified result',
@@ -410,6 +472,86 @@ describe('llm-runtime completion loop', () => {
         expect.objectContaining({ name: 'need_user_input' }),
         expect.objectContaining({ name: 'blocked' }),
       ]),
+    }));
+  });
+
+  it('complete passes a model-request-bound tool executor to tool callbacks', async () => {
+    const extraTool = {
+      name: 'project_lookup',
+      description: 'Project lookup',
+      parameters: { type: 'object', properties: { id: { type: 'string' } } },
+    };
+    const directTool = {
+      name: 'direct_lookup',
+      description: 'Direct lookup',
+      parameters: { type: 'object', properties: {} },
+    };
+    mockGenerate
+      .mockResolvedValueOnce(toolCall('project_lookup', { id: '42' }, 'tool-bound-1'))
+      .mockResolvedValueOnce(toolCall('final_answer', { answer: 'done' }, 'control-final-bound'));
+    mockExecuteToolCall.mockResolvedValueOnce('lookup result');
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'lookup project' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      modelRequest: {
+        provider: 'openai',
+        model: 'gpt-5',
+        builtIns: false,
+        includeDeprecatedBuiltInAliases: true,
+        extraTools: [extraTool],
+        tools: {
+          direct_lookup: directTool,
+        },
+      },
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response, toolExecutor }) => {
+        const toolResult = await toolExecutor?.executeToolCall(
+          response.tool_calls?.[0]!,
+          { workingDirectory: '/tmp/project' },
+          { errorMode: 'return-artifact' },
+        );
+
+        return {
+          state: {
+            ...state,
+            messages: [
+              ...state.messages,
+              response.assistantMessage,
+              { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: String(toolResult) } satisfies LLMChatMessage,
+            ],
+          },
+          next: { control: 'continue' },
+        };
+      },
+      onFinalAnswerToolCall: async ({ state, controlOutput }) => ({
+        state: { ...state, finalText: controlOutput.answer },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('final_answer');
+    expect(result.state.finalText).toBe('done');
+    expect(mockExecuteToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      builtIns: false,
+      includeDeprecatedBuiltInAliases: true,
+      extraTools: expect.arrayContaining([
+        extraTool,
+        expect.objectContaining({ name: 'final_answer' }),
+        expect.objectContaining({ name: 'need_user_input' }),
+        expect.objectContaining({ name: 'blocked' }),
+      ]),
+      tools: {
+        direct_lookup: directTool,
+      },
+      errorMode: 'return-artifact',
+      context: { workingDirectory: '/tmp/project' },
+      toolCall: expect.objectContaining({
+        id: 'tool-bound-1',
+        function: expect.objectContaining({ name: 'project_lookup' }),
+      }),
     }));
   });
 
@@ -1050,5 +1192,7 @@ describe('llm-runtime completion loop', () => {
   it('keeps the legacy aliases wired to the preferred completion-loop APIs', async () => {
     expect(runTurnLoop).toBe(runCompletionLoop);
     expect(respondWithTools).toBe(complete);
+    expect(legacyPathRunTurnLoop).toBe(runCompletionLoop);
+    expect(legacyPathRespondWithTools).toBe(complete);
   });
 });

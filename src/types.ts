@@ -15,7 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
- * - 2026-05-15: Added safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
+ * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
  * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
@@ -261,6 +261,29 @@ export interface ToolValidationFailureArtifact {
   corrections: string[];
 }
 
+export type LLMToolExecutionErrorMode = 'throw' | 'return-artifact';
+
+export type LLMToolExecutionFailureCode =
+  | 'invalid_arguments_json'
+  | 'invalid_arguments_shape'
+  | 'unknown_tool'
+  | 'non_executable_tool'
+  | 'execution_failed';
+
+export interface LLMToolExecutionFailureArtifact {
+  ok: false;
+  status: 'error';
+  errorType: 'tool_execution_failed';
+  toolCallId: string;
+  toolName: string;
+  code: LLMToolExecutionFailureCode;
+  message: string;
+}
+
+export interface LLMToolExecutionOptions {
+  errorMode?: LLMToolExecutionErrorMode;
+}
+
 export interface SkillFileSystemAdapter {
   access(path: string): Promise<void>;
   readFile(path: string, encoding: BufferEncoding): Promise<string>;
@@ -321,6 +344,7 @@ export interface LLMEnvironmentOptions {
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
 export type LLMRuntimeStreamOptions = Omit<LLMStreamOptions, 'environment'>;
 export type LLMRuntimeResolveToolsOptions = Omit<LLMResolveToolsOptions, 'environment'>;
+export type LLMRuntimeExecuteToolOptions = LLMRuntimeResolveToolsOptions & LLMToolExecutionOptions;
 
 export interface LLMRuntime extends LLMEnvironment {
   generate: (request: LLMRuntimeGenerateOptions) => Promise<LLMResponse>;
@@ -329,8 +353,8 @@ export interface LLMRuntime extends LLMEnvironment {
     options: CompleteOptions<TState, TMessage>
   ) => Promise<RunCompletionLoopResult<TState>>;
   resolveTools: (options?: LLMRuntimeResolveToolsOptions) => Record<string, LLMToolDefinition>;
-  executeToolCall: (toolCall: LLMToolCall, context?: LLMToolExecutionContext, options?: LLMRuntimeResolveToolsOptions) => Promise<unknown>;
-  executeToolCalls: (toolCalls: LLMToolCall[], context?: LLMToolExecutionContext, options?: LLMRuntimeResolveToolsOptions) => Promise<unknown[]>;
+  executeToolCall: (toolCall: LLMToolCall, context?: LLMToolExecutionContext, options?: LLMRuntimeExecuteToolOptions) => Promise<unknown>;
+  executeToolCalls: (toolCalls: LLMToolCall[], context?: LLMToolExecutionContext, options?: LLMRuntimeExecuteToolOptions) => Promise<unknown[]>;
   dispose: () => Promise<void>;
 }
 
@@ -369,12 +393,12 @@ export interface LLMResolveToolsOptions {
   environment?: LLMEnvironment;
 }
 
-export interface LLMExecuteToolCallOptions extends LLMResolveToolsOptions {
+export interface LLMExecuteToolCallOptions extends LLMResolveToolsOptions, LLMToolExecutionOptions {
   toolCall: LLMToolCall;
   context?: LLMToolExecutionContext;
 }
 
-export interface LLMExecuteToolCallsOptions extends LLMResolveToolsOptions {
+export interface LLMExecuteToolCallsOptions extends LLMResolveToolsOptions, LLMToolExecutionOptions {
   toolCalls: LLMToolCall[];
   context?: LLMToolExecutionContext;
 }
