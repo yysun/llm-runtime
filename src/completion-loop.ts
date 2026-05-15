@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Made completion evidence run-scoped, merged the loop contract into the first system message, and rejected malformed control-tool payloads.
  * - 2026-05-15: Added agent-mode control tools and deterministic stop handling for final answers, user-input requests, and blocked outcomes.
  * - 2026-05-15: Added a package-owned completion-loop system prompt, evidence-based recovery wording, and stronger default rejected-text retries.
  * - 2026-05-15: Renamed the preferred public loop APIs to `complete(...)` and `runCompletionLoop(...)` while preserving deprecated aliases.
@@ -252,6 +253,7 @@ export const DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT = [
   'Do not stop after merely announcing intent.',
 ].join('\n');
 export const DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT = DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT;
+export const COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG = 'llm-runtime-loop-contract';
 export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'The last response announced work but did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool in this turn. If prior tool results already contain enough evidence, provide the final answer based on those results.';
 export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last response did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool. If prior tool results already contain enough evidence, provide the final answer based on those results.';
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
@@ -359,6 +361,11 @@ export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessag
   onStop?: (params: TurnLoopStopEvent<TState>) => Promise<void> | void;
 }
 
+export type CompleteOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> =
+  Omit<RunCompletionLoopOptions<TState, TMessage>, 'emptyTextRetryLimit'> & {
+    emptyTextRetryLimit?: number;
+  };
+
 export interface RunCompletionLoopResult<TState> {
   state: TState;
   iterations: number;
@@ -399,8 +406,8 @@ function getDefaultRejectedTextInstruction(
   return DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION;
 }
 
-function hasToolResultMessage(messages: LLMChatMessage[]): boolean {
-  return messages.some((message) => message.role === 'tool');
+function countToolResultMessages(messages: LLMChatMessage[]): number {
+  return messages.filter((message) => message.role === 'tool').length;
 }
 
 export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
@@ -479,14 +486,40 @@ function assertNoAgentControlToolNameCollisions(
   }
 }
 
-function prependCompletionLoopSystemPrompt<TMessage extends LLMChatMessage>(messages: TMessage[]): TMessage[] {
-  const firstMessage = messages[0];
-  if (firstMessage?.role === 'system' && firstMessage.content === DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT) {
-    return messages;
+function formatCompletionLoopContractBlock(): string {
+  return [
+    `<${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`,
+    DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT,
+    `</${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`,
+  ].join('\n');
+}
+
+function mergeCompletionLoopSystemPrompt<TMessage extends LLMChatMessage>(messages: TMessage[]): TMessage[] {
+  const contractBlock = formatCompletionLoopContractBlock();
+  const systemMessageIndex = messages.findIndex((message) => message.role === 'system');
+
+  if (systemMessageIndex >= 0) {
+    const systemMessage = messages[systemMessageIndex];
+    const existingContent = String(systemMessage?.content ?? '');
+    if (
+      existingContent.includes(`<${COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG}>`)
+      || existingContent === DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT
+    ) {
+      return messages;
+    }
+
+    const nextMessages = messages.slice();
+    nextMessages[systemMessageIndex] = {
+      ...systemMessage,
+      content: existingContent.trim()
+        ? `${existingContent}\n\n${contractBlock}`
+        : contractBlock,
+    };
+    return nextMessages;
   }
 
   return [
-    { role: 'system', content: DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT } as TMessage,
+    { role: 'system', content: contractBlock } as TMessage,
     ...messages,
   ];
 }
@@ -512,6 +545,10 @@ function toStringArray(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === 'string');
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function tryParseControlToolOutput(toolCall: LLMToolCall): TurnLoopControlOutput | null {
   if (!AGENT_CONTROL_TOOL_NAME_SET.has(toolCall.function.name)) {
     return null;
@@ -520,27 +557,39 @@ function tryParseControlToolOutput(toolCall: LLMToolCall): TurnLoopControlOutput
   const args = parseToolArgumentsObject(toolCall.function.arguments);
 
   if (toolCall.function.name === 'final_answer') {
+    if (!isNonEmptyString(args.answer)) {
+      return null;
+    }
+
     return {
       kind: 'final_answer',
       toolCallId: toolCall.id,
-      answer: typeof args.answer === 'string' ? args.answer : '',
+      answer: args.answer,
       evidenceRefs: toStringArray(args.evidenceRefs),
     };
   }
 
   if (toolCall.function.name === 'need_user_input') {
+    if (!isNonEmptyString(args.question) || !isNonEmptyString(args.reason)) {
+      return null;
+    }
+
     return {
       kind: 'need_user_input',
       toolCallId: toolCall.id,
-      question: typeof args.question === 'string' ? args.question : '',
-      reason: typeof args.reason === 'string' ? args.reason : '',
+      question: args.question,
+      reason: args.reason,
     };
+  }
+
+  if (!isNonEmptyString(args.reason)) {
+    return null;
   }
 
   return {
     kind: 'blocked',
     toolCallId: toolCall.id,
-    reason: typeof args.reason === 'string' ? args.reason : '',
+    reason: args.reason,
   };
 }
 
@@ -1009,6 +1058,12 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           }
 
           const controlOutput = tryParseControlToolOutput(controlToolCalls[0]);
+          if (!controlOutput) {
+            recordStep(iteration, response, 'tool_calls_continue');
+            transientInstruction = DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
+            continue;
+          }
+
           if (controlOutput?.kind === 'final_answer') {
             const next = await options.onFinalAnswerToolCall?.({
               state,
@@ -1179,7 +1234,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     if (response.type === 'text' && String(response.content || '').trim()) {
       const responseText = String(response.content || '');
       const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'
-        && !hasToolResultMessage(messages);
+        && countToolResultMessages(messages) === 0;
       const requiresActionEvidence = await options.requiresActionEvidence?.({
         state,
         responseText,
@@ -1390,20 +1445,36 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
 }
 
 export async function complete<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-  options: RunCompletionLoopOptions<TState, TMessage>,
+  options: CompleteOptions<TState, TMessage>,
 ): Promise<RunCompletionLoopResult<TState>> {
   const callerBuildMessages = options.buildMessages;
+  const callerRequiresActionEvidence = options.requiresActionEvidence;
   const agentControlMode = options.agentControlMode ?? Boolean(options.modelRequest);
+  const defaultTextResponseMode = options.defaultTextResponseMode ?? 'require_tool_result';
   const modelRequest = options.modelRequest && agentControlMode
     ? withAgentControlTools(options.modelRequest)
     : options.modelRequest;
+  let baselineToolResultCount: number | null = null;
 
   return await runCompletionLoop({
     ...options,
+    emptyTextRetryLimit: options.emptyTextRetryLimit ?? 0,
     modelRequest,
     agentControlMode,
-    buildMessages: async (params) => prependCompletionLoopSystemPrompt(await callerBuildMessages(params)),
-    defaultTextResponseMode: options.defaultTextResponseMode ?? 'require_tool_result',
+    buildMessages: async (params) => {
+      const messages = mergeCompletionLoopSystemPrompt(await callerBuildMessages(params));
+      if (baselineToolResultCount === null) {
+        baselineToolResultCount = countToolResultMessages(messages);
+      }
+      return messages;
+    },
+    requiresActionEvidence: async (params) => {
+      const baselineCount = baselineToolResultCount ?? countToolResultMessages(params.messages);
+      const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'
+        && countToolResultMessages(params.messages) <= baselineCount;
+      return await callerRequiresActionEvidence?.(params) ?? packageRequiresActionEvidence;
+    },
+    defaultTextResponseMode,
     rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 2,
   });
 }

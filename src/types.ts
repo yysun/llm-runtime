@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-15: Added safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
  * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
@@ -24,7 +25,7 @@
  */
 
 import type {
-  RunCompletionLoopOptions,
+  CompleteOptions,
   RunCompletionLoopResult,
 } from './completion-loop.js';
 
@@ -56,6 +57,8 @@ export type BuiltInToolName =
   | 'search_files'
   | 'create_directory'
   | 'path_exists';
+
+export type BuiltInToolSelectionMode = 'all' | 'read-only';
 
 export interface BaseLLMConfig {
   apiKey?: string;
@@ -210,7 +213,7 @@ export interface LLMToolRegistry {
   resolveTools: (extraTools?: LLMToolDefinition[]) => Record<string, LLMToolDefinition>;
 }
 
-export type BuiltInToolSelection = boolean | Partial<Record<BuiltInToolName, boolean>>;
+export type BuiltInToolSelection = boolean | BuiltInToolSelectionMode | Partial<Record<BuiltInToolName, boolean>>;
 
 export interface LLMWebSearchOptions {
   searchContextSize?: WebSearchContextSize;
@@ -323,9 +326,11 @@ export interface LLMRuntime extends LLMEnvironment {
   generate: (request: LLMRuntimeGenerateOptions) => Promise<LLMResponse>;
   stream: (request: LLMRuntimeStreamOptions) => Promise<LLMResponse>;
   complete: <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-    options: RunCompletionLoopOptions<TState, TMessage>
+    options: CompleteOptions<TState, TMessage>
   ) => Promise<RunCompletionLoopResult<TState>>;
   resolveTools: (options?: LLMRuntimeResolveToolsOptions) => Record<string, LLMToolDefinition>;
+  executeToolCall: (toolCall: LLMToolCall, context?: LLMToolExecutionContext, options?: LLMRuntimeResolveToolsOptions) => Promise<unknown>;
+  executeToolCalls: (toolCalls: LLMToolCall[], context?: LLMToolExecutionContext, options?: LLMRuntimeResolveToolsOptions) => Promise<unknown[]>;
   dispose: () => Promise<void>;
 }
 
@@ -341,6 +346,7 @@ export interface LLMPerCallProviderOptions {
   mcpConfig?: MCPConfig | null;
   skillRoots?: string[];
   builtIns?: BuiltInToolSelection;
+  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
   environment?: LLMEnvironment;
@@ -357,7 +363,18 @@ export interface LLMResolveToolsOptions {
   mcpConfig?: MCPConfig | null;
   skillRoots?: string[];
   builtIns?: BuiltInToolSelection;
+  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
   environment?: LLMEnvironment;
+}
+
+export interface LLMExecuteToolCallOptions extends LLMResolveToolsOptions {
+  toolCall: LLMToolCall;
+  context?: LLMToolExecutionContext;
+}
+
+export interface LLMExecuteToolCallsOptions extends LLMResolveToolsOptions {
+  toolCalls: LLMToolCall[];
+  context?: LLMToolExecutionContext;
 }

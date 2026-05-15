@@ -35,6 +35,27 @@ export interface ToolParameterValidationResult {
 
 export const DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION = 'Your previous tool call failed validation. Emit a corrected tool call now with the required parameters. Do not narrate what you intend to do next.';
 
+function getValueType(value: unknown): string {
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+  if (value === null) {
+    return 'null';
+  }
+  return typeof value;
+}
+
+function joinPath(basePath: string, segment: string): string {
+  if (!basePath || basePath === '$') {
+    return segment;
+  }
+  return `${basePath}.${segment}`;
+}
+
+function normalizeRequiredPath(basePath: string, key: string): string {
+  return basePath === '$' ? key : joinPath(basePath, key);
+}
+
 function normalizeKnownParameterAliases(toolName: string, args: Record<string, unknown>): {
   normalizedArgs: Record<string, unknown>;
   corrections: string[];
@@ -156,89 +177,214 @@ export function validateToolParameters(
     args as Record<string, unknown>,
   );
   const normalizedArgs = aliasNormalization.normalizedArgs;
-  const correctedArgs: Record<string, unknown> = {};
-  const requiredParams = Array.isArray(toolSchema.required) ? toolSchema.required : [];
-  const allowsAdditionalProperties = toolSchema.additionalProperties !== false;
   const issues: ToolValidationIssue[] = [];
 
-  for (const requiredParam of requiredParams) {
-    const value = normalizedArgs[requiredParam as string];
-    if (value === undefined || value === null || value === '') {
-      issues.push({
-        path: String(requiredParam),
-        code: 'missing_required',
-        message: `Required parameter '${String(requiredParam)}' is missing or empty`,
-      });
+  function validateValue(
+    value: unknown,
+    schema: Record<string, unknown> | undefined,
+    path: string,
+  ): unknown {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return value;
     }
-  }
 
-  for (const [key, value] of Object.entries(normalizedArgs)) {
-    const propSchema = (schemaProperties as Record<string, any>)[key];
-    if (!propSchema) {
-      if (!allowsAdditionalProperties) {
+    const schemaType = typeof schema.type === 'string'
+      ? schema.type
+      : schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+        ? 'object'
+        : undefined;
+
+    if (schemaType === 'object') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
         issues.push({
-          path: key,
-          code: 'unknown_parameter',
-          message: `Unknown parameter '${key}' is not allowed`,
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be an object, got: ${getValueType(value)}`,
+          expectedType: 'object',
+          receivedType: getValueType(value),
         });
-        continue;
+        return undefined;
       }
-      correctedArgs[key] = value;
-      continue;
-    }
 
-    if ((value === null || value === undefined) && !requiredParams.includes(key)) {
-      continue;
-    }
+      const objectValue = value as Record<string, unknown>;
+      const properties = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+        ? schema.properties as Record<string, Record<string, unknown>>
+        : {};
+      const requiredParams = Array.isArray(schema.required)
+        ? schema.required.filter((entry): entry is string => typeof entry === 'string')
+        : [];
+      const allowsAdditionalProperties = schema.additionalProperties !== false;
+      const correctedObject: Record<string, unknown> = {};
 
-    if (propSchema.type === 'array' && typeof value === 'string' && value !== '') {
-      correctedArgs[key] = [value];
-      continue;
-    }
-
-    if (propSchema.type === 'array' && !Array.isArray(value)) {
-      issues.push({
-        path: key,
-        code: 'invalid_type',
-        message: `Parameter '${key}' must be an array, got: ${typeof value}`,
-        expectedType: 'array',
-        receivedType: typeof value,
-      });
-      continue;
-    }
-
-    if (propSchema.type === 'number' && typeof value === 'string') {
-      const parsed = Number(value);
-      if (!Number.isNaN(parsed)) {
-        correctedArgs[key] = parsed;
-        continue;
+      for (const requiredParam of requiredParams) {
+        const requiredValue = objectValue[requiredParam];
+        if (requiredValue === undefined || requiredValue === null || requiredValue === '') {
+          issues.push({
+            path: normalizeRequiredPath(path, requiredParam),
+            code: 'missing_required',
+            message: `Required parameter '${normalizeRequiredPath(path, requiredParam)}' is missing or empty`,
+          });
+        }
       }
+
+      for (const [key, entryValue] of Object.entries(objectValue)) {
+        const propSchema = properties[key];
+        if (!propSchema) {
+          if (!allowsAdditionalProperties) {
+            issues.push({
+              path: normalizeRequiredPath(path, key),
+              code: 'unknown_parameter',
+              message: `Unknown parameter '${normalizeRequiredPath(path, key)}' is not allowed`,
+            });
+            continue;
+          }
+
+          correctedObject[key] = entryValue;
+          continue;
+        }
+
+        if ((entryValue === undefined || entryValue === null || entryValue === '') && !requiredParams.includes(key)) {
+          continue;
+        }
+
+        const correctedValue = validateValue(entryValue, propSchema, normalizeRequiredPath(path, key));
+        if (correctedValue !== undefined) {
+          correctedObject[key] = correctedValue;
+        }
+      }
+
+      return correctedObject;
     }
 
-    if (propSchema.type === 'string' && typeof value !== 'string') {
+    if (schemaType === 'array') {
+      const normalizedArrayValue = typeof value === 'string' && value !== '' ? [value] : value;
+      if (!Array.isArray(normalizedArrayValue)) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be an array, got: ${getValueType(value)}`,
+          expectedType: 'array',
+          receivedType: getValueType(value),
+        });
+        return undefined;
+      }
+
+      const minItems = typeof schema.minItems === 'number' ? schema.minItems : undefined;
+      if (minItems !== undefined && normalizedArrayValue.length < minItems) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must contain at least ${minItems} item(s)`,
+          expectedType: `array(minItems=${minItems})`,
+          receivedType: `array(length=${normalizedArrayValue.length})`,
+        });
+      }
+
+      const itemSchema = schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)
+        ? schema.items as Record<string, unknown>
+        : undefined;
+      return normalizedArrayValue.map((entryValue, index) => validateValue(entryValue, itemSchema, `${path}[${index}]`));
+    }
+
+    if (schemaType === 'number' || schemaType === 'integer') {
+      const normalizedNumber = typeof value === 'string' ? Number(value) : value;
+      if (typeof normalizedNumber !== 'number' || Number.isNaN(normalizedNumber)) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be a ${schemaType}, got: ${getValueType(value)}`,
+          expectedType: schemaType,
+          receivedType: getValueType(value),
+        });
+        return undefined;
+      }
+
+      if (schemaType === 'integer' && !Number.isInteger(normalizedNumber)) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be an integer, got: ${normalizedNumber}`,
+          expectedType: 'integer',
+          receivedType: 'number',
+        });
+        return undefined;
+      }
+
+      if (Array.isArray(schema.enum) && !schema.enum.includes(normalizedNumber)) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be one of ${schema.enum.join(', ')}`,
+          expectedType: `enum(${schema.enum.join(', ')})`,
+          receivedType: String(normalizedNumber),
+        });
+        return undefined;
+      }
+
+      return normalizedNumber;
+    }
+
+    if (schemaType === 'boolean') {
+      if (typeof value !== 'boolean') {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be a boolean, got: ${getValueType(value)}`,
+          expectedType: 'boolean',
+          receivedType: getValueType(value),
+        });
+        return undefined;
+      }
+
+      return value;
+    }
+
+    if (schemaType === 'string') {
+      if (typeof value !== 'string') {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be a string, got: ${getValueType(value)}`,
+          expectedType: 'string',
+          receivedType: getValueType(value),
+        });
+        return undefined;
+      }
+
+      if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+        issues.push({
+          path,
+          code: 'invalid_type',
+          message: `Parameter '${path}' must be one of ${schema.enum.join(', ')}`,
+          expectedType: `enum(${schema.enum.join(', ')})`,
+          receivedType: value,
+        });
+        return undefined;
+      }
+
+      return value;
+    }
+
+    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
       issues.push({
-        path: key,
+        path,
         code: 'invalid_type',
-        message: `Parameter '${key}' must be a string, got: ${typeof value}`,
-        expectedType: 'string',
-        receivedType: typeof value,
+        message: `Parameter '${path}' must be one of ${schema.enum.join(', ')}`,
+        expectedType: `enum(${schema.enum.join(', ')})`,
+        receivedType: String(value),
       });
-      continue;
+      return undefined;
     }
 
-    if (propSchema.type === 'boolean' && typeof value !== 'boolean') {
-      issues.push({
-        path: key,
-        code: 'invalid_type',
-        message: `Parameter '${key}' must be a boolean, got: ${typeof value}`,
-        expectedType: 'boolean',
-        receivedType: typeof value,
-      });
-      continue;
-    }
-
-    correctedArgs[key] = value;
+    return value;
   }
+
+  const correctedArgs = validateValue(normalizedArgs, {
+    type: 'object',
+    properties: schemaProperties as Record<string, unknown>,
+    required: Array.isArray(toolSchema.required) ? toolSchema.required : [],
+    additionalProperties: toolSchema.additionalProperties,
+  }, '$');
 
   if (issues.length > 0) {
     return {
@@ -251,7 +397,7 @@ export function validateToolParameters(
 
   return {
     valid: true,
-    correctedArgs,
+    correctedArgs: correctedArgs as Record<string, unknown>,
     corrections: aliasNormalization.corrections,
   };
 }

@@ -2,6 +2,7 @@
  * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
  * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
  * Recent changes:
+ * - 2026-05-15: Added regressions for run-scoped evidence, malformed control-tool retries, and merged loop-contract prompt injection.
  * - 2026-05-15: Added preferred `runCompletionLoop(...)` and `complete(...)` coverage alongside legacy alias coverage.
  * - 2026-05-15: Added agent control tool coverage for deterministic final, needs-input, and blocked outcomes.
  * - 2026-05-15: Added completion-loop prompt injection, stronger retry defaults, and explicit final-classification coverage.
@@ -157,6 +158,45 @@ describe('llm-runtime completion loop', () => {
     });
   });
 
+  it('complete ignores pre-existing tool results when enforcing default evidence', async () => {
+    const result = await complete({
+      initialState: {
+        messages: [
+          { role: 'user', content: 'previous request' } satisfies LLMChatMessage,
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: 'old-tool-1',
+              type: 'function',
+              function: { name: 'read_file', arguments: '{"filePath":"README.md"}' },
+            }],
+          } satisfies LLMChatMessage,
+          { role: 'tool', tool_call_id: 'old-tool-1', content: 'old contents' } satisfies LLMChatMessage,
+          { role: 'user', content: 'inspect the current file' } satisfies LLMChatMessage,
+        ] as LLMChatMessage[],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text("I'll inspect the file now.")),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state }) => ({ state }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'non_progressing', requiresActionEvidence: true }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'non_progressing',
+      responseText: "I'll inspect the file now.",
+    });
+  });
+
   it('uses the package-managed generate path', async () => {
     mockGenerate.mockResolvedValueOnce(text('done'));
 
@@ -236,9 +276,97 @@ describe('llm-runtime completion loop', () => {
     expect(result.reason).toBe('text_response');
     expect(seenMessages[0]?.[0]).toEqual({
       role: 'system',
-      content: DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
+      content: expect.stringContaining(DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT),
     });
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
     expect(seenMessages[0]?.[1]).toEqual({ role: 'user', content: 'inspect the file' });
+  });
+
+  it('complete defaults emptyTextRetryLimit when the caller omits it', async () => {
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
+        finalText: '',
+      },
+      callModel: vi.fn(async () => text('done')),
+      buildMessages: async ({ state }) => state.messages,
+      classifyTextResponse: () => 'verified_final_response',
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('done');
+  });
+
+  it('complete merges the loop contract into an existing system message', async () => {
+    const seenMessages: LLMChatMessage[][] = [];
+
+    const result = await complete({
+      initialState: {
+        messages: [
+          { role: 'system', content: 'Follow repo conventions.' } satisfies LLMChatMessage,
+          { role: 'user', content: 'inspect the file' } satisfies LLMChatMessage,
+        ],
+        finalText: '',
+      },
+      callModel: vi.fn(async ({ messages }) => {
+        seenMessages.push(messages);
+        return text('done');
+      }),
+      buildMessages: async ({ state }) => state.messages,
+      classifyTextResponse: () => 'verified_final_response',
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(seenMessages[0]).toHaveLength(2);
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Follow repo conventions.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
+  });
+
+  it.each([
+    ['final_answer', {}],
+    ['need_user_input', {}],
+    ['blocked', {}],
+  ] as const)('retries malformed %s control tool payloads with the protocol instruction', async (toolName, args) => {
+    const seenInstructions: string[] = [];
+    const responses = [
+      toolCall(toolName, args, `malformed-${toolName}`),
+      toolCall('final_answer', { answer: 'Recovered answer' }, 'control-final-recovered'),
+    ];
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      agentControlMode: true,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state, transientInstruction }) => {
+        if (transientInstruction) {
+          seenInstructions.push(transientInstruction);
+          return [...state.messages, { role: 'system', content: transientInstruction } satisfies LLMChatMessage];
+        }
+
+        return state.messages;
+      },
+      onToolCallsResponse: async ({ state }) => ({ state }),
+      onFinalAnswerToolCall: async ({ state, controlOutput }) => ({
+        state: { ...state, finalText: controlOutput.answer },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('final_answer');
+    expect(result.state.finalText).toBe('Recovered answer');
+    expect(seenInstructions).toContain(DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION);
   });
 
   it('complete injects agent control tools on the package model path and stops on final_answer', async () => {

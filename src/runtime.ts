@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-15: Changed default built-in exposure to read-only, added package-owned tool execution helpers, and gated deprecated HITL alias exposure.
  * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
  * - 2026-03-28: Added explicit environment injection and removed runtime-constructor dependency from the public API.
  */
@@ -22,7 +23,7 @@
 import * as path from 'path';
 import {
   complete,
-  type RunCompletionLoopOptions,
+  type CompleteOptions,
   type RunCompletionLoopResult,
 } from './completion-loop.js';
 import {
@@ -54,6 +55,8 @@ import type {
   LLMChatMessage,
   LLMEnvironment,
   LLMEnvironmentOptions,
+  LLMExecuteToolCallOptions,
+  LLMExecuteToolCallsOptions,
   LLMGenerateOptions,
   LLMProviderName,
   LLMProviderConfigStore,
@@ -63,7 +66,9 @@ import type {
   LLMRuntime,
   LLMStreamChunk,
   LLMStreamOptions,
+  LLMToolCall,
   LLMToolDefinition,
+  LLMToolExecutionContext,
   LLMWarning,
   LLMWebSearchOptions,
   MCPConfig,
@@ -240,7 +245,7 @@ export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
       environment: runtime,
     }),
     complete: async <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-      completionOptions: RunCompletionLoopOptions<TState, TMessage>,
+      completionOptions: CompleteOptions<TState, TMessage>,
     ): Promise<RunCompletionLoopResult<TState>> => await complete({
       ...completionOptions,
       modelRequest: completionOptions.modelRequest
@@ -253,6 +258,18 @@ export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
     resolveTools: (resolveOptions = {}) => resolveTools({
       ...resolveOptions,
       environment: runtime,
+    }),
+    executeToolCall: async (toolCall, context, resolveOptions = {}) => await executeToolCall({
+      ...resolveOptions,
+      environment: runtime,
+      toolCall,
+      context,
+    }),
+    executeToolCalls: async (toolCalls, context, resolveOptions = {}) => await executeToolCalls({
+      ...resolveOptions,
+      environment: runtime,
+      toolCalls,
+      context,
     }),
     dispose: async () => await disposeRuntime(runtime),
   };
@@ -489,6 +506,7 @@ function injectToolGuidance(
 function buildResolvedToolSet(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
+  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
 }): Record<string, LLMToolDefinition> {
@@ -497,6 +515,7 @@ function buildResolvedToolSet(options: {
 
   const builtInTools = createBuiltInToolDefinitions({
     builtIns: options.builtIns,
+    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     skillRegistry: options.environment.skillRegistry,
   });
 
@@ -524,6 +543,7 @@ function buildResolvedToolSet(options: {
 async function buildResolvedToolSetAsync(options: {
   environment: LLMEnvironment;
   builtIns?: BuiltInToolSelection;
+  includeDeprecatedBuiltInAliases?: boolean;
   extraTools?: LLMToolDefinition[];
   tools?: Record<string, LLMToolDefinition>;
 }): Promise<Record<string, LLMToolDefinition>> {
@@ -538,6 +558,74 @@ async function buildResolvedToolSetAsync(options: {
   );
 }
 
+function parseToolCallArguments(toolCall: LLMToolCall): Record<string, unknown> {
+  const rawArguments = String(toolCall.function.arguments || '').trim();
+  if (!rawArguments) {
+    return {};
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch (error) {
+    throw new Error(`Tool "${toolCall.function.name}" arguments are not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Tool "${toolCall.function.name}" arguments must decode to an object.`);
+  }
+
+  return parsed as Record<string, unknown>;
+}
+
+function augmentToolExecutionContext(context: LLMToolExecutionContext | undefined, toolCall: LLMToolCall): LLMToolExecutionContext {
+  return {
+    ...(context ?? {}),
+    toolCallId: context?.toolCallId ?? toolCall.id,
+  };
+}
+
+export async function executeToolCall(options: LLMExecuteToolCallOptions): Promise<unknown> {
+  const environment = getEnvironmentForCall({
+    environment: options.environment,
+    mcpConfig: options.mcpConfig,
+    skillRoots: options.skillRoots,
+  });
+  const tools = await buildResolvedToolSetAsync({
+    environment,
+    builtIns: options.builtIns,
+    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases ?? true,
+    extraTools: options.extraTools,
+    tools: options.tools,
+  });
+  const toolName = String(options.toolCall.function.name || '').trim();
+  const definition = tools[toolName];
+
+  if (!definition) {
+    throw new Error(`Tool "${toolName}" is not available in the current runtime.`);
+  }
+
+  if (typeof definition.execute !== 'function') {
+    throw new Error(`Tool "${toolName}" is not executable.`);
+  }
+
+  return await definition.execute(
+    parseToolCallArguments(options.toolCall),
+    augmentToolExecutionContext(options.context, options.toolCall),
+  );
+}
+
+export async function executeToolCalls(options: LLMExecuteToolCallsOptions): Promise<unknown[]> {
+  const results: unknown[] = [];
+  for (const toolCall of options.toolCalls) {
+    results.push(await executeToolCall({
+      ...options,
+      toolCall,
+    }));
+  }
+  return results;
+}
+
 export function resolveTools(options: LLMResolveToolsOptions = {}): Record<string, LLMToolDefinition> {
   const environment = getEnvironmentForCall({
     environment: options.environment,
@@ -548,6 +636,7 @@ export function resolveTools(options: LLMResolveToolsOptions = {}): Record<strin
   return buildResolvedToolSet({
     environment,
     builtIns: options.builtIns,
+    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     extraTools: options.extraTools,
     tools: options.tools,
   });
@@ -563,6 +652,7 @@ export async function resolveToolsAsync(options: LLMResolveToolsOptions = {}): P
   return await buildResolvedToolSetAsync({
     environment,
     builtIns: options.builtIns,
+    includeDeprecatedBuiltInAliases: options.includeDeprecatedBuiltInAliases,
     extraTools: options.extraTools,
     tools: options.tools,
   });
@@ -580,6 +670,7 @@ export async function generate(request: LLMGenerateOptions): Promise<LLMResponse
   const tools = await buildResolvedToolSetAsync({
     environment,
     builtIns: request.builtIns,
+    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
     extraTools: request.extraTools,
     tools: request.tools,
   });
@@ -648,6 +739,7 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
   const tools = await buildResolvedToolSetAsync({
     environment,
     builtIns: request.builtIns,
+    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
     extraTools: request.extraTools,
     tools: request.tools,
   });

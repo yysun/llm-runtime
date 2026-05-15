@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, deprecated alias exposure, and abort-aware built-ins.
  * - 2026-05-15: Added `createRuntime(...)` facade coverage and synchronized deprecated HITL alias coverage.
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
@@ -25,11 +26,12 @@
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createRuntime,
   createLLMEnvironment,
   disposeLLMEnvironment,
+  executeToolCall,
   intersectBuiltInToolSelections,
   parseMCPConfigJson,
   resolveTools,
@@ -312,30 +314,38 @@ describe('llm-runtime runtime', () => {
     expect(typeof runtime.stream).toBe('function');
     expect(typeof runtime.complete).toBe('function');
     expect(typeof runtime.resolveTools).toBe('function');
+    expect(typeof runtime.executeToolCall).toBe('function');
+    expect(typeof runtime.executeToolCalls).toBe('function');
     expect(typeof runtime.dispose).toBe('function');
     expect(Object.keys(runtime.resolveTools({ builtIns: { ask_user_input: true } }))).toEqual([
       'ask_user_input',
-      'ask_user_question',
-      'human_intervention_request',
     ]);
 
     await expect(runtime.dispose()).resolves.toBeUndefined();
   });
 
-  it('includes internal built-ins by default, including HITL pending requests', () => {
+  it('includes only the read-only built-ins by default', () => {
     expect(Object.keys(resolveTools()).sort()).toEqual([
-      'ask_user_input',
-      'ask_user_question',
-      'create_directory',
-      'human_intervention_request',
       'list_files',
       'load_skill',
       'path_exists',
       'read_file',
       'search_files',
-      'shell_cmd',
-      'web_fetch',
-      'write_file',
+    ]);
+  });
+
+  it('exposes deprecated HITL aliases only when explicitly requested', () => {
+    expect(Object.keys(resolveTools({ builtIns: { ask_user_input: true } }))).toEqual([
+      'ask_user_input',
+    ]);
+
+    expect(Object.keys(resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    })).sort()).toEqual([
+      'ask_user_input',
+      'ask_user_question',
+      'human_intervention_request',
     ]);
   });
 
@@ -478,11 +488,7 @@ describe('llm-runtime runtime', () => {
       },
     });
 
-    expect(Object.keys(resolvedFromCanonical).sort()).toEqual([
-      'ask_user_input',
-      'ask_user_question',
-      'human_intervention_request',
-    ]);
+    expect(Object.keys(resolvedFromCanonical).sort()).toEqual(['ask_user_input']);
 
     const resolvedFromPreferred = resolveTools({
       builtIns: {
@@ -490,11 +496,7 @@ describe('llm-runtime runtime', () => {
       },
     });
 
-    expect(Object.keys(resolvedFromPreferred).sort()).toEqual([
-      'ask_user_input',
-      'ask_user_question',
-      'human_intervention_request',
-    ]);
+    expect(Object.keys(resolvedFromPreferred).sort()).toEqual(['ask_user_input']);
 
     const resolvedFromDeprecatedAlias = resolveTools({
       builtIns: {
@@ -502,11 +504,7 @@ describe('llm-runtime runtime', () => {
       },
     });
 
-    expect(Object.keys(resolvedFromDeprecatedAlias).sort()).toEqual([
-      'ask_user_input',
-      'ask_user_question',
-      'human_intervention_request',
-    ]);
+    expect(Object.keys(resolvedFromDeprecatedAlias).sort()).toEqual(['ask_user_input']);
   });
 
   it('keeps the ask_user_input alias synchronized in built-in intersection helpers', () => {
@@ -535,8 +533,120 @@ describe('llm-runtime runtime', () => {
     });
   });
 
+  it('executes built-in tools through the public helper', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      await fs.writeFile(path.join(workspacePath, 'note.txt'), 'hello from helper');
+
+      const result = await executeToolCall({
+        toolCall: {
+          id: 'tool-read-1',
+          type: 'function',
+          function: {
+            name: 'read_file',
+            arguments: JSON.stringify({ filePath: 'note.txt' }),
+          },
+        },
+        builtIns: {
+          read_file: true,
+        },
+        context: {
+          workingDirectory: workspacePath,
+        },
+      });
+
+      expect(JSON.parse(String(result))).toEqual(expect.objectContaining({
+        content: 'hello from helper',
+      }));
+    });
+  });
+
+  it('accepts deprecated HITL aliases during public tool execution when ask_user_input is enabled', async () => {
+    const result = await executeToolCall({
+      toolCall: {
+        id: 'tool-hitl-1',
+        type: 'function',
+        function: {
+          name: 'human_intervention_request',
+          arguments: JSON.stringify({
+            questions: [{
+              header: 'Approval',
+              id: 'approval',
+              question: 'Proceed?',
+              options: [
+                { id: 'yes', label: 'Yes' },
+                { id: 'no', label: 'No' },
+              ],
+            }],
+          }),
+        },
+      },
+      builtIns: {
+        ask_user_input: true,
+      },
+    });
+
+    expect(JSON.parse(String(result))).toEqual(expect.objectContaining({
+      pending: true,
+      requestId: 'tool-hitl-1',
+    }));
+  });
+
+  it('honors abort signals in package-owned shell, search, and fetch executors', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const tools = resolveTools({
+        builtIns: {
+          shell_cmd: true,
+          search_files: true,
+          web_fetch: true,
+        },
+      });
+
+      const shellAbortController = new AbortController();
+      const shellPromise = tools.shell_cmd?.execute?.({
+        command: process.execPath,
+        parameters: ['-e', 'setTimeout(() => process.exit(0), 10000)'],
+        output_format: 'json',
+      }, {
+        workingDirectory: workspacePath,
+        abortSignal: shellAbortController.signal,
+      });
+      shellAbortController.abort(new Error('stop shell execution'));
+      const shellResult = JSON.parse(String(await shellPromise));
+
+      const searchResult = await tools.search_files?.execute?.({
+        pattern: '**/*.ts',
+      }, {
+        workingDirectory: workspacePath,
+        abortSignal: AbortSignal.abort(new Error('stop search execution')),
+      });
+
+      const originalFetch = globalThis.fetch;
+      const fetchSpy = vi.fn(async () => {
+        throw new Error('fetch should not run when already aborted');
+      });
+      globalThis.fetch = fetchSpy as typeof fetch;
+      try {
+        const fetchResult = await tools.web_fetch?.execute?.({
+          url: 'https://example.com',
+        }, {
+          abortSignal: AbortSignal.abort(new Error('stop fetch execution')),
+        });
+
+        expect(shellResult).toEqual(expect.objectContaining({ aborted: true }));
+        expect(String(searchResult)).toContain('aborted');
+        expect(String(fetchResult)).toContain('aborted');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
   it('returns a pending HITL request artifact without requiring an adapter', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
     const result = await tools.human_intervention_request?.execute?.({
       questions: [{
         header: 'Approval',
@@ -560,7 +670,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('lets ask_user_input execute the same HITL pending flow', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
       questions: [{
         header: 'Continue',
@@ -581,7 +691,10 @@ describe('llm-runtime runtime', () => {
   });
 
   it('lets ask_user_question execute the same HITL pending flow', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
     const result = await tools.ask_user_question?.execute?.({
       questions: [{
         header: 'Continue',
@@ -602,7 +715,10 @@ describe('llm-runtime runtime', () => {
   });
 
   it('exposes the structured ask_user_input choice schema on both HITL aliases', () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
     const askSchema = tools.ask_user_input?.parameters as any;
     const legacySchema = tools.human_intervention_request?.parameters as any;
     const deprecatedSchema = tools.ask_user_question?.parameters as any;
@@ -637,7 +753,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('returns structured single-select HITL artifacts by default', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
       questions: [{
         header: 'Mode',
@@ -676,7 +792,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('preserves multiple-select and allowSkip in structured HITL artifacts', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
       type: 'multiple-select',
       allowSkip: true,
@@ -698,7 +814,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('rejects invalid structured HITL questions and option ids', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
 
     const duplicateResult = await tools.ask_user_input?.execute?.({
       questions: [{
@@ -730,7 +846,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('rejects unsupported HITL selection types', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
       type: 'approval',
       questions: [{
@@ -744,11 +860,14 @@ describe('llm-runtime runtime', () => {
       }],
     });
 
-    expect(result).toContain('type must be one of single-select or multiple-select');
+    expect(result).toContain("Parameter 'type' must be one of single-select, multiple-select");
   });
 
   it('keeps both HITL aliases equivalent for structured calls', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
     const payload = {
       type: 'multiple-select',
       allowSkip: true,
@@ -776,7 +895,7 @@ describe('llm-runtime runtime', () => {
   });
 
   it('rejects flat HITL payload fields', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({ builtIns: { ask_user_input: true } });
     const result = await tools.ask_user_input?.execute?.({
       question: 'Continue?',
       options: ['Yes', 'No'],
@@ -815,7 +934,10 @@ describe('llm-runtime runtime', () => {
   });
 
   it('rejects removed HITL aliases before execution', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
 
     const aliasResult = await tools.human_intervention_request?.execute?.({
       prompt: 'Continue?',
@@ -829,7 +951,10 @@ describe('llm-runtime runtime', () => {
   });
 
   it('returns a durable validation artifact for missing required parameters', async () => {
-    const tools = resolveTools();
+    const tools = resolveTools({
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
 
     const missingQuestionsResult = await tools.human_intervention_request?.execute?.({} as any);
 

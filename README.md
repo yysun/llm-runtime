@@ -31,6 +31,8 @@ The published package targets Node.js 18 and later and exposes a single root ent
 - `runtime.dispose()`
 - `disposeRuntimeCaches()`
 - `generate(...)`
+- `executeToolCall(...)`
+- `executeToolCalls(...)`
 - `resolveTools(...)`
 - `resolveToolsAsync(...)`
 - `stream(...)`
@@ -104,6 +106,16 @@ The package currently reserves these built-in names:
 
 Built-ins are package-owned and reserved. Application code can disable or narrow them, but should not redefine them.
 
+When `builtIns` is omitted, the package now exposes a read-only default set:
+
+- `load_skill`
+- `list_files`
+- `search_files`
+- `read_file`
+- `path_exists`
+
+Write-capable or interactive built-ins such as `shell_cmd`, `write_file`, `create_directory`, `web_fetch`, and `ask_user_input` require explicit opt-in. Pass `builtIns: true` or `builtIns: 'all'` to opt back into the full package-owned set.
+
 For routine workspace operations, prefer the structured built-ins over `shell_cmd`:
 
 - `list_files` for directory listing
@@ -116,7 +128,7 @@ Treat `shell_cmd` as a fallback for explicit command execution, git workflows, a
 
 `search_files` is the built-in file-discovery tool for glob-like path matching. `create_directory` creates directories recursively inside the trusted working directory. `path_exists` reports whether a file or directory currently exists and, when it does, whether it is a file or directory.
 
-`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` and `ask_user_question` remain supported as legacy aliases for backward compatibility. Enabling any of those names enables the full HITL alias set so prompts and skills can use whichever name they already expect.
+`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` and `ask_user_question` remain supported as legacy aliases for backward compatibility, but they are not exposed to the model by default. Pass `includeDeprecatedBuiltInAliases: true` when you need the old alias surface exposed explicitly.
 
 For new prompts, skills, and harness code, prefer `ask_user_input`.
 
@@ -205,7 +217,7 @@ The split of responsibilities is deliberate:
 
 - The package owns loop repetition, hard-stop safety checks, response normalization, trace collection, and lifecycle hook ordering.
 - The harness owns state shape, tool execution, persistence, replay, and business-specific final-answer overrides.
-- `complete(...)` still calls your `buildMessages(...)` callback, but it prepends a package-owned agent-run-loop system prompt before the returned messages so the default tool-loop contract is not client-dependent.
+- `complete(...)` still calls your `buildMessages(...)` callback, but it merges a package-owned agent-run-loop contract into the first system message so the default tool-loop contract is not client-dependent and caller system intent stays in one place.
 
 ### Safety And Stop Reasons
 
@@ -217,7 +229,7 @@ The split of responsibilities is deliberate:
 - repeated identical tool-call suppression through `repeatedToolCallGuard`
 - `defaultTextResponseMode: 'require_tool_result'`, which rejects unresolved plain text before any observed tool result unless the harness explicitly overrides classification
 - `rejectedTextRetryLimit: 2`, so unresolved tool-capable text gets two internal correction turns by default before the loop stops
-- `DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT`, which is prepended automatically so tool-capable callers get a runtime-owned completion-loop contract by default
+- `DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT`, which is merged into the first system message automatically so tool-capable callers get a runtime-owned completion-loop contract by default
 
 `runCompletionLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
 
@@ -345,7 +357,6 @@ const result = await runtime.complete({
     messages: [{ role: 'user', content: 'Find the token and use tools if needed.' }],
     finalText: '',
   },
-  emptyTextRetryLimit: 0,
   modelRequest: {
     provider: 'openai',
     model: 'gpt-5',
@@ -367,7 +378,7 @@ const result = await runtime.complete({
     const nextMessages = [...state.messages, response.assistantMessage];
 
     for (const toolCall of response.tool_calls ?? []) {
-      const toolResult = await executeTool(toolCall);
+      const toolResult = await runtime.executeToolCall(toolCall);
       nextMessages.push({
         role: 'tool',
         tool_call_id: toolCall.id,
@@ -415,6 +426,7 @@ Hardening-oriented shape:
 import {
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
+  executeToolCall,
   parseToolValidationFailureArtifact,
   runCompletionLoop,
 } from 'llm-runtime';
@@ -445,7 +457,15 @@ const result = await runCompletionLoop({
     const nextMessages = [...state.messages, response.assistantMessage];
 
     for (const toolCall of response.tool_calls ?? []) {
-      const toolResult = await executeTool(toolCall);
+      const toolResult = await executeToolCall({
+        toolCall,
+        builtIns: {
+          read_file: true,
+        },
+        context: {
+          workingDirectory: process.cwd(),
+        },
+      });
       const content = JSON.stringify(toolResult);
       const validationArtifact = parseToolValidationFailureArtifact(content);
 

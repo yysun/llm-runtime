@@ -23,6 +23,65 @@ import {
 } from '../../src/openai-direct.js';
 
 describe('llm-runtime openai-direct', () => {
+  it('sanitizes provider-facing tool names and maps responses back to runtime tool names', async () => {
+    let capturedRequest: Record<string, unknown> | undefined;
+    const runtimeToolName = 'demo.server_lookup.tool.with.invalid.characters.and.a.very.long.suffix.that.must.be.shortened.for.openai';
+    const fakeClient = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            const providerToolName = ((request.tools as Array<{ function: { name: string } }>)?.[0]?.function.name) ?? '';
+            return {
+              choices: [
+                {
+                  message: {
+                    content: 'Need normalized MCP tool',
+                    tool_calls: [
+                      {
+                        id: 'tool-call-normalized-1',
+                        type: 'function',
+                        function: {
+                          name: providerToolName,
+                          arguments: '{"query":"hello"}',
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as any;
+
+    const response = await generateOpenAIResponse({
+      client: fakeClient,
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'Call the MCP lookup tool',
+        },
+      ],
+      tools: {
+        [runtimeToolName]: {
+          name: runtimeToolName,
+          description: 'Lookup tool',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+    });
+
+    const providerToolName = ((capturedRequest?.tools as Array<{ function: { name: string } }>)?.[0]?.function.name) ?? '';
+    expect(providerToolName).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(providerToolName.length).toBeLessThanOrEqual(64);
+    expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+  });
+
   it('serializes reasoning effort using the chat-completions reasoning_effort field', async () => {
     let capturedRequest: Record<string, unknown> | undefined;
     const fakeClient = {

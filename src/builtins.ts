@@ -15,6 +15,7 @@
  * - `ask_user_input` is the preferred HITL built-in; legacy aliases stay synchronized.
  *
  * Recent changes:
+ * - 2026-05-15: Changed the default built-in exposure to a read-only set and gated deprecated HITL alias exposure behind an explicit option.
  * - 2026-05-15: Added the deprecated `ask_user_question` HITL alias and kept all HITL aliases synchronized.
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
@@ -49,8 +50,21 @@ export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
   'ask_user_question',
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
+export const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES = [
+  'load_skill',
+  'read_file',
+  'list_files',
+  'search_files',
+  'path_exists',
+] as const satisfies readonly BuiltInToolName[];
+export const DEPRECATED_BUILT_IN_ALIAS_NAMES = [
+  'human_intervention_request',
+  'ask_user_question',
+] as const satisfies readonly BuiltInToolName[];
 const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
 const BUILT_IN_TOOL_NAME_SET = new Set<string>(BUILT_IN_TOOL_NAMES);
+const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES);
+const DEPRECATED_BUILT_IN_ALIAS_NAME_SET = new Set<BuiltInToolName>(DEPRECATED_BUILT_IN_ALIAS_NAMES);
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 
@@ -395,16 +409,30 @@ function assertKnownBuiltInSelectionKeys(selection: Partial<Record<string, unkno
 
 function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolToggleMap {
   const resolved = {} as BuiltInToolToggleMap;
-  if (selection && typeof selection === 'object' && !Array.isArray(selection)) {
-    assertKnownBuiltInSelectionKeys(selection as Partial<Record<string, unknown>>);
+  const selectionMap = selection && typeof selection === 'object' && !Array.isArray(selection)
+    ? selection as Partial<Record<BuiltInToolName, boolean>>
+    : undefined;
+  if (selectionMap) {
+    assertKnownBuiltInSelectionKeys(selectionMap as Partial<Record<string, unknown>>);
   }
-  const humanInterventionEnabled = selection === undefined || selection === true
+
+  const selectionMode = selection === undefined
+    ? 'read-only'
+    : selection === true
+      ? 'all'
+      : selection === false
+        ? 'none'
+        : selection === 'all' || selection === 'read-only'
+          ? selection
+          : 'map';
+
+  const humanInterventionEnabled = selectionMode === 'all'
     ? true
-    : selection === false
+    : selectionMode === 'read-only' || selectionMode === 'none'
       ? false
-      : selection.human_intervention_request === true
-      || selection.ask_user_question === true
-      || selection.ask_user_input === true;
+      : selectionMap?.human_intervention_request === true
+      || selectionMap?.ask_user_question === true
+      || selectionMap?.ask_user_input === true;
 
   for (const toolName of BUILT_IN_TOOL_NAMES) {
     if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {
@@ -412,11 +440,13 @@ function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolTo
       continue;
     }
 
-    resolved[toolName] = selection === undefined || selection === true
+    resolved[toolName] = selectionMode === 'all'
       ? true
-      : selection === false
-        ? false
-        : selection[toolName] === true;
+      : selectionMode === 'read-only'
+        ? DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAME_SET.has(toolName)
+        : selectionMode === 'none'
+          ? false
+          : selectionMap?.[toolName] === true;
   }
   return resolved;
 }
@@ -450,6 +480,7 @@ export function intersectBuiltInToolSelections(
 
 export function createBuiltInToolDefinitions(options: {
   builtIns?: BuiltInToolSelection;
+  includeDeprecatedBuiltInAliases?: boolean;
   skillRegistry: SkillRegistry;
 }): Record<string, LLMToolDefinition> {
   const enabled = toToggleMap(options.builtIns);
@@ -460,6 +491,7 @@ export function createBuiltInToolDefinitions(options: {
   return Object.fromEntries(
     BUILT_IN_TOOL_NAMES
       .filter((toolName) => enabled[toolName])
+      .filter((toolName) => options.includeDeprecatedBuiltInAliases === true || !DEPRECATED_BUILT_IN_ALIAS_NAME_SET.has(toolName))
       .map((toolName) => {
         const catalogEntry = BUILT_IN_TOOL_CATALOG[toolName];
 

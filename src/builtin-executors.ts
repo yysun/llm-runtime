@@ -15,6 +15,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
  * - 2026-05-15: Added the deprecated `ask_user_question` HITL executor alias alongside `ask_user_input`.
  * - 2026-03-27: Added package-owned executors for built-in tools.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
@@ -51,6 +52,43 @@ const DEFAULT_SEARCH_MAX_RESULTS = 200;
 const DEFAULT_SHELL_TIMEOUT_MS = 600_000;
 const DEFAULT_WEB_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_WEB_FETCH_MAX_CHARS = 16_000;
+
+function createAbortError(reason?: unknown): Error {
+  const reasonMessage = reason instanceof Error
+    ? reason.message
+    : typeof reason === 'string' && reason.trim()
+      ? reason
+      : 'The operation was aborted.';
+  const message = /abort/i.test(reasonMessage)
+    ? reasonMessage
+    : `The operation was aborted: ${reasonMessage}`;
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  throw createAbortError(signal.reason);
+}
+
+function relayAbortSignal(source: AbortSignal | undefined, onAbort: (reason?: unknown) => void): () => void {
+  if (!source) {
+    return () => undefined;
+  }
+
+  if (source.aborted) {
+    onAbort(source.reason);
+    return () => undefined;
+  }
+
+  const handler = () => onAbort(source.reason);
+  source.addEventListener('abort', handler, { once: true });
+  return () => source.removeEventListener('abort', handler);
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -184,14 +222,17 @@ async function collectDirectoryEntries(rootPath: string, options: {
   includeHidden: boolean;
   maxDepth: number;
   onlyFiles: boolean;
+  abortSignal?: AbortSignal;
 }): Promise<Array<{ path: string; isDirectory: boolean }>> {
   const entries: Array<{ path: string; isDirectory: boolean }> = [];
 
   async function walkDirectory(currentPath: string, depth: number): Promise<void> {
+    throwIfAborted(options.abortSignal);
     const directoryEntries = await fs.readdir(currentPath, { withFileTypes: true });
     directoryEntries.sort((left, right) => left.name.localeCompare(right.name));
 
     for (const directoryEntry of directoryEntries) {
+      throwIfAborted(options.abortSignal);
       if (!options.includeHidden && directoryEntry.name.startsWith('.')) {
         continue;
       }
@@ -345,6 +386,7 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
       includeHidden,
       maxDepth: recursive ? maxDepth : 0,
       onlyFiles: false,
+      abortSignal: context?.abortSignal,
     });
 
     const filteredEntries = entries
@@ -395,6 +437,7 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
       includeHidden,
       maxDepth: Number.MAX_SAFE_INTEGER,
       onlyFiles: true,
+      abortSignal: context?.abortSignal,
     });
 
     const normalizedEntries = entries
@@ -486,8 +529,9 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
   }
 }
 
-async function createWebFetchExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>): Promise<string> {
+async function createWebFetchExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
+    throwIfAborted(context?.abortSignal);
     const rawUrl = String(args.url ?? '').trim();
     if (!rawUrl) {
       return 'Error: web_fetch failed - invalid_url: url is required';
@@ -496,7 +540,8 @@ async function createWebFetchExecutor(_options: BuiltInExecutorOptions, args: Re
     const timeoutMs = clamp(Number(args.timeoutMs ?? DEFAULT_WEB_FETCH_TIMEOUT_MS), 1000, 120_000);
     const maxChars = clamp(Number(args.maxChars ?? DEFAULT_WEB_FETCH_MAX_CHARS), 100, 200_000);
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const cleanupAbortRelay = relayAbortSignal(context?.abortSignal, (reason) => controller.abort(createAbortError(reason)));
+    const timeoutId = setTimeout(() => controller.abort(createAbortError(`web_fetch timed out after ${timeoutMs}ms`)), timeoutMs);
 
     try {
       const response = await fetch(rawUrl, { signal: controller.signal });
@@ -518,6 +563,7 @@ async function createWebFetchExecutor(_options: BuiltInExecutorOptions, args: Re
         truncated: normalizedBody.length > markdown.length,
       }, null, 2);
     } finally {
+      cleanupAbortRelay();
       clearTimeout(timeoutId);
     }
   } catch (error) {
@@ -729,6 +775,12 @@ async function createHitlExecutor(toolName: BuiltInToolName, _options: BuiltInEx
 }
 
 async function createShellExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+  try {
+    throwIfAborted(context?.abortSignal);
+  } catch (error) {
+    return `Error: shell_cmd failed - ${error instanceof Error ? error.message : String(error)}`;
+  }
+
   const command = String(args.command ?? '').trim();
   if (!command) {
     return 'Error: shell_cmd failed - command is required';
@@ -756,10 +808,16 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let aborted = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
     }, timeoutMs);
+    const cleanupAbortRelay = relayAbortSignal(context?.abortSignal, (reason) => {
+      aborted = true;
+      child.kill('SIGTERM');
+      stderr += `${stderr ? '\n' : ''}${createAbortError(reason).message}`;
+    });
 
     child.stdout?.on('data', (chunk) => {
       stdout += chunk.toString();
@@ -768,10 +826,12 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
       stderr += chunk.toString();
     });
     child.on('error', (error: Error) => {
+      cleanupAbortRelay();
       clearTimeout(timer);
       resolvePromise(`Error: shell_cmd failed - ${error.message}`);
     });
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanupAbortRelay();
       clearTimeout(timer);
       const durationMs = Date.now() - startedAt;
       if (outputFormat === 'json') {
@@ -779,6 +839,7 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
           exit_code: code,
           stdout,
           stderr,
+          aborted,
           timed_out: timedOut,
           duration_ms: durationMs,
           signal,
@@ -788,8 +849,9 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
 
       const preview = outputDetail === 'full' ? stdout : stdout.slice(0, 4096);
       resolvePromise([
-        `status: ${code === 0 && !timedOut ? 'success' : 'failed'}`,
+        `status: ${code === 0 && !timedOut && !aborted ? 'success' : 'failed'}`,
         `exit_code: ${code}`,
+        `aborted: ${aborted}`,
         `timed_out: ${timedOut}`,
         preview ? `stdout:\n${preview}` : 'stdout:\n',
         stderr ? `stderr:\n${outputDetail === 'full' ? stderr : stderr.slice(0, 4096)}` : 'stderr:\n',
@@ -805,7 +867,7 @@ export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<
     human_intervention_request: (args, context) => createHitlExecutor('human_intervention_request', options, args, context),
     ask_user_question: (args, context) => createHitlExecutor('ask_user_question', options, args, context),
     ask_user_input: (args, context) => createHitlExecutor('ask_user_input', options, args, context),
-    web_fetch: (args) => createWebFetchExecutor(options, args),
+    web_fetch: (args, context) => createWebFetchExecutor(options, args, context),
     read_file: (args, context) => createReadFileExecutor(options, args, context),
     write_file: (args, context) => createWriteFileExecutor(options, args, context),
     list_files: (args, context) => createListFilesExecutor(options, args, context),

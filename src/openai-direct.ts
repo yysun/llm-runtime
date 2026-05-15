@@ -15,6 +15,7 @@
  * - Tool-call ids are normalized to OpenAI's 40-character limit.
  *
  * Recent changes:
+ * - 2026-05-15: Added provider-facing tool-name normalization with reverse mapping for OpenAI-compatible tool calls.
  * - 2026-03-27: Initial package-owned OpenAI-compatible provider implementation.
  */
 
@@ -38,6 +39,7 @@ import { createPackageLogger, generateFallbackId } from './provider-utils.js';
 
 const logger = createPackageLogger();
 const OPENAI_TOOL_CALL_ID_MAX_LENGTH = 40;
+const OPENAI_TOOL_NAME_MAX_LENGTH = 64;
 
 type OpenAIClientProvider = Extract<
   LLMProviderName,
@@ -46,6 +48,10 @@ type OpenAIClientProvider = Extract<
 type OpenAIReasoningEffort = 'none' | 'low' | 'medium' | 'high';
 type OpenAIMessageParam = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type OpenAIAssistantMessageParam = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
+type OpenAIToolNameTranslator = {
+  toProviderName: (runtimeName: string) => string;
+  toRuntimeName: (providerName: string) => string;
+};
 
 export type OpenAIProviderRequest = {
   client: OpenAI;
@@ -233,6 +239,70 @@ function createToolCallIdAllocator(seedIds: string[] = []): (originalId?: string
   return allocate;
 }
 
+function createProviderToolNameHash(input: string): string {
+  return `${fnv1a32(input).toString(36)}${fnv1a32(input, true).toString(36)}`.slice(0, 10);
+}
+
+function sanitizeProviderToolName(name: string): string {
+  const normalized = String(name || '')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'tool';
+
+  if (normalized.length <= OPENAI_TOOL_NAME_MAX_LENGTH) {
+    return normalized;
+  }
+
+  const hash = createProviderToolNameHash(name);
+  const prefixLength = Math.max(1, OPENAI_TOOL_NAME_MAX_LENGTH - hash.length - 1);
+  return `${normalized.slice(0, prefixLength)}_${hash}`;
+}
+
+function withProviderToolNameHash(baseName: string, originalName: string): string {
+  const hash = createProviderToolNameHash(originalName);
+  const normalizedBaseName = sanitizeProviderToolName(baseName);
+  const prefixLength = Math.max(1, OPENAI_TOOL_NAME_MAX_LENGTH - hash.length - 1);
+  return `${normalizedBaseName.slice(0, prefixLength)}_${hash}`;
+}
+
+function createOpenAIToolNameTranslator(tools: Record<string, LLMToolDefinition> | undefined): OpenAIToolNameTranslator {
+  const runtimeToProvider = new Map<string, string>();
+  const providerToRuntime = new Map<string, string>();
+
+  const reserve = (runtimeName: string): string => {
+    const trimmedName = String(runtimeName || '').trim();
+    if (!trimmedName) {
+      return sanitizeProviderToolName('tool');
+    }
+
+    const existing = runtimeToProvider.get(trimmedName);
+    if (existing) {
+      return existing;
+    }
+
+    let providerName = sanitizeProviderToolName(trimmedName);
+    const collisionTarget = providerToRuntime.get(providerName);
+    if (collisionTarget && collisionTarget !== trimmedName) {
+      providerName = withProviderToolNameHash(providerName, trimmedName);
+    }
+
+    runtimeToProvider.set(trimmedName, providerName);
+    providerToRuntime.set(providerName, trimmedName);
+    return providerName;
+  };
+
+  for (const [name, tool] of Object.entries(tools ?? {})) {
+    reserve(name);
+    if (tool?.name && tool.name !== name) {
+      reserve(tool.name);
+    }
+  }
+
+  return {
+    toProviderName: reserve,
+    toRuntimeName: (providerName) => providerToRuntime.get(String(providerName || '').trim()) ?? providerName,
+  };
+}
+
 export function createOpenAIClient(config: OpenAIConfig): OpenAI {
   return new OpenAI({
     apiKey: config.apiKey,
@@ -274,7 +344,10 @@ export function createOllamaClient(config: OllamaConfig): OpenAI {
   });
 }
 
-function convertMessagesToOpenAI(messages: LLMChatMessage[]): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+function convertMessagesToOpenAI(
+  messages: LLMChatMessage[],
+  toolNameTranslator: OpenAIToolNameTranslator,
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   const allocateToolCallId = createToolCallIdAllocator(collectHistoricalToolCallIds(messages));
   const converted: OpenAIMessageParam[] = [];
   let pendingAssistant: {
@@ -334,6 +407,10 @@ function convertMessagesToOpenAI(messages: LLMChatMessage[]): OpenAI.Chat.Comple
           ? message.tool_calls.map((toolCall) => ({
             ...toolCall,
             id: allocateToolCallId(toolCall?.id),
+            function: {
+              ...toolCall.function,
+              name: toolNameTranslator.toProviderName(toolCall.function.name),
+            },
           }))
           : [];
 
@@ -367,11 +444,14 @@ function convertMessagesToOpenAI(messages: LLMChatMessage[]): OpenAI.Chat.Comple
   return converted;
 }
 
-function convertToolsToOpenAI(tools: Record<string, LLMToolDefinition>): OpenAI.Chat.Completions.ChatCompletionTool[] {
+function convertToolsToOpenAI(
+  tools: Record<string, LLMToolDefinition>,
+  toolNameTranslator: OpenAIToolNameTranslator,
+): OpenAI.Chat.Completions.ChatCompletionTool[] {
   return Object.entries(tools).map(([name, tool]) => ({
     type: 'function',
     function: {
-      name,
+      name: toolNameTranslator.toProviderName(name),
       description: tool.description || '',
       parameters: tool.parameters || {},
     },
@@ -471,9 +551,10 @@ function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, war
 }
 
 export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest): Promise<LLMResponse> {
-  const openaiMessages = convertMessagesToOpenAI(request.messages);
+  const toolNameTranslator = createOpenAIToolNameTranslator(request.tools);
+  const openaiMessages = convertMessagesToOpenAI(request.messages, toolNameTranslator);
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToOpenAI(request.tools)
+    ? convertToolsToOpenAI(request.tools, toolNameTranslator)
     : undefined;
   const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
   const resolvedWebSearch = resolveOpenAIWebSearchOptions(request.provider, request.webSearch);
@@ -568,7 +649,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
         id: allocateToolCallId(functionCall.id),
         type: 'function' as const,
         function: {
-          name: functionCall.function.name,
+          name: toolNameTranslator.toRuntimeName(functionCall.function.name),
           arguments: functionCall.function.arguments || '{}',
         },
       }));
@@ -607,9 +688,10 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
 }
 
 export async function generateOpenAIResponse(request: OpenAIProviderRequest): Promise<LLMResponse> {
-  const openaiMessages = convertMessagesToOpenAI(request.messages);
+  const toolNameTranslator = createOpenAIToolNameTranslator(request.tools);
+  const openaiMessages = convertMessagesToOpenAI(request.messages, toolNameTranslator);
   const openaiTools = request.tools && Object.keys(request.tools).length > 0
-    ? convertToolsToOpenAI(request.tools)
+    ? convertToolsToOpenAI(request.tools, toolNameTranslator)
     : undefined;
   const reasoningEffort = getChatCompletionsReasoningEffort(request.reasoningEffort);
   const resolvedWebSearch = resolveOpenAIWebSearchOptions(request.provider, request.webSearch);
@@ -646,7 +728,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
         id: allocateToolCallId(toolCall.id),
         type: 'function' as const,
         function: {
-          name: functionCall.function.name,
+          name: toolNameTranslator.toRuntimeName(functionCall.function.name),
           arguments: functionCall.function.arguments || '{}',
         },
       };
