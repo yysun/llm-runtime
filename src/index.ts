@@ -32,10 +32,7 @@ export * from './skills.js';
 export * from './tools.js';
 export * from './tool-validation.js';
 export * from './completion-loop.js';
-export {
-  createAskUserInputResult,
-  createHumanInputToolResult,
-} from './runtime-complete-contract.js';
+export * from './runtime-complete-contract.js';
 export {
   DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
   DEFAULT_WORKSPACE_TOOL_HINT,

@@ -46,6 +46,10 @@ vi.mock('../../src/openai-direct.js', async () => {
 });
 
 import {
+  type PendingHumanInput,
+  type RuntimeCompleteResult,
+  type RuntimeCompleteStatus,
+  type RuntimeStreamCompleteEvent,
   createAskUserInputResult,
   createHumanInputToolResult,
   createRuntime,
@@ -702,6 +706,29 @@ describe('llm-runtime runtime', () => {
       content: JSON.stringify(answer),
     });
     expect(createAskUserInputResult(pending, answer)).toEqual(createHumanInputToolResult(pending, answer));
+  });
+
+  it('exports the runtime completion contract types from the package root', () => {
+    const pending: PendingHumanInput = {
+      toolCallId: 'hitl-1',
+      toolName: 'ask_user_input',
+      request: { questions: [] },
+    };
+    const status: RuntimeCompleteStatus = 'waiting_for_human';
+    const result: RuntimeCompleteResult = {
+      status,
+      messages: [],
+      pendingHumanInput: pending,
+    };
+    const event: RuntimeStreamCompleteEvent = {
+      type: 'waiting_for_human',
+      pendingHumanInput: pending,
+      messages: [],
+      iteration: 1,
+    };
+
+    expect(result.pendingHumanInput).toEqual(pending);
+    expect(event.type).toBe('waiting_for_human');
   });
 
   it('reuses the canonical ask_user_input contract in the built-in tool catalog', () => {

@@ -531,6 +531,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
   );
 
   let fullResponse = '';
+  let finishReason: string | null | undefined;
   const functionCalls: Array<{
     id?: string;
     type: 'function';
@@ -542,6 +543,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
       if (request.abortSignal?.aborted) {
         throw new DOMException('OpenAI stream aborted', 'AbortError');
       }
+      finishReason = chunk.choices[0]?.finish_reason ?? finishReason;
       const delta = chunk.choices[0]?.delta;
 
       const reasoningContent = extractReasoningText(
@@ -617,6 +619,8 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
           content: fullResponse || '',
           tool_calls: toolCallsFormatted,
         },
+        stopKind: normalizeOpenAIStopKind(finishReason),
+        providerStopReason: finishReason ?? undefined,
       }, resolvedWebSearch.warnings);
     }
 
@@ -627,6 +631,8 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
         role: 'assistant',
         content: fullResponse,
       },
+      stopKind: normalizeOpenAIStopKind(finishReason),
+      providerStopReason: finishReason ?? undefined,
     }, resolvedWebSearch.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {

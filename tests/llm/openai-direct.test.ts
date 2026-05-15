@@ -328,6 +328,7 @@ describe('llm-runtime openai-direct', () => {
       yield {
         choices: [
           {
+            finish_reason: 'tool_calls',
             delta: {
               tool_calls: [
                 {
@@ -399,6 +400,8 @@ describe('llm-runtime openai-direct', () => {
     expect(response).toEqual({
       type: 'tool_calls',
       content: 'hello ',
+      stopKind: 'tool_call',
+      providerStopReason: 'tool_calls',
       tool_calls: [
         {
           id: 'tool-stream-1',
@@ -439,6 +442,14 @@ describe('llm-runtime openai-direct', () => {
           },
         ],
       };
+      yield {
+        choices: [
+          {
+            finish_reason: 'stop',
+            delta: {},
+          },
+        ],
+      };
     }
 
     const fakeClient = {
@@ -452,7 +463,7 @@ describe('llm-runtime openai-direct', () => {
       },
     } as any;
 
-    await streamOpenAIResponse({
+    const response = await streamOpenAIResponse({
       client: fakeClient,
       provider: 'openai',
       model: 'gpt-5',
@@ -470,6 +481,8 @@ describe('llm-runtime openai-direct', () => {
       reasoning_effort: 'high',
     }));
     expect(capturedRequest).not.toHaveProperty('reasoning');
+    expect(response.stopKind).toBe('natural_stop');
+    expect(response.providerStopReason).toBe('stop');
   });
 
   it('emits an early warning chunk when streaming ignores web search for Azure', async () => {
