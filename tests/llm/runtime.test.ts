@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-15: Added `createRuntime(...)` facade coverage and synchronized deprecated HITL alias coverage.
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
  * - 2026-03-27: Added built-in tool enablement, narrowing, and host-adapter coverage.
@@ -26,6 +27,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 import {
+  createRuntime,
   createLLMEnvironment,
   disposeLLMEnvironment,
   intersectBuiltInToolSelections,
@@ -294,9 +296,36 @@ describe('llm-runtime runtime', () => {
     });
   });
 
+  it('creates a runtime facade with bound helpers while preserving the environment surface', async () => {
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    expect(runtime.providerConfigStore.getProviderConfig('openai')).toEqual({
+      apiKey: 'runtime-openai-key',
+    });
+    expect(typeof runtime.generate).toBe('function');
+    expect(typeof runtime.stream).toBe('function');
+    expect(typeof runtime.complete).toBe('function');
+    expect(typeof runtime.resolveTools).toBe('function');
+    expect(typeof runtime.dispose).toBe('function');
+    expect(Object.keys(runtime.resolveTools({ builtIns: { ask_user_input: true } }))).toEqual([
+      'ask_user_input',
+      'ask_user_question',
+      'human_intervention_request',
+    ]);
+
+    await expect(runtime.dispose()).resolves.toBeUndefined();
+  });
+
   it('includes internal built-ins by default, including HITL pending requests', () => {
     expect(Object.keys(resolveTools()).sort()).toEqual([
       'ask_user_input',
+      'ask_user_question',
       'create_directory',
       'human_intervention_request',
       'list_files',
@@ -442,7 +471,7 @@ describe('llm-runtime runtime', () => {
     });
   });
 
-  it('treats ask_user_input as a synchronized alias of human_intervention_request', () => {
+  it('keeps ask_user_input and the deprecated HITL aliases synchronized', () => {
     const resolvedFromCanonical = resolveTools({
       builtIns: {
         human_intervention_request: true,
@@ -451,17 +480,31 @@ describe('llm-runtime runtime', () => {
 
     expect(Object.keys(resolvedFromCanonical).sort()).toEqual([
       'ask_user_input',
+      'ask_user_question',
       'human_intervention_request',
     ]);
 
-    const resolvedFromAlias = resolveTools({
+    const resolvedFromPreferred = resolveTools({
       builtIns: {
         ask_user_input: true,
       },
     });
 
-    expect(Object.keys(resolvedFromAlias).sort()).toEqual([
+    expect(Object.keys(resolvedFromPreferred).sort()).toEqual([
       'ask_user_input',
+      'ask_user_question',
+      'human_intervention_request',
+    ]);
+
+    const resolvedFromDeprecatedAlias = resolveTools({
+      builtIns: {
+        ask_user_question: true,
+      },
+    });
+
+    expect(Object.keys(resolvedFromDeprecatedAlias).sort()).toEqual([
+      'ask_user_input',
+      'ask_user_question',
       'human_intervention_request',
     ]);
   });
@@ -471,6 +514,7 @@ describe('llm-runtime runtime', () => {
       ask_user_input: true,
     })).toMatchObject({
       ask_user_input: true,
+      ask_user_question: true,
       human_intervention_request: true,
     });
 
@@ -478,6 +522,15 @@ describe('llm-runtime runtime', () => {
       human_intervention_request: true,
     })).toMatchObject({
       ask_user_input: true,
+      ask_user_question: true,
+      human_intervention_request: true,
+    });
+
+    expect(intersectBuiltInToolSelections(true, {
+      ask_user_question: true,
+    })).toMatchObject({
+      ask_user_input: true,
+      ask_user_question: true,
       human_intervention_request: true,
     });
   });
@@ -527,10 +580,32 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain('"question": "Continue?"');
   });
 
+  it('lets ask_user_question execute the same HITL pending flow', async () => {
+    const tools = resolveTools();
+    const result = await tools.ask_user_question?.execute?.({
+      questions: [{
+        header: 'Continue',
+        id: 'continue',
+        question: 'Continue?',
+        options: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      }],
+    }, {
+      toolCallId: 'hitl-call-alias-2',
+    });
+
+    expect(result).toContain('"status": "pending"');
+    expect(result).toContain('"requestId": "hitl-call-alias-2"');
+    expect(result).toContain('"question": "Continue?"');
+  });
+
   it('exposes the structured ask_user_input choice schema on both HITL aliases', () => {
     const tools = resolveTools();
     const askSchema = tools.ask_user_input?.parameters as any;
     const legacySchema = tools.human_intervention_request?.parameters as any;
+    const deprecatedSchema = tools.ask_user_question?.parameters as any;
 
     expect(tools.ask_user_input?.description).toContain('Use questions[]');
     expect(tools.ask_user_input?.description).toContain('do not use allowSkip for approval-gated or otherwise blocking decisions');
@@ -556,7 +631,9 @@ describe('llm-runtime runtime', () => {
     });
     expect(askSchema.required).toEqual(['questions']);
     expect(legacySchema).toEqual(askSchema);
+    expect(deprecatedSchema).toEqual(askSchema);
     expect(tools.human_intervention_request?.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
+    expect(tools.ask_user_question?.description).toContain('Prefer `ask_user_input` for new prompts');
   });
 
   it('returns structured single-select HITL artifacts by default', async () => {

@@ -15,6 +15,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-15: Added the deprecated `ask_user_question` HITL executor alias alongside `ask_user_input`.
  * - 2026-03-27: Added package-owned executors for built-in tools.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
@@ -802,6 +803,7 @@ export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<
     shell_cmd: (args, context) => createShellExecutor(options, args, context),
     load_skill: (args) => createLoadSkillExecutor(options, args),
     human_intervention_request: (args, context) => createHitlExecutor('human_intervention_request', options, args, context),
+    ask_user_question: (args, context) => createHitlExecutor('ask_user_question', options, args, context),
     ask_user_input: (args, context) => createHitlExecutor('ask_user_input', options, args, context),
     web_fetch: (args) => createWebFetchExecutor(options, args),
     read_file: (args, context) => createReadFileExecutor(options, args, context),

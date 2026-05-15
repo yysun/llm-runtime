@@ -15,10 +15,16 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
  * - 2026-03-28: Added explicit environment injection and removed runtime-constructor dependency from the public API.
  */
 
 import * as path from 'path';
+import {
+  complete,
+  type RunCompletionLoopOptions,
+  type RunCompletionLoopResult,
+} from './completion-loop.js';
 import {
   HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
@@ -54,6 +60,7 @@ import type {
   LLMProviderConfigs,
   LLMResolveToolsOptions,
   LLMResponse,
+  LLMRuntime,
   LLMStreamChunk,
   LLMStreamOptions,
   LLMToolDefinition,
@@ -81,7 +88,7 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'create_directory',
 ] as const;
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
-  'If `ask_user_input` is available, use it for clarification, missing user input, approvals, or other human decisions. `human_intervention_request` is the same tool.',
+  'If `ask_user_input` is available, use it for clarification, missing user input, approvals, or other human decisions. `human_intervention_request` and `ask_user_question` are the same tool.',
   'Treat phrases such as "ask the user", "request approval", or "HITL" as referring to this tool when present.',
   'Use `allowSkip` only for non-blocking prompts, not required approvals or blocking decisions.',
   'Do not invent human answers.',
@@ -207,7 +214,7 @@ function getOrCreateSkillRegistry(
   return registry;
 }
 
-export function createLLMEnvironment(options: LLMEnvironmentOptions = {}): LLMEnvironment {
+export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
   const providerConfigStore = options.providerConfigStore ?? createProviderConfigStore(options.providers ?? {});
   const mcpRegistry = options.mcpRegistry ?? createMCPRegistry(options.mcpConfig ?? null);
   const skillRegistry = options.skillRegistry ?? createSkillRegistry({
@@ -215,21 +222,49 @@ export function createLLMEnvironment(options: LLMEnvironmentOptions = {}): LLMEn
     ...(options.skillFileSystem ? { fileSystem: options.skillFileSystem } : {}),
   });
 
-  const environment: LLMEnvironment = {
+  const runtimeBase: LLMEnvironment = {
     defaults: createDefaults(options.defaults),
     providerConfigStore,
     mcpRegistry,
     skillRegistry,
   };
 
+  const runtime: LLMRuntime = {
+    ...runtimeBase,
+    generate: async (request) => await generate({
+      ...request,
+      environment: runtime,
+    }),
+    stream: async (request) => await stream({
+      ...request,
+      environment: runtime,
+    }),
+    complete: async <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
+      completionOptions: RunCompletionLoopOptions<TState, TMessage>,
+    ): Promise<RunCompletionLoopResult<TState>> => await complete({
+      ...completionOptions,
+      modelRequest: completionOptions.modelRequest
+        ? {
+          ...completionOptions.modelRequest,
+          environment: completionOptions.modelRequest.environment ?? runtime,
+        }
+        : completionOptions.modelRequest,
+    }),
+    resolveTools: (resolveOptions = {}) => resolveTools({
+      ...resolveOptions,
+      environment: runtime,
+    }),
+    dispose: async () => await disposeRuntime(runtime),
+  };
+
   if (!options.mcpRegistry) {
-    runtimeOwnedEnvironmentMCPRegistries.add(environment);
+    runtimeOwnedEnvironmentMCPRegistries.add(runtime);
   }
 
-  return environment;
+  return runtime;
 }
 
-export async function disposeLLMEnvironment(environment: LLMEnvironment): Promise<void> {
+async function disposeRuntime(environment: LLMEnvironment): Promise<void> {
   if (!runtimeOwnedEnvironmentMCPRegistries.has(environment) || disposedEnvironments.has(environment)) {
     return;
   }
@@ -238,12 +273,21 @@ export async function disposeLLMEnvironment(environment: LLMEnvironment): Promis
   await shutdownRegistries([environment.mcpRegistry]);
 }
 
-export async function disposeLLMRuntimeCaches(): Promise<void> {
+export async function disposeRuntimeCaches(): Promise<void> {
   await shutdownRegistries(mcpRegistryCache.values());
   mcpRegistryCache.clear();
   skillRegistryCache.clear();
   providerConfigStoreCache.clear();
 }
+
+/** @deprecated Use createRuntime */
+export const createLLMEnvironment = createRuntime;
+
+/** @deprecated Use runtime.dispose() */
+export const disposeLLMEnvironment = disposeRuntime;
+
+/** @deprecated Use disposeRuntimeCaches */
+export const disposeLLMRuntimeCaches = disposeRuntimeCaches;
 
 function buildCachedEnvironment(options: {
   provider?: LLMGenerateOptions['provider'] | LLMStreamOptions['provider'];
@@ -673,5 +717,5 @@ export async function stream(request: LLMStreamOptions): Promise<LLMResponse> {
 }
 
 export async function __resetLLMCallCachesForTests(): Promise<void> {
-  await disposeLLMRuntimeCaches();
+  await disposeRuntimeCaches();
 }

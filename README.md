@@ -17,48 +17,50 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
-- Generic host-agnostic turn orchestration through `respondWithTools(...)`, with `runTurnLoop(...)` kept for backward compatibility
-- Intrinsic turn-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
+- Generic host-agnostic completion orchestration through `complete(...)`, with `runCompletionLoop(...)` as the lower-level API and legacy aliases kept for backward compatibility
+- Intrinsic completion-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
 - MCP tool discovery and execution
 - Skill discovery from configured skill roots
-- Stable environment-level registries for MCP servers and skills
-- Cleanup boundaries for explicit environments and convenience-path caches
+- Stable runtime-level registries for MCP servers and skills
+- Cleanup boundaries for explicit runtimes and convenience-path caches
 
 ## Public API
 
-- `createLLMEnvironment(...)`
-- `disposeLLMEnvironment(...)`
-- `disposeLLMRuntimeCaches()`
+- `createRuntime(...)`
+- `runtime.dispose()`
+- `disposeRuntimeCaches()`
 - `generate(...)`
 - `resolveTools(...)`
 - `resolveToolsAsync(...)`
 - `stream(...)`
-- `respondWithTools(...)`
-- `runTurnLoop(...)`
+- `complete(...)`
+- `runCompletionLoop(...)`
 
-The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or inject an explicit `environment` when your harness wants stable provider, MCP, and skill dependencies.
+Deprecated compatibility aliases remain exported: `createLLMEnvironment(...)`, `disposeLLMEnvironment(...)`, `disposeLLMRuntimeCaches()`, `respondWithTools(...)`, and `runTurnLoop(...)`.
+
+The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies.
 
 ## Cleanup
 
 Use the public cleanup APIs when the runtime owns MCP clients or cached tool-discovery state:
 
-- `disposeLLMEnvironment(environment)` shuts down the environment MCP registry only when that registry was created by the runtime.
-- `disposeLLMRuntimeCaches()` shuts down cached convenience-path MCP registries and clears cached provider, MCP, and skill discovery state.
+- `runtime.dispose()` shuts down the runtime MCP registry only when that registry was created by the runtime.
+- `disposeRuntimeCaches()` shuts down cached convenience-path MCP registries and clears cached provider, MCP, and skill discovery state.
 
 Ownership is split deliberately:
 
-- The runtime owns cleanup for environments created for runtime use and for the convenience-path caches it creates internally.
+- The runtime owns cleanup for runtimes created for runtime use and for the convenience-path caches it creates internally.
 - The harness still owns temporary workspaces, transcript persistence, any caller-injected registries, and any other non-runtime resources attached to its application.
 
 ## Mental Model
 
 The main rule is simple:
 
-- Stable harness state belongs in `environment`
+- Stable harness state belongs in `runtime`
 - Request-specific state stays per call
 
-### Put This In `environment`
+### Put This In `runtime`
 
 - Provider configuration store
 - MCP registry or MCP config
@@ -77,7 +79,7 @@ The main rule is simple:
 - `webSearch`
 - `abortSignal`
 
-If a value should change from one request or UI action to the next, it usually should not live in the environment.
+If a value should change from one request or UI action to the next, it usually should not live in the runtime.
 
 ## Tool Model
 
@@ -92,7 +94,6 @@ The package currently reserves these built-in names:
 - `shell_cmd`
 - `load_skill`
 - `ask_user_input`
-- `human_intervention_request`
 - `web_fetch`
 - `read_file`
 - `write_file`
@@ -115,7 +116,7 @@ Treat `shell_cmd` as a fallback for explicit command execution, git workflows, a
 
 `search_files` is the built-in file-discovery tool for glob-like path matching. `create_directory` creates directories recursively inside the trusted working directory. `path_exists` reports whether a file or directory currently exists and, when it does, whether it is a file or directory.
 
-`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` remains supported as a legacy alias for backward compatibility. Enabling either name enables both built-ins so prompts and skills can use whichever name they already expect.
+`ask_user_input` is the preferred public name for the built-in human-intervention tool. `human_intervention_request` and `ask_user_question` remain supported as legacy aliases for backward compatibility. Enabling any of those names enables the full HITL alias set so prompts and skills can use whichever name they already expect.
 
 For new prompts, skills, and harness code, prefer `ask_user_input`.
 
@@ -146,7 +147,7 @@ Omitting `type` defaults to `single-select`. Omitting `allowSkip` defaults to `f
 
 Flat `question` / `options` payloads are not supported. Use `questions[]` for all HITL prompts.
 
-Deprecation note: `human_intervention_request` is kept for compatibility with existing clients, but new integrations should treat it as a legacy alias and prefer `ask_user_input` instead.
+Deprecation note: `human_intervention_request` and `ask_user_question` are kept for compatibility with existing clients, but new integrations should treat them as legacy aliases and prefer `ask_user_input` instead.
 
 ### Extra Tools
 
@@ -186,11 +187,11 @@ The difference is output delivery:
 - `searchContextSize` is forwarded for OpenAI-style requests and ignored by Anthropic and Gemini.
 - Omit `webSearch` to leave web search disabled.
 
-## `respondWithTools(...)` / `runTurnLoop(...)`
+## `complete(...)` / `runCompletionLoop(...)`
 
-`respondWithTools(...)` is the preferred user-facing name for the package-owned iterative loop that manages repeated model turns without taking ownership of harness state, persistence, or tool policy.
+`complete(...)` is the preferred user-facing name for the package-owned iterative loop that manages repeated model turns without taking ownership of harness state, persistence, or tool policy.
 
-`runTurnLoop(...)` remains available as the lower-level backward-compatible API when a harness wants to opt out of some package defaults.
+`runCompletionLoop(...)` is the preferred lower-level API when a harness wants to opt out of some package defaults. `respondWithTools(...)` and `runTurnLoop(...)` remain available as deprecated compatibility aliases.
 
 Use it when your harness needs more control than a single `generate(...)` or `stream(...)` call, but still wants one package boundary for:
 
@@ -204,11 +205,11 @@ The split of responsibilities is deliberate:
 
 - The package owns loop repetition, hard-stop safety checks, response normalization, trace collection, and lifecycle hook ordering.
 - The harness owns state shape, tool execution, persistence, replay, and business-specific final-answer overrides.
-- `respondWithTools(...)` still calls your `buildMessages(...)` callback, but it prepends a package-owned agent-run-loop system prompt before the returned messages so the default tool-loop contract is not client-dependent.
+- `complete(...)` still calls your `buildMessages(...)` callback, but it prepends a package-owned agent-run-loop system prompt before the returned messages so the default tool-loop contract is not client-dependent.
 
 ### Safety And Stop Reasons
 
-`respondWithTools(...)` now applies intrinsic package defaults for:
+`complete(...)` now applies intrinsic package defaults for:
 
 - `maxIterations`
 - `maxConsecutiveToolTurns`
@@ -218,7 +219,7 @@ The split of responsibilities is deliberate:
 - `rejectedTextRetryLimit: 2`, so unresolved tool-capable text gets two internal correction turns by default before the loop stops
 - `DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT`, which is prepended automatically so tool-capable callers get a runtime-owned completion-loop contract by default
 
-`runTurnLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
+`runCompletionLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
 
 Terminal reasons are stable string literals suitable for harness branching:
 
@@ -238,7 +239,7 @@ In agent control mode, the loop also supports deterministic terminal control too
 - `need_user_input`
 - `blocked`
 
-`respondWithTools(...)` enables agent control mode automatically when you use the package-managed `modelRequest` path. In that mode, the runtime injects those internal control-tool definitions through `modelRequest.extraTools`, intercepts them before host tool execution, and returns structured terminal metadata instead of relying on bare assistant text.
+`complete(...)` enables agent control mode automatically when you use the package-managed `modelRequest` path. In that mode, the runtime injects those internal control-tool definitions through `modelRequest.extraTools`, intercepts them before host tool execution, and returns structured terminal metadata instead of relying on bare assistant text.
 
 When agent control mode is enabled, bare text is protocol-invalid by default. The loop retries or stops it as `rejected_text_response` unless your harness explicitly overrides classification.
 
@@ -273,7 +274,7 @@ They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the ot
 
 ### Turn-Loop Hardening
 
-For tool-capable turns, `respondWithTools(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries twice internally by default. The package default treats unresolved text as missing required evidence, regardless of language. If a host wants the more specific `intent_only_narration` label, it should return that classification explicitly from `classifyTextResponse(...)`.
+For tool-capable turns, `complete(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries twice internally by default. The package default treats unresolved text as missing required evidence, regardless of language. If a host wants the more specific `intent_only_narration` label, it should return that classification explicitly from `classifyTextResponse(...)`.
 
 Use these hooks when your harness needs hardening against weak tool users:
 
@@ -286,7 +287,7 @@ The package-owned completion-loop prompt tells the model that narration is not c
 
 In agent control mode, the package-owned prompt also tells the model to end the run with `final_answer`, `need_user_input`, or `blocked` instead of plain text.
 
-`defaultTextResponseMode` is also available on `runTurnLoop(...)` for callers that want package-owned unresolved-text handling without switching to the `respondWithTools(...)` wrapper.
+`defaultTextResponseMode` is also available on `runCompletionLoop(...)` for callers that want package-owned unresolved-text handling without switching to the `complete(...)` wrapper.
 
 The package also exports reusable recovery helpers:
 
@@ -314,7 +315,7 @@ When enabled:
 
 When disabled, plain-text normalization still works, but the public tool-call surface is unchanged.
 
-The boundary remains the same: the package now owns the default unresolved-text handling for `respondWithTools(...)`, while the harness still owns domain-specific acceptance overrides and how bounded recovery should be persisted.
+The boundary remains the same: the package now owns the default unresolved-text handling for `complete(...)`, while the harness still owns domain-specific acceptance overrides and how bounded recovery should be persisted.
 
 You can provide either:
 
@@ -324,14 +325,22 @@ You can provide either:
 Minimal shape:
 
 ```ts
-import { respondWithTools, type LLMChatMessage } from 'llm-runtime';
+import { createRuntime, type LLMChatMessage } from 'llm-runtime';
 
 type ChatState = {
   messages: LLMChatMessage[];
   finalText: string;
 };
 
-const result = await respondWithTools({
+const runtime = createRuntime({
+  providers: {
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY!,
+    },
+  },
+});
+
+const result = await runtime.complete({
   initialState: {
     messages: [{ role: 'user', content: 'Find the token and use tools if needed.' }],
     finalText: '',
@@ -407,10 +416,10 @@ import {
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
   parseToolValidationFailureArtifact,
-  respondWithTools,
+  runCompletionLoop,
 } from 'llm-runtime';
 
-const result = await respondWithTools({
+const result = await runCompletionLoop({
   initialState,
   emptyTextRetryLimit: 0,
   rejectedTextRetryLimit: 2,
@@ -484,9 +493,9 @@ const result = await respondWithTools({
 ## Example
 
 ```ts
-import { createLLMEnvironment, generate } from 'llm-runtime';
+import { createRuntime } from 'llm-runtime';
 
-const environment = createLLMEnvironment({
+const runtime = createRuntime({
   providers: {
     openai: {
       apiKey: process.env.OPENAI_API_KEY!,
@@ -508,8 +517,7 @@ const environment = createLLMEnvironment({
   },
 });
 
-const response = await generate({
-  environment,
+const response = await runtime.generate({
   provider: 'openai',
   model: 'gpt-5',
   messages: [
@@ -533,21 +541,21 @@ console.log(response.content);
 
 Recommended integration pattern:
 
-1. Create one stable `environment` for the harness.
+1. Create one stable `runtime` for the harness.
 2. Pass request-specific inputs per call.
-3. Inspect `environment.skillRegistry` and `environment.mcpRegistry` when you need to debug discovered skills or MCP servers.
+3. Inspect `runtime.skillRegistry` and `runtime.mcpRegistry` when you need to debug discovered skills or MCP servers.
 4. Update skill roots when the harness-level skill search path changes.
-5. Do not rebuild the environment just because request-local values like `messages` or `workingDirectory` changed.
+5. Do not rebuild the runtime just because request-local values like `messages` or `workingDirectory` changed.
 
 Example registry inspection pattern:
 
 ```ts
-import { createLLMEnvironment } from 'llm-runtime';
+import { createRuntime } from 'llm-runtime';
 
-const environment = createLLMEnvironment();
+const runtime = createRuntime();
 
-const skills = await environment.skillRegistry.listSkills();
-const servers = environment.mcpRegistry.listServers();
+const skills = await runtime.skillRegistry.listSkills();
+const servers = runtime.mcpRegistry.listServers();
 
 console.table(skills.map((skill) => ({
   skillId: skill.skillId,
@@ -568,7 +576,7 @@ console.table(servers.map((server) => ({
 - `npm run test:watch` runs the Vitest suite in watch mode
 - `npm run test:e2e` runs the showcase script in `tests/e2e/llm-package-showcase.ts`
 - `npm run test:e2e:dry-run` validates the showcase wiring without live provider calls
-- `npm run test:e2e:turn-loop` runs the `respondWithTools(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
+- `npm run test:e2e:turn-loop` runs the `complete(...)` showcase script in `tests/e2e/llm-turn-loop-showcase.ts`
 - `npm run test:e2e:turn-loop:dry-run` validates the turn-loop showcase wiring without live provider calls
 - `npm run test:e2e:hardening` runs deterministic end-to-end hardening coverage for narrated intent recovery and validation-failure correction without a live provider
 

@@ -20,7 +20,13 @@
  * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
  * - 2026-03-27: Added package-native message/response/provider invocation contracts.
  * - 2026-05-14: Replaced the built-in `grep` tool name with `search_files`, `create_directory`, and `path_exists`.
+ * - 2026-05-15: Added runtime-facade types and the deprecated `ask_user_question` HITL alias.
  */
+
+import type {
+  RunCompletionLoopOptions,
+  RunCompletionLoopResult,
+} from './completion-loop.js';
 
 export type LLMProviderName =
   | 'openai'
@@ -38,7 +44,10 @@ export type HitlSelectionType = 'single-select' | 'multiple-select';
 export type BuiltInToolName =
   | 'shell_cmd'
   | 'load_skill'
+  /** @deprecated Use 'ask_user_input' */
   | 'human_intervention_request'
+  /** @deprecated Use 'ask_user_input' */
+  | 'ask_user_question'
   | 'ask_user_input'
   | 'web_fetch'
   | 'read_file'
@@ -304,6 +313,20 @@ export interface LLMEnvironmentOptions {
   skillRoots?: string[];
   skillRegistry?: SkillRegistry;
   skillFileSystem?: SkillFileSystemAdapter;
+}
+
+export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
+export type LLMRuntimeStreamOptions = Omit<LLMStreamOptions, 'environment'>;
+export type LLMRuntimeResolveToolsOptions = Omit<LLMResolveToolsOptions, 'environment'>;
+
+export interface LLMRuntime extends LLMEnvironment {
+  generate: (request: LLMRuntimeGenerateOptions) => Promise<LLMResponse>;
+  stream: (request: LLMRuntimeStreamOptions) => Promise<LLMResponse>;
+  complete: <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
+    options: RunCompletionLoopOptions<TState, TMessage>
+  ) => Promise<RunCompletionLoopResult<TState>>;
+  resolveTools: (options?: LLMRuntimeResolveToolsOptions) => Record<string, LLMToolDefinition>;
+  dispose: () => Promise<void>;
 }
 
 export interface LLMPerCallProviderOptions {

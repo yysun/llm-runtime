@@ -1,22 +1,26 @@
 /**
- * LLM Package Turn Loop Compatibility Entrypoint
+ * LLM Package Generic Completion Loop
  *
  * Purpose:
- * - Preserve the legacy `src/turn-loop.ts` import path while the preferred implementation lives in `src/completion-loop.ts`.
+ * - Provide a host-agnostic iterative model/tool completion loop for `llm-runtime`.
  *
  * Key features:
- * - Re-exports the full completion-loop surface.
- * - Keeps backward-compatible file-path imports working.
+ * - Callback-driven loop control with caller-owned generic state.
+ * - Optional package-managed model invocation via existing `generate(...)` and `stream(...)`.
+ * - Bounded empty-text retry handling and optional plain-text tool-intent normalization.
  *
  * Implementation notes:
- * - The canonical implementation now lives in `src/completion-loop.ts`.
- * - This file should stay as a thin compatibility layer only.
+ * - The package owns loop repetition and response classification only.
+ * - Hosts own persistence, queueing, restore/replay, and tool-execution policy.
+ * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
- * - 2026-05-15: Converted the legacy turn-loop file into a compatibility re-export for the renamed completion-loop API.
+ * - 2026-05-15: Added agent-mode control tools and deterministic stop handling for final answers, user-input requests, and blocked outcomes.
+ * - 2026-05-15: Added a package-owned completion-loop system prompt, evidence-based recovery wording, and stronger default rejected-text retries.
+ * - 2026-05-15: Renamed the preferred public loop APIs to `complete(...)` and `runCompletionLoop(...)` while preserving deprecated aliases.
+ * - 2026-05-15: Added package-owned default text response handling for `complete(...)` before any observed tool result.
+ * - 2026-03-29: Added the first generic completion-loop API for host-agnostic tool-loop orchestration.
  */
-
-export * from './completion-loop.js';
 
 import { generate, stream } from './runtime.js';
 import type {
@@ -194,7 +198,7 @@ export interface TurnLoopClassificationEvent<TState, TMessage extends LLMChatMes
 }
 
 export interface TurnLoopStopEvent<TState> {
-  result: RunTurnLoopResult<TState>;
+  result: RunCompletionLoopResult<TState>;
 }
 
 export interface TurnLoopFinalAnswerControlOutput {
@@ -265,7 +269,7 @@ export type TurnLoopPackageModelRequest =
   | ({ mode?: 'generate' } & Omit<LLMGenerateOptions, 'messages'>)
   | ({ mode: 'stream' } & Omit<LLMStreamOptions, 'messages'>);
 
-export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> {
+export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> {
   initialState: TState;
   emptyTextRetryLimit: number;
   initialEmptyTextRetryCount?: number;
@@ -355,7 +359,7 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
   onStop?: (params: TurnLoopStopEvent<TState>) => Promise<void> | void;
 }
 
-export interface RunTurnLoopResult<TState> {
+export interface RunCompletionLoopResult<TState> {
   state: TState;
   iterations: number;
   emptyTextRetryCount: number;
@@ -703,7 +707,7 @@ function createDefaultModelCaller<TState, TMessage extends LLMChatMessage>(
 }
 
 function resolveModelCaller<TState, TMessage extends LLMChatMessage>(
-  options: RunTurnLoopOptions<TState, TMessage>,
+  options: RunCompletionLoopOptions<TState, TMessage>,
 ): (params: {
   messages: TMessage[];
   abortSignal?: AbortSignal;
@@ -717,12 +721,12 @@ function resolveModelCaller<TState, TMessage extends LLMChatMessage>(
     return createDefaultModelCaller(options.modelRequest);
   }
 
-  throw new Error('runTurnLoop requires either callModel or modelRequest.');
+  throw new Error('runCompletionLoop requires either callModel or modelRequest.');
 }
 
-export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-  options: RunTurnLoopOptions<TState, TMessage>,
-): Promise<RunTurnLoopResult<TState>> {
+export async function runCompletionLoop<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
+  options: RunCompletionLoopOptions<TState, TMessage>,
+): Promise<RunCompletionLoopResult<TState>> {
   const callModel = resolveModelCaller(options);
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
   const agentControlMode = options.agentControlMode ?? false;
@@ -776,8 +780,8 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
     response: LLMResponse | null;
     stop: TurnLoopStopMetadata;
     controlOutput?: TurnLoopControlOutput | null;
-  }): Promise<RunTurnLoopResult<TState>> {
-    const result: RunTurnLoopResult<TState> = {
+  }): Promise<RunCompletionLoopResult<TState>> {
+    const result: RunCompletionLoopResult<TState> = {
       state,
       iterations,
       emptyTextRetryCount,
@@ -1385,16 +1389,16 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
   }
 }
 
-export async function respondWithTools<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-  options: RunTurnLoopOptions<TState, TMessage>,
-): Promise<RunTurnLoopResult<TState>> {
+export async function complete<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
+  options: RunCompletionLoopOptions<TState, TMessage>,
+): Promise<RunCompletionLoopResult<TState>> {
   const callerBuildMessages = options.buildMessages;
   const agentControlMode = options.agentControlMode ?? Boolean(options.modelRequest);
   const modelRequest = options.modelRequest && agentControlMode
     ? withAgentControlTools(options.modelRequest)
     : options.modelRequest;
 
-  return await runTurnLoop({
+  return await runCompletionLoop({
     ...options,
     modelRequest,
     agentControlMode,
@@ -1403,3 +1407,16 @@ export async function respondWithTools<TState, TMessage extends LLMChatMessage =
     rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 2,
   });
 }
+
+/** @deprecated Use RunCompletionLoopOptions */
+export type RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LLMChatMessage> =
+  RunCompletionLoopOptions<TState, TMessage>;
+
+/** @deprecated Use RunCompletionLoopResult */
+export type RunTurnLoopResult<TState> = RunCompletionLoopResult<TState>;
+
+/** @deprecated Use runCompletionLoop */
+export const runTurnLoop = runCompletionLoop;
+
+/** @deprecated Use complete */
+export const respondWithTools = complete;

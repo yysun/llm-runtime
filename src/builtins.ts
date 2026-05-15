@@ -12,9 +12,10 @@
  * Implementation notes:
  * - The package owns the built-in catalog and enablement policy.
  * - File, shell, web, and skill built-ins execute inside the package.
- * - `human_intervention_request` returns a package-owned pending request artifact.
+ * - `ask_user_input` is the preferred HITL built-in; legacy aliases stay synchronized.
  *
  * Recent changes:
+ * - 2026-05-15: Added the deprecated `ask_user_question` HITL alias and kept all HITL aliases synchronized.
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
@@ -32,6 +33,7 @@ export const BUILT_IN_TOOL_NAMES = [
   'shell_cmd',
   'load_skill',
   'human_intervention_request',
+  'ask_user_question',
   'ask_user_input',
   'web_fetch',
   'read_file',
@@ -44,6 +46,7 @@ export const BUILT_IN_TOOL_NAMES = [
 
 export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
   'human_intervention_request',
+  'ask_user_question',
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
 const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
@@ -192,9 +195,14 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
       'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
     parameters: HUMAN_INPUT_PARAMETERS,
   },
+  ask_user_question: {
+    description:
+      'Legacy alias of `ask_user_input`. Prefer `ask_user_input` for new prompts. When this alias is used, ask a human one or more structured choice questions by sending questions[] with stable question and option ids. Supports single-select, multiple-select, and skip-capable prompts. Do not add a kind field; use type and allowSkip. Do not use allowSkip for approval-gated or otherwise blocking decisions; reserve it for explicitly dismissible, non-blocking prompts.',
+    parameters: HUMAN_INPUT_PARAMETERS,
+  },
   ask_user_input: {
     description:
-      'Ask a human one or more structured choice questions. Prefer this tool whenever clarification, approval, missing user input, or another human decision is needed. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported. Legacy alias name: `human_intervention_request`.',
+      'Ask a human one or more structured choice questions. Prefer this tool whenever clarification, approval, missing user input, or another human decision is needed. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported. Legacy alias names: `human_intervention_request` and `ask_user_question`.',
     parameters: HUMAN_INPUT_PARAMETERS,
   },
   web_fetch: {
@@ -394,7 +402,9 @@ function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolTo
     ? true
     : selection === false
       ? false
-      : selection.human_intervention_request === true || selection.ask_user_input === true;
+      : selection.human_intervention_request === true
+      || selection.ask_user_question === true
+      || selection.ask_user_input === true;
 
   for (const toolName of BUILT_IN_TOOL_NAMES) {
     if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {

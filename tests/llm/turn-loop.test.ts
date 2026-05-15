@@ -2,6 +2,7 @@
  * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
  * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
  * Recent changes:
+ * - 2026-05-15: Added preferred `runCompletionLoop(...)` and `complete(...)` coverage alongside legacy alias coverage.
  * - 2026-05-15: Added agent control tool coverage for deterministic final, needs-input, and blocked outcomes.
  * - 2026-05-15: Added completion-loop prompt injection, stronger retry defaults, and explicit final-classification coverage.
  * - 2026-05-15: Added package-default continuation coverage for `respondWithTools(...)` with non-English and mixed-language unresolved text.
@@ -22,9 +23,10 @@ vi.mock('../../src/runtime.js', () => ({
 import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
+  runCompletionLoop,
   runTurnLoop,
-} from '../../src/turn-loop.js';
-import { respondWithTools } from '../../src/index.js';
+} from '../../src/completion-loop.js';
+import { complete, respondWithTools } from '../../src/index.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
 function text(content: string): LLMResponse {
@@ -56,7 +58,7 @@ function toolCall(name: string, args: Record<string, unknown>, id = 'tool-1'): L
   };
 }
 
-describe('llm-runtime runTurnLoop', () => {
+describe('llm-runtime completion loop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -66,7 +68,7 @@ describe('llm-runtime runTurnLoop', () => {
   });
 
   it('stops on verified text and records a step summary', async () => {
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage],
         finalText: '',
@@ -89,10 +91,10 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.state.finalText).toBe('echo:hello');
   });
 
-  it('respondWithTools preserves permissive completion after an observed tool round', async () => {
+  it('complete preserves permissive completion after an observed tool round', async () => {
     const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
         finalText: '',
@@ -120,10 +122,10 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.state.finalText).toBe('完成了');
   });
 
-  it('respondWithTools still requires evidence after a tool round that did not produce a tool result message', async () => {
+  it('complete still requires evidence after a tool round that did not produce a tool result message', async () => {
     const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
         rejected: null as null | { classification: string; responseText: string },
@@ -210,10 +212,10 @@ describe('llm-runtime runTurnLoop', () => {
     });
   });
 
-  it('respondWithTools injects the package completion-loop prompt', async () => {
+  it('complete injects the package completion-loop prompt', async () => {
     const seenMessages: LLMChatMessage[][] = [];
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         finalText: '',
@@ -239,14 +241,14 @@ describe('llm-runtime runTurnLoop', () => {
     expect(seenMessages[0]?.[1]).toEqual({ role: 'user', content: 'inspect the file' });
   });
 
-  it('respondWithTools injects agent control tools on the package model path and stops on final_answer', async () => {
+  it('complete injects agent control tools on the package model path and stops on final_answer', async () => {
     mockGenerate.mockResolvedValueOnce(toolCall('final_answer', {
       answer: 'Verified result',
       evidenceRefs: ['tool:read_file:1'],
     }, 'control-final-1'));
     const onToolCallsResponse = vi.fn(async ({ state }) => ({ state }));
 
-    const result = await respondWithTools({
+    const result = await complete({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
         finalText: '',
@@ -915,5 +917,10 @@ describe('llm-runtime runTurnLoop', () => {
     expect(result.response).toBeNull();
     expect(result.stop).toEqual(expect.objectContaining({ reason: 'timeout', timedOutDuringIteration: 1 }));
     expect(seenAbortSignal?.aborted).toBe(true);
+  });
+
+  it('keeps the legacy aliases wired to the preferred completion-loop APIs', async () => {
+    expect(runTurnLoop).toBe(runCompletionLoop);
+    expect(respondWithTools).toBe(complete);
   });
 });

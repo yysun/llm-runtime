@@ -14,6 +14,7 @@
  * - Each test exercises one major user-facing capability of the package with no live provider traffic.
  *
  * Recent changes:
+ * - 2026-05-15: Updated showcase coverage to prefer `createRuntime(...)`, `disposeRuntimeCaches()`, and `runCompletionLoop(...)`.
  * - 2026-03-29: Added mocked `runTurnLoop(...)` showcase coverage.
  * - 2026-03-27: Initial terminal showcase suite for `llm-runtime`.
  * - 2026-03-27: Re-labeled as the mocked showcase after adding the real e2e showcase runner.
@@ -110,14 +111,14 @@ vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
 
 describe('llm-runtime mocked showcase', () => {
   afterEach(async () => {
-    const { disposeLLMRuntimeCaches } = await import('../../src/runtime.js');
-    await disposeLLMRuntimeCaches();
+    const { disposeRuntimeCaches } = await import('../../src/runtime.js');
+    await disposeRuntimeCaches();
   });
 
-  it('showcases built-in tools and skill loading through an explicit environment', async () => {
-    const { createLLMEnvironment, resolveTools } = await import('../../src/runtime.js');
+  it('showcases built-in tools and skill loading through an explicit runtime facade', async () => {
+    const { createRuntime, resolveTools } = await import('../../src/runtime.js');
 
-    const environment = createLLMEnvironment({
+    const runtime = createRuntime({
       skillRoots: ['/global', '/project'],
       skillFileSystem: {
         access: async () => undefined,
@@ -148,9 +149,9 @@ describe('llm-runtime mocked showcase', () => {
     });
 
     const builtIns = resolveTools({
-      environment,
+      environment: runtime,
     });
-    const skill = await environment.skillRegistry.loadSkill('find-skills');
+    const skill = await runtime.skillRegistry.loadSkill('find-skills');
 
     expect(Object.keys(builtIns)).toContain('load_skill');
     expect(skill?.description).toBe('Project skill');
@@ -240,8 +241,8 @@ describe('llm-runtime mocked showcase', () => {
     }));
   });
 
-  it('showcases the generic runTurnLoop API driving a tool round-trip', async () => {
-    const { runTurnLoop } = await import('../../src/turn-loop.js');
+  it('showcases the generic runCompletionLoop API driving a tool round-trip', async () => {
+    const { runCompletionLoop } = await import('../../src/completion-loop.js');
 
     const responses = [
       {
@@ -278,7 +279,7 @@ describe('llm-runtime mocked showcase', () => {
       },
     ];
 
-    const result = await runTurnLoop({
+    const result = await runCompletionLoop({
       initialState: {
         messages: [{ role: 'user' as const, content: 'Find the token' }],
         toolNames: [] as string[],
