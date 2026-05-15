@@ -362,6 +362,8 @@ export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
 export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_result';
 export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
   maxIterations?: number;
+  maxConsecutiveToolTurns?: number;
+  maxWallTimeMs?: number;
   humanInputToolName?: string;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;

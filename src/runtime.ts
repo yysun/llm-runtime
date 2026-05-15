@@ -459,6 +459,8 @@ async function runRuntimeCompletion(
     },
     modelRequest: buildRuntimeCompletionModelRequest(environment, request),
     maxIterations: request.maxIterations,
+    maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
+    maxWallTimeMs: request.maxWallTimeMs,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
     abortSignal: request.context?.abortSignal,

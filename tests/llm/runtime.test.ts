@@ -442,6 +442,101 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('forwards maxConsecutiveToolTurns through runtime.complete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'lookup-loop-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockImplementation(async () => ({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [lookupToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [lookupToolCall],
+      },
+    }));
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Keep looking until done.' }],
+      maxConsecutiveToolTurns: 1,
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async () => ({ token: 'project-token' }),
+      }],
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Completion loop exceeded the maximum number of consecutive tool turns.');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
+  it('forwards maxWallTimeMs through runtime.complete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    mockGenerateOpenAIResponse.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        type: 'text',
+        content: 'done',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'done',
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Finish quickly.' }],
+      maxWallTimeMs: 10,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('Completion loop timed out before producing a final answer.');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
   it('rejects plain assistant narration that only announces future work', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
