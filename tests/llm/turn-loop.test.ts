@@ -31,7 +31,7 @@ import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
   DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
-  DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION,
+  DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
   DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
   runTurnLoop,
@@ -319,7 +319,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.reason).toBe('rejected_text_response');
     expect(result.classifications).toEqual([
       expect.objectContaining({
-        classification: 'unsupported_evidence_claim',
+        classification: 'non_progressing',
         requiresActionEvidence: true,
       }),
     ]);
@@ -327,11 +327,11 @@ describe('llm-runtime completion loop', () => {
       expect.objectContaining({
         kind: 'rejected_text',
         decision: 'stop',
-        transientInstruction: DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION,
+        transientInstruction: DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
       }),
     ]);
     expect(result.state.rejected).toEqual({
-      classification: 'unsupported_evidence_claim',
+      classification: 'non_progressing',
       responseText: 'I searched records and found no exact match.',
     });
   });
@@ -447,12 +447,12 @@ describe('llm-runtime completion loop', () => {
       expect.objectContaining({ toolName: 'search_records', evidenceKind: 'read', countsAsActionEvidence: true }),
     ]);
     expect(result.classifications).toEqual([
-      expect.objectContaining({ classification: 'unsupported_evidence_claim' }),
+      expect.objectContaining({ classification: 'non_progressing' }),
       expect.objectContaining({ classification: 'verified_final_response' }),
     ]);
     expect(result.state.finalText).toBe('No matching contact record was found for Jazz Gill.');
     expect(result.state.rejected).toEqual({
-      classification: 'unsupported_evidence_claim',
+      classification: 'non_progressing',
       responseText: 'I searched Contacts by name for Jazz Gill and found no exact match.',
     });
   });
@@ -718,6 +718,60 @@ describe('llm-runtime completion loop', () => {
         function: expect.objectContaining({ name: 'project_lookup' }),
       }),
     }));
+  });
+
+  it('runtime rejects post-interaction "I will proceed" narration without action evidence', async () => {
+    const responses = [
+      toolCall('ask_user_input', {
+        questions: [{
+          header: 'Search Scope',
+          id: 'scope',
+          question: 'Should I search Jazz Gill as a contact, an account, or both?',
+          options: [
+            { id: 'contact', label: 'Contact' },
+            { id: 'account', label: 'Account' },
+            { id: 'both', label: 'Both' },
+          ],
+        }],
+      }, 'hitl-scope-1'),
+      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
+      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
+      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
+    ];
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'search Jazz Gill' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state }) => state.messages,
+      requiresActionEvidence: () => false,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: JSON.stringify({ pending: true }),
+            } satisfies LLMChatMessage,
+            { role: 'user', content: 'Selected: contact' } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications.every((entry) => entry.classification === 'non_progressing')).toBe(true);
+    expect(result.state.finalText).toBe('');
   });
 
   it('complete does not enable agent control mode when no control handler is wired', async () => {

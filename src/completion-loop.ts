@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Replaced English-language narration and unsupported-evidence-claim regex heuristics with language-agnostic structural classification, and made post-interaction-answer text without action evidence unconditionally non-progressing regardless of the host's `requiresActionEvidence` opinion.
  * - 2026-05-15: Auto-enabled `complete(...)` agent control mode only when the caller wires a final/need-input/blocked handler, so hosts that drive completion through `onTextResponse` are not silently switched into strict control-tool semantics.
  * - 2026-05-15: Added read-only-before-HITL prompt guidance and default rejection of unsupported evidence claims without action evidence.
  * - 2026-05-15: Stopped default plain-text retries while interaction requests are still unanswered and strengthened post-answer recovery instructions.
@@ -458,21 +459,18 @@ function normalizeTextAssessment(
   return assessment;
 }
 
-function isUnsupportedEvidenceClaim(responseText: string): boolean {
-  const normalizedText = String(responseText || '').trim().toLowerCase();
-  if (!normalizedText) {
+function hasPendingInteractionAwaitingAction(params: {
+  messages: LLMChatMessage[];
+  observedInteractionProgress: boolean;
+  observedActionEvidence: boolean;
+}): boolean {
+  const { messages, observedInteractionProgress, observedActionEvidence } = params;
+  if (!observedInteractionProgress || observedActionEvidence) {
     return false;
   }
 
-  const evidenceVerbPattern = /\b(i|we)\s+(searched|checked|looked up|looked|inspected|read|reviewed|scanned|queried|examined|verified|found)\b/;
-  const noResultsPattern = /\b(?:no|there (?:is|are) no|found no)\s+(?:exact\s+)?(?:match(?:es)?|matching\s+(?:records?|results?|contacts?|accounts?|files?)|records?|results?|contacts?|accounts?|files?)\b/;
-  const sourceClaimPattern = /\b(?:the file|the database|the crm|the records?|the results?)\s+(?:does not|did not|do not|were not|was not)\b/;
-  const foundResultPattern = /\b(?:no matching|matching|exact match|exact matches|found no exact match|did not find)\b/;
-
-  return evidenceVerbPattern.test(normalizedText)
-    || noResultsPattern.test(normalizedText)
-    || sourceClaimPattern.test(normalizedText)
-    || foundResultPattern.test(normalizedText);
+  const latestConversationMessage = [...messages].reverse().find((message) => message.role !== 'system');
+  return latestConversationMessage?.role === 'user';
 }
 
 function getDefaultRejectedTextInstruction(params: {
@@ -1535,13 +1533,29 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         iteration,
         requiresActionEvidence,
       }));
+      const pendingInteractionAwaitingAction = hasPendingInteractionAwaitingAction({
+        messages,
+        observedInteractionProgress,
+        observedActionEvidence,
+      });
+      const defaultClassification: TurnLoopTextResponseClassification = (() => {
+        if (agentControlMode) {
+          return 'non_progressing';
+        }
+
+        if (requiresActionEvidence && !observedActionEvidence) {
+          return 'non_progressing';
+        }
+
+        if (pendingInteractionAwaitingAction) {
+          return 'non_progressing';
+        }
+
+        return 'verified_final_response';
+      })();
       const assessment = explicitAssessment
         ?? {
-          classification: requiresActionEvidence || agentControlMode
-            ? (requiresActionEvidence && !observedActionEvidence && isUnsupportedEvidenceClaim(responseText)
-              ? 'unsupported_evidence_claim'
-              : 'non_progressing')
-            : 'verified_final_response',
+          classification: defaultClassification,
           transientInstruction: agentControlMode
             ? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION
             : undefined,
