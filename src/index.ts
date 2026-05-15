@@ -5,7 +5,7 @@
  * - Export the public API for the publishable `llm-runtime` workspace.
  *
  * Key features:
- * - Per-call `generate(...)`, `stream(...)`, and explicit environment export.
+ * - Per-call `generate(...)` and `stream(...)`, plus explicit runtime-facade agentic helpers.
  * - Package-owned provider configuration helpers.
  * - Package-owned built-in tool catalog and runtime helpers.
  * - Generic host-agnostic turn-loop orchestration helpers.
@@ -17,6 +17,7 @@
  * - Serves as the primary import target for `core` and external consumers.
  *
  * Recent changes:
+ * - 2026-05-15: The runtime facade now exposes bound agentic `complete(...)` and `streamComplete(...)` helpers backed by `agentic-complete.ts`.
  * - 2026-05-15: Exported package-owned `executeToolCall(...)` and `executeToolCalls(...)` helpers.
  * - 2026-05-15: Promoted `createRuntime(...)`, `complete(...)`, and `runCompletionLoop(...)` as the preferred public API names.
  * - 2026-03-29: Exported the generic host-agnostic completion-loop package API.

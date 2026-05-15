@@ -17,6 +17,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)` and `stream(...)`
+- Bound runtime-facade agentic helpers through `runtime.complete(...)` and `runtime.streamComplete(...)`
 - Generic host-agnostic completion orchestration through `complete(...)`, with `runCompletionLoop(...)` as the lower-level API and legacy aliases kept for backward compatibility
 - Intrinsic completion-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
@@ -28,6 +29,9 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## Public API
 
 - `createRuntime(...)`
+- `runtime.generate(...)`
+- `runtime.complete(...)`
+- `runtime.streamComplete(...)`
 - `runtime.dispose()`
 - `disposeRuntimeCaches()`
 - `generate(...)`
@@ -41,7 +45,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 
 Deprecated compatibility aliases remain exported: `createLLMEnvironment(...)`, `disposeLLMEnvironment(...)`, `disposeLLMRuntimeCaches()`, `respondWithTools(...)`, and `runTurnLoop(...)`.
 
-The package is per-call first. You can call `generate(...)` or `stream(...)` directly, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies.
+The package is per-call first. You can call `generate(...)` or `stream(...)` directly, use `complete(...)` or `runCompletionLoop(...)` for callback-driven orchestration, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies plus bound agentic helpers.
 
 ## Cleanup
 
@@ -343,7 +347,7 @@ You can provide either:
 Minimal shape:
 
 ```ts
-import { createRuntime, type LLMChatMessage } from 'llm-runtime';
+import { complete, createRuntime, type LLMChatMessage } from 'llm-runtime';
 
 type ChatState = {
   messages: LLMChatMessage[];
@@ -358,12 +362,13 @@ const runtime = createRuntime({
   },
 });
 
-const result = await runtime.complete({
+const result = await complete({
   initialState: {
     messages: [{ role: 'user', content: 'Find the token and use tools if needed.' }],
     finalText: '',
   },
   modelRequest: {
+    environment: runtime,
     provider: 'openai',
     model: 'gpt-5',
     builtIns: {
@@ -566,6 +571,43 @@ const response = await runtime.generate({
 });
 
 console.log(response.content);
+
+const completion = await runtime.complete({
+  provider: 'openai',
+  model: 'gpt-5',
+  messages: [
+    {
+      role: 'user',
+      content: 'Find the token and use tools if needed.',
+    },
+  ],
+  builtIns: {
+    read_file: true,
+    search_files: true,
+  },
+});
+
+if (completion.status === 'completed') {
+  console.log(completion.output);
+}
+
+for await (const event of runtime.streamComplete({
+  provider: 'openai',
+  model: 'gpt-5',
+  messages: [
+    {
+      role: 'user',
+      content: 'Continue with streaming agent events.',
+    },
+  ],
+  builtIns: {
+    read_file: true,
+  },
+})) {
+  if (event.type === 'completed') {
+    console.log(event.result.output);
+  }
+}
 ```
 
 ## Harness Guidance

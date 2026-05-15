@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-15: Replaced the runtime-facade `stream(...)` method with agentic `complete(...)` and `streamComplete(...)` method contracts backed by `agentic-complete.ts`.
  * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
  * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
@@ -26,9 +27,9 @@
  */
 
 import type {
-  CompleteOptions,
-  RunCompletionLoopResult,
-} from './completion-loop.js';
+  CompleteResult as AgenticCompleteResult,
+  StreamCompleteEvent as AgenticStreamCompleteEvent,
+} from './agentic-complete.js';
 
 export type LLMProviderName =
   | 'openai'
@@ -352,16 +353,23 @@ export interface LLMEnvironmentOptions {
 }
 
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
+export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
+  maxIterations?: number;
+  nudgeOnFutureIntent?: boolean;
+  humanInputToolName?: string;
+}
+export type LLMRuntimeStreamCompleteOptions = LLMRuntimeCompleteOptions;
+export type LLMRuntimeCompleteResult = AgenticCompleteResult;
+export type LLMRuntimeStreamCompleteEvent = AgenticStreamCompleteEvent;
+/** @deprecated Use runtime.streamComplete(...) or the top-level stream(...) helper. */
 export type LLMRuntimeStreamOptions = Omit<LLMStreamOptions, 'environment'>;
 export type LLMRuntimeResolveToolsOptions = Omit<LLMResolveToolsOptions, 'environment'>;
 export type LLMRuntimeExecuteToolOptions = LLMRuntimeResolveToolsOptions & LLMToolExecutionOptions;
 
 export interface LLMRuntime extends LLMEnvironment {
   generate: (request: LLMRuntimeGenerateOptions) => Promise<LLMResponse>;
-  stream: (request: LLMRuntimeStreamOptions) => Promise<LLMResponse>;
-  complete: <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-    options: CompleteOptions<TState, TMessage>
-  ) => Promise<RunCompletionLoopResult<TState>>;
+  complete: (request: LLMRuntimeCompleteOptions) => Promise<LLMRuntimeCompleteResult>;
+  streamComplete: (request: LLMRuntimeStreamCompleteOptions) => AsyncGenerator<LLMRuntimeStreamCompleteEvent>;
   resolveTools: (options?: LLMRuntimeResolveToolsOptions) => Record<string, LLMToolDefinition>;
   executeToolCall: (toolCall: LLMToolCall, context?: LLMToolExecutionContext, options?: LLMRuntimeExecuteToolOptions) => Promise<unknown>;
   executeToolCalls: (toolCalls: LLMToolCall[], context?: LLMToolExecutionContext, options?: LLMRuntimeExecuteToolOptions) => Promise<unknown[]>;

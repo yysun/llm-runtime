@@ -3,7 +3,7 @@
 - Renamed the preferred completion-loop API to `runCompletionLoop(...)` and `complete(...)` while keeping `runTurnLoop(...)` and `respondWithTools(...)` as deprecated aliases.
 - Added `src/completion-loop.ts` as the preferred implementation entrypoint and converted `src/turn-loop.ts` into a compatibility re-export.
 - Added `createRuntime(...)` as the preferred runtime facade and kept `createLLMEnvironment(...)` as a deprecated alias.
-- Bound the runtime facade to `generate`, `stream`, `complete`, `resolveTools`, and `dispose` while preserving the old environment surface for compatibility.
+- Bound the runtime facade to `generate`, `complete`, `streamComplete`, `resolveTools`, and `dispose` while preserving the old environment surface for compatibility.
 - Renamed the preferred cache cleanup API to `disposeRuntimeCaches()` and kept `disposeLLMRuntimeCaches()` as a deprecated alias.
 - Added deprecated `RunCompletionLoop*` preferred type names with `RunTurnLoop*` compatibility aliases.
 - Restored the deprecated HITL alias `ask_user_question` and kept all HITL aliases synchronized behind `ask_user_input` guidance.
@@ -23,5 +23,5 @@
 ## Notes
 
 - No new `.docs/tests/test-runtime-api-rename.md` spec was added because this change renamed an existing public API surface rather than introducing a new end-user workflow.
-- Historical/internal `.docs` and `.wiki` references to older names were left unchanged in this pass.
+- Historical/internal `.wiki` references to older names were left unchanged in this pass.
 - `issues.md` and `rename.md` were already untracked in the worktree and were not modified.

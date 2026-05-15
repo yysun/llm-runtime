@@ -2,7 +2,7 @@
  * LLM Package Runtime API
  *
  * Purpose:
- * - Expose per-call `generate(...)`, `stream(...)`, and tool-resolution APIs for `llm-runtime`.
+ * - Expose per-call provider helpers plus a runtime facade backed by `agentic-complete.ts`.
  *
  * Key features:
  * - Supports explicit `LLMEnvironment` injection for provider/MCP/skill dependencies.
@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-15: Replaced runtime-facade `stream(...)` with agentic `complete(...)` and `streamComplete(...)` wired directly through `agentic-complete.ts` while preserving tool resolution and execution behavior.
  * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
  * - 2026-05-15: Changed default built-in exposure to read-only, added package-owned tool execution helpers, and gated deprecated HITL alias exposure.
@@ -24,10 +25,14 @@
 
 import * as path from 'path';
 import {
-  complete,
-  type CompleteOptions,
-  type RunCompletionLoopResult,
-} from './completion-loop.js';
+  complete as runAgenticComplete,
+  streamComplete as runAgenticStreamComplete,
+  type ChatMessage as AgenticChatMessage,
+  type CompleteOptions as AgenticCompleteOptions,
+  type ModelAdapter as AgenticModelAdapter,
+  type RuntimeTool as AgenticRuntimeTool,
+  type ToolCall as AgenticToolCall,
+} from './agentic-complete.js';
 import {
   HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
@@ -68,6 +73,7 @@ import type {
   LLMResolveToolsOptions,
   LLMResponse,
   LLMRuntime,
+  LLMRuntimeCompleteOptions,
   LLMStreamChunk,
   LLMStreamOptions,
   LLMToolCall,
@@ -224,6 +230,166 @@ function getOrCreateSkillRegistry(
   return registry;
 }
 
+function stringifyToolCallArguments(value: string | Record<string, unknown>): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  return JSON.stringify(value) ?? '{}';
+}
+
+function normalizeLLMToolCallToAgentic(toolCall: LLMToolCall): AgenticToolCall {
+  return {
+    id: toolCall.id,
+    type: toolCall.type,
+    function: {
+      name: toolCall.function.name,
+      arguments: stringifyToolCallArguments(toolCall.function.arguments),
+    },
+  };
+}
+
+function normalizeAgenticToolCallToLLM(toolCall: AgenticToolCall): LLMToolCall {
+  return {
+    id: toolCall.id,
+    type: 'function',
+    function: {
+      name: toolCall.function.name,
+      arguments: stringifyToolCallArguments(toolCall.function.arguments),
+    },
+  };
+}
+
+function normalizeLLMMessageToAgentic(message: LLMChatMessage): AgenticChatMessage {
+  return {
+    role: message.role,
+    content: message.content,
+    tool_calls: message.tool_calls?.map(normalizeLLMToolCallToAgentic),
+    tool_call_id: message.tool_call_id,
+  };
+}
+
+function normalizeAgenticMessageToLLM(message: AgenticChatMessage): LLMChatMessage {
+  return {
+    role: message.role,
+    content: typeof message.content === 'string'
+      ? message.content
+      : message.content == null
+        ? ''
+        : String(message.content),
+    tool_calls: message.tool_calls?.map(normalizeAgenticToolCallToLLM),
+    tool_call_id: typeof message.tool_call_id === 'string' ? message.tool_call_id : undefined,
+  };
+}
+
+function normalizeAgenticToolArgs(args: unknown): Record<string, unknown> {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return { value: args };
+  }
+
+  return args as Record<string, unknown>;
+}
+
+function mergeAbortSignal(
+  context: LLMToolExecutionContext | undefined,
+  signal: AbortSignal | undefined,
+): LLMToolExecutionContext | undefined {
+  if (!context && !signal) {
+    return context;
+  }
+
+  return {
+    ...(context ?? {}),
+    abortSignal: signal ?? context?.abortSignal,
+  };
+}
+
+function createAgenticRuntimeTool(definition: LLMToolDefinition): AgenticRuntimeTool {
+  const isHumanInputTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(definition.name as any);
+
+  return {
+    name: definition.name,
+    definition: {
+      type: 'function',
+      function: {
+        name: definition.name,
+        description: definition.description,
+        parameters: definition.parameters,
+      },
+    },
+    kind: isHumanInputTool ? 'human_input' : undefined,
+    execute: definition.execute
+      ? async (args, context) => await definition.execute?.(
+        normalizeAgenticToolArgs(args),
+        {
+          abortSignal: context.signal,
+          messages: context.messages.map((message) => ({
+            ...normalizeAgenticMessageToLLM(message),
+            ...(typeof message.name === 'string' ? { name: message.name } : {}),
+          })),
+          toolCallId: context.toolCall.id,
+        },
+      )
+      : undefined,
+  };
+}
+
+function createAgenticModelAdapter(
+  environment: LLMEnvironment,
+  request: LLMRuntimeCompleteOptions,
+): AgenticModelAdapter {
+  return {
+    call: async (input) => {
+      const response = await generate({
+        provider: request.provider,
+        model: request.model,
+        messages: input.messages.map(normalizeAgenticMessageToLLM),
+        temperature: request.temperature,
+        maxTokens: request.maxTokens,
+        webSearch: request.webSearch,
+        providerConfig: request.providerConfig,
+        providers: request.providers,
+        mcpConfig: request.mcpConfig,
+        skillRoots: request.skillRoots,
+        builtIns: request.builtIns,
+        includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
+        extraTools: request.extraTools,
+        tools: request.tools,
+        environment,
+        context: mergeAbortSignal(request.context, input.signal),
+      });
+
+      return {
+        message: normalizeLLMMessageToAgentic(response.assistantMessage),
+        raw: response,
+      };
+    },
+  };
+}
+
+async function createAgenticCompleteOptions(
+  environment: LLMEnvironment,
+  request: LLMRuntimeCompleteOptions,
+): Promise<AgenticCompleteOptions> {
+  const resolvedTools = await buildResolvedToolSetAsync({
+    environment,
+    builtIns: request.builtIns,
+    includeDeprecatedBuiltInAliases: request.includeDeprecatedBuiltInAliases,
+    extraTools: request.extraTools,
+    tools: request.tools,
+  });
+
+  return {
+    model: createAgenticModelAdapter(environment, request),
+    messages: request.messages.map(normalizeLLMMessageToAgentic),
+    tools: Object.values(resolvedTools).map(createAgenticRuntimeTool),
+    ...(request.maxIterations !== undefined ? { maxIterations: request.maxIterations } : {}),
+    ...(request.nudgeOnFutureIntent !== undefined ? { nudgeOnFutureIntent: request.nudgeOnFutureIntent } : {}),
+    ...(request.humanInputToolName ? { humanInputToolName: request.humanInputToolName } : {}),
+    signal: request.context?.abortSignal,
+  };
+}
+
 export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
   const providerConfigStore = options.providerConfigStore ?? createProviderConfigStore(options.providers ?? {});
   const mcpRegistry = options.mcpRegistry ?? createMCPRegistry(options.mcpConfig ?? null);
@@ -245,21 +411,16 @@ export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
       ...request,
       environment: runtime,
     }),
-    stream: async (request) => await stream({
-      ...request,
-      environment: runtime,
-    }),
-    complete: async <TState, TMessage extends LLMChatMessage = LLMChatMessage>(
-      completionOptions: CompleteOptions<TState, TMessage>,
-    ): Promise<RunCompletionLoopResult<TState>> => await complete({
-      ...completionOptions,
-      modelRequest: completionOptions.modelRequest
-        ? {
-          ...completionOptions.modelRequest,
-          environment: completionOptions.modelRequest.environment ?? runtime,
-        }
-        : completionOptions.modelRequest,
-    }),
+    complete: async (request) => await runAgenticComplete(
+      await createAgenticCompleteOptions(runtime, request),
+    ),
+    streamComplete: async function* (request) {
+      const completeOptions = await createAgenticCompleteOptions(runtime, request);
+
+      for await (const event of runAgenticStreamComplete(completeOptions)) {
+        yield event;
+      }
+    },
     resolveTools: (resolveOptions = {}) => resolveTools({
       ...resolveOptions,
       environment: runtime,

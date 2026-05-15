@@ -27,6 +27,24 @@ import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { describe, expect, it, vi } from 'vitest';
+
+const {
+  mockCreateClientForProvider,
+  mockGenerateOpenAIResponse,
+} = vi.hoisted(() => ({
+  mockCreateClientForProvider: vi.fn(() => ({ client: 'openai' })),
+  mockGenerateOpenAIResponse: vi.fn(),
+}));
+
+vi.mock('../../src/openai-direct.js', async () => {
+  const actual = await vi.importActual('../../src/openai-direct.js');
+  return {
+    ...(actual as object),
+    createClientForProvider: mockCreateClientForProvider,
+    generateOpenAIResponse: mockGenerateOpenAIResponse,
+  };
+});
+
 import {
   createRuntime,
   createLLMEnvironment,
@@ -299,7 +317,7 @@ describe('llm-runtime runtime', () => {
     });
   });
 
-  it('creates a runtime facade with bound helpers while preserving the environment surface', async () => {
+  it('creates a runtime facade with bound agentic helpers while preserving the environment surface', async () => {
     const runtime = createRuntime({
       providers: {
         openai: {
@@ -312,17 +330,234 @@ describe('llm-runtime runtime', () => {
       apiKey: 'runtime-openai-key',
     });
     expect(typeof runtime.generate).toBe('function');
-    expect(typeof runtime.stream).toBe('function');
     expect(typeof runtime.complete).toBe('function');
+    expect(typeof runtime.streamComplete).toBe('function');
     expect(typeof runtime.resolveTools).toBe('function');
     expect(typeof runtime.executeToolCall).toBe('function');
     expect(typeof runtime.executeToolCalls).toBe('function');
     expect(typeof runtime.dispose).toBe('function');
+    expect('stream' in runtime).toBe(false);
     expect(Object.keys(runtime.resolveTools({ builtIns: { ask_user_input: true } }))).toEqual([
       'ask_user_input',
     ]);
 
     await expect(runtime.dispose()).resolves.toBeUndefined();
+  });
+
+  it('runs runtime.complete through agentic-complete with the existing tool system', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'lookup-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      const hasLookupResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'lookup-1'
+      ));
+
+      if (!hasLookupResult) {
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [lookupToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [lookupToolCall],
+          },
+        };
+      }
+
+      return {
+        type: 'text',
+        content: 'TOKEN=project-token',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'TOKEN=project-token',
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async () => ({ token: 'project-token' }),
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'TOKEN=project-token',
+    });
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'lookup-1',
+      }),
+    ]));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
+  it('treats deprecated HITL aliases as waiting_for_human in runtime.complete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const hitlToolCall = {
+      id: 'hitl-1',
+      type: 'function' as const,
+      function: {
+        name: 'human_intervention_request',
+        arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope should I use?","options":[{"id":"a","label":"Option A"},{"id":"b","label":"Option B"}]}]}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [hitlToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [hitlToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Ask me for the missing scope.' }],
+      builtIns: { ask_user_input: true },
+      includeDeprecatedBuiltInAliases: true,
+    });
+
+    expect(result).toMatchObject({
+      status: 'waiting_for_human',
+      pendingHumanInput: {
+        toolCallId: 'hitl-1',
+        toolName: 'human_intervention_request',
+      },
+    });
+
+    await runtime.dispose();
+  });
+
+  it('streams agentic lifecycle events through runtime.streamComplete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'lookup-2',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      const hasLookupResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'lookup-2'
+      ));
+
+      if (!hasLookupResult) {
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [lookupToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [lookupToolCall],
+          },
+        };
+      }
+
+      return {
+        type: 'text',
+        content: 'TOKEN=project-token',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'TOKEN=project-token',
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const eventTypes: string[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async () => ({ token: 'project-token' }),
+      }],
+    })) {
+      eventTypes.push(event.type);
+    }
+
+    expect(eventTypes).toEqual([
+      'model_start',
+      'assistant_message',
+      'tool_start',
+      'tool_result',
+      'model_start',
+      'assistant_message',
+      'completed',
+    ]);
+
+    await runtime.dispose();
   });
 
   it('includes only the read-only built-ins by default', () => {
