@@ -15,6 +15,8 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Added agent-mode control tools and deterministic stop handling for final answers, user-input requests, and blocked outcomes.
+ * - 2026-05-15: Added a package-owned completion-loop system prompt, evidence-based recovery wording, and stronger default rejected-text retries.
  * - 2026-05-15: Added package-owned default text response handling for `respondWithTools(...)` before any observed tool result.
  * - 2026-03-29: Added the first generic `runTurnLoop(...)` API for host-agnostic tool-loop orchestration.
  */
@@ -25,6 +27,7 @@ import type {
   LLMGenerateOptions,
   LLMResponse,
   LLMStreamOptions,
+  LLMToolDefinition,
   LLMToolCall,
 } from './types.js';
 
@@ -33,12 +36,25 @@ type ParsedToolIntent = {
   toolArgs: Record<string, unknown>;
 } | null;
 
+export const AGENT_CONTROL_TOOL_NAMES = [
+  'final_answer',
+  'need_user_input',
+  'blocked',
+] as const;
+
+export type AgentControlToolName = typeof AGENT_CONTROL_TOOL_NAMES[number];
+
+const AGENT_CONTROL_TOOL_NAME_SET = new Set<string>(AGENT_CONTROL_TOOL_NAMES);
+
 export type TurnLoopControl =
   | { control: 'stop' }
   | { control: 'continue'; transientInstruction?: string };
 
 export type TurnLoopTerminalReason =
   | 'text_response'
+  | 'final_answer'
+  | 'needs_user_input'
+  | 'blocked'
   | 'tool_calls_response'
   | 'empty_text_stop'
   | 'rejected_text_response'
@@ -51,6 +67,9 @@ export type TurnLoopTerminalReason =
 export type TurnLoopStepBranch =
   | 'tool_calls_continue'
   | 'tool_calls_stop'
+  | 'final_answer_stop'
+  | 'needs_user_input_stop'
+  | 'blocked_stop'
   | 'text_response_continue'
   | 'text_response_stop'
   | 'rejected_text_retry'
@@ -138,6 +157,7 @@ export interface TurnLoopStopMetadata {
   maxIterations: number;
   maxConsecutiveToolTurns: number;
   maxWallTimeMs: number;
+  controlOutput?: TurnLoopControlOutput;
   timedOutDuringIteration?: number;
   repeatedToolCall?: TurnLoopRepeatedToolCallStopDetail;
 }
@@ -180,8 +200,60 @@ export interface TurnLoopStopEvent<TState> {
   result: RunTurnLoopResult<TState>;
 }
 
-export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'Do not describe future tool actions. If a tool is needed, emit the tool call now. If prior tool results already contain the answer, reply with the verified final result instead.';
-export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'Your last response did not make progress. If a tool is needed, emit the tool call now. Otherwise reply with the verified final result based on prior tool results.';
+export interface TurnLoopFinalAnswerControlOutput {
+  kind: 'final_answer';
+  toolCallId: string;
+  answer: string;
+  evidenceRefs: string[];
+}
+
+export interface TurnLoopNeedUserInputControlOutput {
+  kind: 'need_user_input';
+  toolCallId: string;
+  question: string;
+  reason: string;
+}
+
+export interface TurnLoopBlockedControlOutput {
+  kind: 'blocked';
+  toolCallId: string;
+  reason: string;
+}
+
+export type TurnLoopControlOutput =
+  | TurnLoopFinalAnswerControlOutput
+  | TurnLoopNeedUserInputControlOutput
+  | TurnLoopBlockedControlOutput;
+
+export interface TurnLoopControlToolCallEvent<TState, TMessage extends LLMChatMessage = LLMChatMessage> {
+  state: TState;
+  controlOutput: TurnLoopControlOutput;
+  response: LLMResponse;
+  messages: TMessage[];
+  iteration: number;
+}
+
+export const DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT = [
+  'You are operating inside an agent run loop.',
+  '',
+  'You may briefly tell the user what you are about to do, but narration is not completion.',
+  '',
+  'If the task requires workspace inspection, tool use, file access, search, command execution, or external lookup, you must call the appropriate tool.',
+  '',
+  'For read-only inspection, searching, summarizing, and analysis, proceed without confirmation.',
+  '',
+  'Stop only by:',
+  '- calling tools,',
+  '- producing a final answer supported by run evidence,',
+  '- requesting required missing user input,',
+  '- reporting a permission or safety block.',
+  '',
+  'Do not stop after merely announcing intent.',
+].join('\n');
+export const DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT = DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT;
+export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'The last response announced work but did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool in this turn. If prior tool results already contain enough evidence, provide the final answer based on those results.';
+export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last response did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool. If prior tool results already contain enough evidence, provide the final answer based on those results.';
+export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
 export const DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS = 120000;
@@ -203,6 +275,7 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
   rejectedTextRetryLimit?: number;
   initialRejectedTextRetryCount?: number;
   defaultTextResponseMode?: TurnLoopDefaultTextResponseMode;
+  agentControlMode?: boolean;
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
@@ -265,6 +338,9 @@ export interface RunTurnLoopOptions<TState, TMessage extends LLMChatMessage = LL
     messages: TMessage[];
     iteration: number;
   }) => Promise<TurnLoopStepResult<TState> | void>;
+  onFinalAnswerToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
+  onNeedUserInputToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
+  onBlockedToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
   onEmptyTextStop?: (params: {
     state: TState;
     response: LLMResponse;
@@ -287,6 +363,7 @@ export interface RunTurnLoopResult<TState> {
   iterations: number;
   emptyTextRetryCount: number;
   rejectedTextRetryCount: number;
+  controlOutput: TurnLoopControlOutput | null;
   reason: TurnLoopTerminalReason;
   response: LLMResponse | null;
   elapsedMs: number;
@@ -295,27 +372,6 @@ export interface RunTurnLoopResult<TState> {
   classifications: TurnLoopClassificationSummary[];
   retries: TurnLoopRetrySummary[];
   stop: TurnLoopStopMetadata;
-}
-
-const INTENT_ONLY_NARRATION_PATTERNS = [
-  /\b(?:i\s+will|i['’]ll|let\s+me|i\s+am\s+going\s+to|i'm\s+going\s+to)\s+(?:(?:now|then|next|immediately)\s+)?(?:run|check|search|open|update|inspect|read|look\s+for|review|use|call|execute|query|load|save|try|fetch|edit|write|ask)\b/i,
-  /\b(?:proceeding|starting|beginning)\b[^.?!\n]{0,100}\b(run|check|search|lookup|look\s+up|review|call|execute|query|load|save|fetch|read|write|update|inspect)\b/i,
-  /\b(?:i\s+am|i['’]m)\s+(?:starting|beginning|searching|checking|fetching|calling|querying|looking\s+up|running|executing|loading|saving)\b/i,
-];
-
-function looksLikeIntentOnlyNarration(content: string): boolean {
-  const normalizedContent = content.trim();
-  const candidateFragments = [
-    normalizedContent,
-    ...normalizedContent
-      .split(/\r?\n+/)
-      .map((line) => line.replace(/^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s*)/, '').trim())
-      .filter(Boolean),
-  ];
-
-  return candidateFragments.some((fragment) => (
-    INTENT_ONLY_NARRATION_PATTERNS.some((pattern) => pattern.test(fragment))
-  ));
 }
 
 function normalizeTextAssessment(
@@ -344,6 +400,159 @@ function getDefaultRejectedTextInstruction(
 
 function hasToolResultMessage(messages: LLMChatMessage[]): boolean {
   return messages.some((message) => message.role === 'tool');
+}
+
+export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
+  return [
+    {
+      name: 'final_answer',
+      description: 'End the agent run with the final answer. Use this only when the answer is complete and supported by run evidence.',
+      parameters: {
+        type: 'object',
+        properties: {
+          answer: {
+            type: 'string',
+            description: 'Required final answer to return to the user.',
+          },
+          evidenceRefs: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Optional references to tool results, files, or other run evidence supporting the final answer.',
+          },
+        },
+        required: ['answer'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'need_user_input',
+      description: 'Stop the agent run because required user input is missing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description: 'Required user-facing question asking for the missing input.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Required reason why the run cannot continue without the user input.',
+          },
+        },
+        required: ['question', 'reason'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'blocked',
+      description: 'Stop the agent run because a permission, safety, or external block prevents further progress.',
+      parameters: {
+        type: 'object',
+        properties: {
+          reason: {
+            type: 'string',
+            description: 'Required explanation of the block preventing progress.',
+          },
+        },
+        required: ['reason'],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+function assertNoAgentControlToolNameCollisions(
+  extraTools: LLMToolDefinition[] = [],
+  tools?: Record<string, LLMToolDefinition>,
+): void {
+  for (const tool of extraTools) {
+    if (AGENT_CONTROL_TOOL_NAME_SET.has(String(tool.name || '').trim())) {
+      throw new Error(`Tool name "${tool.name}" is reserved by llm-runtime agent control tools.`);
+    }
+  }
+
+  for (const toolName of Object.keys(tools ?? {})) {
+    if (AGENT_CONTROL_TOOL_NAME_SET.has(String(toolName || '').trim())) {
+      throw new Error(`Tool name "${toolName}" is reserved by llm-runtime agent control tools.`);
+    }
+  }
+}
+
+function prependCompletionLoopSystemPrompt<TMessage extends LLMChatMessage>(messages: TMessage[]): TMessage[] {
+  const firstMessage = messages[0];
+  if (firstMessage?.role === 'system' && firstMessage.content === DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT) {
+    return messages;
+  }
+
+  return [
+    { role: 'system', content: DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT } as TMessage,
+    ...messages,
+  ];
+}
+
+function parseToolArgumentsObject(argumentsText: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(argumentsText || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+
+    return parsed as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((entry): entry is string => typeof entry === 'string');
+}
+
+function tryParseControlToolOutput(toolCall: LLMToolCall): TurnLoopControlOutput | null {
+  if (!AGENT_CONTROL_TOOL_NAME_SET.has(toolCall.function.name)) {
+    return null;
+  }
+
+  const args = parseToolArgumentsObject(toolCall.function.arguments);
+
+  if (toolCall.function.name === 'final_answer') {
+    return {
+      kind: 'final_answer',
+      toolCallId: toolCall.id,
+      answer: typeof args.answer === 'string' ? args.answer : '',
+      evidenceRefs: toStringArray(args.evidenceRefs),
+    };
+  }
+
+  if (toolCall.function.name === 'need_user_input') {
+    return {
+      kind: 'need_user_input',
+      toolCallId: toolCall.id,
+      question: typeof args.question === 'string' ? args.question : '',
+      reason: typeof args.reason === 'string' ? args.reason : '',
+    };
+  }
+
+  return {
+    kind: 'blocked',
+    toolCallId: toolCall.id,
+    reason: typeof args.reason === 'string' ? args.reason : '',
+  };
+}
+
+function withAgentControlTools(request: TurnLoopPackageModelRequest): TurnLoopPackageModelRequest {
+  assertNoAgentControlToolNameCollisions(request.extraTools ?? [], request.tools);
+
+  return {
+    ...request,
+    extraTools: [
+      ...(request.extraTools ?? []),
+      ...createAgentControlToolDefinitions(),
+    ],
+  };
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number): number {
@@ -519,6 +728,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
 ): Promise<RunTurnLoopResult<TState>> {
   const callModel = resolveModelCaller(options);
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
+  const agentControlMode = options.agentControlMode ?? false;
   const maxIterations = normalizePositiveInteger(options.maxIterations, DEFAULT_TURN_LOOP_MAX_ITERATIONS);
   const maxConsecutiveToolTurns = normalizePositiveInteger(
     options.maxConsecutiveToolTurns,
@@ -568,12 +778,14 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
     reason: TurnLoopTerminalReason;
     response: LLMResponse | null;
     stop: TurnLoopStopMetadata;
+    controlOutput?: TurnLoopControlOutput | null;
   }): Promise<RunTurnLoopResult<TState>> {
     const result: RunTurnLoopResult<TState> = {
       state,
       iterations,
       emptyTextRetryCount,
       rejectedTextRetryCount,
+      controlOutput: params.controlOutput ?? null,
       reason: params.reason,
       response: params.response,
       elapsedMs: getElapsedMs(),
@@ -786,6 +998,114 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
       }));
       toolCalls.push(...currentToolCallSummaries);
 
+      if (agentControlMode) {
+        const controlToolCalls = (response.tool_calls ?? []).filter((toolCall) => AGENT_CONTROL_TOOL_NAME_SET.has(toolCall.function.name));
+        if (controlToolCalls.length > 0) {
+          if (controlToolCalls.length !== 1 || (response.tool_calls?.length ?? 0) !== 1) {
+            recordStep(iteration, response, 'tool_calls_continue');
+            transientInstruction = DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
+            continue;
+          }
+
+          const controlOutput = tryParseControlToolOutput(controlToolCalls[0]);
+          if (controlOutput?.kind === 'final_answer') {
+            const next = await options.onFinalAnswerToolCall?.({
+              state,
+              controlOutput,
+              response,
+              messages,
+              iteration,
+            });
+            state = next?.state ?? state;
+            if (next?.next?.control === 'continue') {
+              recordStep(iteration, response, 'tool_calls_continue');
+              transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
+              continue;
+            }
+
+            recordStep(iteration, response, 'final_answer_stop');
+            return await finalize({
+              reason: 'final_answer',
+              response,
+              controlOutput,
+              stop: {
+                reason: 'final_answer',
+                iteration,
+                elapsedMs: getElapsedMs(),
+                maxIterations,
+                maxConsecutiveToolTurns,
+                maxWallTimeMs,
+                controlOutput,
+              },
+            });
+          }
+
+          if (controlOutput?.kind === 'need_user_input') {
+            const next = await options.onNeedUserInputToolCall?.({
+              state,
+              controlOutput,
+              response,
+              messages,
+              iteration,
+            });
+            state = next?.state ?? state;
+            if (next?.next?.control === 'continue') {
+              recordStep(iteration, response, 'tool_calls_continue');
+              transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
+              continue;
+            }
+
+            recordStep(iteration, response, 'needs_user_input_stop');
+            return await finalize({
+              reason: 'needs_user_input',
+              response,
+              controlOutput,
+              stop: {
+                reason: 'needs_user_input',
+                iteration,
+                elapsedMs: getElapsedMs(),
+                maxIterations,
+                maxConsecutiveToolTurns,
+                maxWallTimeMs,
+                controlOutput,
+              },
+            });
+          }
+
+          if (controlOutput?.kind === 'blocked') {
+            const next = await options.onBlockedToolCall?.({
+              state,
+              controlOutput,
+              response,
+              messages,
+              iteration,
+            });
+            state = next?.state ?? state;
+            if (next?.next?.control === 'continue') {
+              recordStep(iteration, response, 'tool_calls_continue');
+              transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
+              continue;
+            }
+
+            recordStep(iteration, response, 'blocked_stop');
+            return await finalize({
+              reason: 'blocked',
+              response,
+              controlOutput,
+              stop: {
+                reason: 'blocked',
+                iteration,
+                elapsedMs: getElapsedMs(),
+                maxIterations,
+                maxConsecutiveToolTurns,
+                maxWallTimeMs,
+                controlOutput,
+              },
+            });
+          }
+        }
+      }
+
       if (repeatedToolCallStopped) {
         recordStep(iteration, response, 'repeated_tool_call_stop');
         return await finalize({
@@ -874,14 +1194,14 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
         iteration,
         requiresActionEvidence,
       }));
-      const defaultRejectedClassification = looksLikeIntentOnlyNarration(responseText)
-        ? 'intent_only_narration'
-        : 'non_progressing';
       const assessment = explicitAssessment
         ?? {
-          classification: requiresActionEvidence
-            ? defaultRejectedClassification
+          classification: requiresActionEvidence || agentControlMode
+            ? 'non_progressing'
             : 'verified_final_response',
+          transientInstruction: agentControlMode
+            ? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION
+            : undefined,
         } satisfies TurnLoopTextResponseAssessment;
 
       classifications.push({
@@ -945,7 +1265,7 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
         requiresActionEvidence,
       });
       state = next?.state ?? state;
-      const rejectedTextRetryLimit = options.rejectedTextRetryLimit ?? 0;
+      const rejectedTextRetryLimit = options.rejectedTextRetryLimit ?? (requiresActionEvidence ? 2 : 0);
 
       if (rejectedTextRetryCount < rejectedTextRetryLimit && next?.next?.control !== 'stop') {
         const retryCountBefore = rejectedTextRetryCount;
@@ -1071,9 +1391,18 @@ export async function runTurnLoop<TState, TMessage extends LLMChatMessage = LLMC
 export async function respondWithTools<TState, TMessage extends LLMChatMessage = LLMChatMessage>(
   options: RunTurnLoopOptions<TState, TMessage>,
 ): Promise<RunTurnLoopResult<TState>> {
+  const callerBuildMessages = options.buildMessages;
+  const agentControlMode = options.agentControlMode ?? Boolean(options.modelRequest);
+  const modelRequest = options.modelRequest && agentControlMode
+    ? withAgentControlTools(options.modelRequest)
+    : options.modelRequest;
+
   return await runTurnLoop({
     ...options,
+    modelRequest,
+    agentControlMode,
+    buildMessages: async (params) => prependCompletionLoopSystemPrompt(await callerBuildMessages(params)),
     defaultTextResponseMode: options.defaultTextResponseMode ?? 'require_tool_result',
-    rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 1,
+    rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 2,
   });
 }

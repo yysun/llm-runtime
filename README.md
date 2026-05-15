@@ -203,7 +203,8 @@ Use it when your harness needs more control than a single `generate(...)` or `st
 The split of responsibilities is deliberate:
 
 - The package owns loop repetition, hard-stop safety checks, response normalization, trace collection, and lifecycle hook ordering.
-- The harness owns state shape, message construction, tool execution, persistence, replay, and business-specific final-answer overrides.
+- The harness owns state shape, tool execution, persistence, replay, and business-specific final-answer overrides.
+- `respondWithTools(...)` still calls your `buildMessages(...)` callback, but it prepends a package-owned agent-run-loop system prompt before the returned messages so the default tool-loop contract is not client-dependent.
 
 ### Safety And Stop Reasons
 
@@ -214,7 +215,8 @@ The split of responsibilities is deliberate:
 - `maxWallTimeMs`
 - repeated identical tool-call suppression through `repeatedToolCallGuard`
 - `defaultTextResponseMode: 'require_tool_result'`, which rejects unresolved plain text before any observed tool result unless the harness explicitly overrides classification
-- `rejectedTextRetryLimit: 1`, so unresolved tool-capable text gets one internal correction turn by default before the loop stops
+- `rejectedTextRetryLimit: 2`, so unresolved tool-capable text gets two internal correction turns by default before the loop stops
+- `DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT`, which is prepended automatically so tool-capable callers get a runtime-owned completion-loop contract by default
 
 `runTurnLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
 
@@ -230,16 +232,33 @@ Terminal reasons are stable string literals suitable for harness branching:
 - `timeout`
 - `repeated_tool_call_stopped`
 
+In agent control mode, the loop also supports deterministic terminal control tools:
+
+- `final_answer`
+- `need_user_input`
+- `blocked`
+
+`respondWithTools(...)` enables agent control mode automatically when you use the package-managed `modelRequest` path. In that mode, the runtime injects those internal control-tool definitions through `modelRequest.extraTools`, intercepts them before host tool execution, and returns structured terminal metadata instead of relying on bare assistant text.
+
+When agent control mode is enabled, bare text is protocol-invalid by default. The loop retries or stops it as `rejected_text_response` unless your harness explicitly overrides classification.
+
 The final result keeps `state`, `response`, and `reason`, and also includes:
 
 - `steps`
 - `toolCalls`
 - `classifications`
 - `retries`
+- `controlOutput`
 - `stop`
 - `elapsedMs`
 
 If the loop times out before any model response is available, `result.response` is `null` and `result.stop` carries the timeout detail.
+
+For deterministic agent stops, `result.reason`, `result.controlOutput`, and `result.stop.controlOutput` line up:
+
+- `final_answer` returns `{ kind: 'final_answer', answer, evidenceRefs }`
+- `needs_user_input` returns `{ kind: 'need_user_input', question, reason }`
+- `blocked` returns `{ kind: 'blocked', reason }`
 
 ### Lifecycle Hooks
 
@@ -254,24 +273,32 @@ They do not replace `onTextResponse(...)`, `onToolCallsResponse(...)`, or the ot
 
 ### Turn-Loop Hardening
 
-For tool-capable turns, `respondWithTools(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries once internally by default. English intent-only narration such as "I will check the file" is still labeled more specifically when the fallback heuristic matches.
+For tool-capable turns, `respondWithTools(...)` now applies a package-owned default that keeps unresolved plain text non-terminal before any observed tool result and retries twice internally by default. The package default treats unresolved text as missing required evidence, regardless of language. If a host wants the more specific `intent_only_narration` label, it should return that classification explicitly from `classifyTextResponse(...)`.
 
 Use these hooks when your harness needs hardening against weak tool users:
 
-- `requiresActionEvidence(...)` lets the harness tighten or relax the package default for whether a non-empty text reply still needs proof of action before it can be accepted as final.
+- `requiresActionEvidence(...)` means this turn cannot be considered complete from bare text alone. The package uses it as the central completion contract, while the harness may still tighten or relax that default per turn.
 - `classifyTextResponse(...)` lets the harness override package defaults and explicitly classify replies as `verified_final_response`, `intent_only_narration`, or `non_progressing`.
 - `onRejectedTextResponse(...)` lets the harness persist rejected narration or other non-progressing text before retrying or stopping.
 - `rejectedTextRetryLimit` bounds how many rejected text retries the package should allow before returning `rejected_text_response` instead of false success.
+
+The package-owned completion-loop prompt tells the model that narration is not completion, that read-only inspection can proceed without confirmation, and that announcing an action requires either a tool call in the same assistant turn or continued execution until the action actually happens.
+
+In agent control mode, the package-owned prompt also tells the model to end the run with `final_answer`, `need_user_input`, or `blocked` instead of plain text.
 
 `defaultTextResponseMode` is also available on `runTurnLoop(...)` for callers that want package-owned unresolved-text handling without switching to the `respondWithTools(...)` wrapper.
 
 The package also exports reusable recovery helpers:
 
+- `DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT`
+- `DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION`
 - `DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION`
 - `DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION`
 - `DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION`
 
 These are default exported strings, not mutable runtime settings. A harness should treat them as convenient starting points and override the effective recovery text by returning its own `transientInstruction` from `onRejectedTextResponse(...)`, by returning a custom assessment from `classifyTextResponse(...)`, or by supplying its own validation-recovery instruction after parsing a validation artifact.
+
+`onToolCallsResponse(...)` must return `next: { control: 'continue' }` after tool execution when the loop should re-enter the model. If it omits that continuation request, the runtime stops with `tool_calls_response` by design.
 
 Tool validation failures now return durable JSON artifacts instead of opaque error strings. Use `parseToolValidationFailureArtifact(...)` when the harness wants to detect a validation failure from a tool result and prompt the model to emit a corrected tool call.
 
@@ -349,6 +376,18 @@ const result = await respondWithTools({
       },
     };
   },
+  onFinalAnswerToolCall: async ({ state, controlOutput }) => ({
+    state: {
+      ...state,
+      finalText: controlOutput.answer,
+    },
+  }),
+  onNeedUserInputToolCall: async ({ state, controlOutput }) => ({
+    state: {
+      ...state,
+      finalText: `${controlOutput.question}\n\n${controlOutput.reason}`,
+    },
+  }),
   onTextResponse: async ({ state, responseText, response }) => ({
     state: {
       ...state,
@@ -374,7 +413,7 @@ import {
 const result = await respondWithTools({
   initialState,
   emptyTextRetryLimit: 0,
-  rejectedTextRetryLimit: 1,
+  rejectedTextRetryLimit: 2,
   requiresActionEvidence: ({ state }) => state.awaitingVerifiedAction,
   buildMessages: async ({ state, transientInstruction }) => {
     if (!transientInstruction) {

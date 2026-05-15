@@ -10,17 +10,20 @@ Make `runTurnLoop(...)` continue naturally across languages by owning the defaul
 
 The implementation should preserve the existing guarantee that narrated intent is not treated as executed work, while keeping conversational turns permissive and preserving host overrides for stricter or more domain-specific policy.
 
+The next increment should remove more of the remaining ambiguity in agent mode by introducing explicit runtime control tools for final completion, user-input requests, and blocked outcomes.
+
 ## Current Architecture Summary
 
 - `src/turn-loop.ts` already has useful host policy hooks: `requiresActionEvidence(...)`, `classifyTextResponse(...)`, and `onRejectedTextResponse(...)`.
-- The current default classification path still treats most non-empty text as `verified_final_response` unless it matches the built-in English narration heuristics.
+- The current default classification path already rejects unresolved tool-capable text, but it still uses the English narration heuristic to choose the default rejection subtype.
 - `parsePlainTextToolIntent(...)` already provides a bounded, deterministic text-to-tool-call normalization path and should remain untouched in spirit.
-- Tests in `tests/llm/turn-loop.test.ts` already cover English narration rejection and synthetic tool-call normalization, but they do not yet cover non-English unresolved text.
+- Tests in `tests/llm/turn-loop.test.ts` already cover English narration rejection, non-English rejection, mixed-language rejection, and synthetic tool-call normalization.
+- The runtime already has `ask_user_input` or `human_intervention_request` style tools for clarification and approval flows, but those are not a complete structural stopping protocol.
 - Transcript/UI behavior is host-owned and remains out of scope for this package plan.
 
 Current architecture flaw:
 
-- The prior plan treated `requiresActionEvidence(...)` as the primary continuation gate, which means robust natural continuation still depends on the client making the right policy decision up front. That is too weak for the default package behavior the requirement now calls for.
+- The remaining gap is protocol-level: even after the recent contract hardening, agent mode still lacks explicit runtime control tools for deterministic `final_answer`, `need_user_input`, and `blocked` outcomes, so the runtime still has to interpret some plain text instead of receiving a structural control signal.
 
 ## Proposed Design
 
@@ -37,8 +40,8 @@ Proposed behavior:
 
 Recommended default classification for that last case:
 
-- use `intent_only_narration` when the existing English fallback heuristic matches
-- otherwise use `non_progressing`
+- use `non_progressing` for the default package-owned rejection path
+- keep `intent_only_narration` available only for explicit host classification or legacy heuristics outside the package default acceptance path
 
 This makes the primary correctness rule language-agnostic while preserving the current heuristic as an analytics and recovery-label refinement.
 
@@ -60,9 +63,9 @@ So the package should continue to require the host to decide one of these:
 
 The key difference from the prior plan is that these become overrides and refinements, not prerequisites for safe continuation.
 
-### 3. Preserve bounded recovery and explicit stop reasons
+### 3. Strengthen bounded recovery defaults
 
-No new retry mechanism is needed.
+No new retry mechanism is needed, but the default budget should be stronger.
 
 The existing rejected-text retry path already provides:
 
@@ -70,21 +73,55 @@ The existing rejected-text retry path already provides:
 - explicit retry accounting
 - explicit stop with `rejected_text_response`
 
-This requirement should reuse that path rather than introducing a parallel continuation subsystem.
+This requirement should reuse that path rather than introducing a parallel continuation subsystem, while changing the default retry budget to two retries whenever action evidence is still required.
 
-### 4. Keep English narration heuristics as a secondary signal only
+### 4. Add a runtime-owned agent run loop contract for `respondWithTools(...)`
+
+`buildMessages(...)` remains harness-owned, but `respondWithTools(...)` should wrap it with a package-owned system instruction block.
+
+That block should:
+
+- tell the model it is operating inside an agent run loop
+- allow brief progress narration without treating narration as completion
+- require the model to call tools when work still needs to be performed
+- tell the model that workspace inspection, tool use, file access, search, command execution, and external lookup must go through tools
+- stop only through tool calls, evidence-backed final answers, required missing user input, or permission/safety blocks
+
+This keeps the default behavioral contract package-owned while preserving host control of additional system prompts and transcript construction.
+
+Suggested prompt shape:
+
+```text
+You are operating inside an agent run loop.
+
+You may briefly tell the user what you are about to do, but narration is not completion.
+
+If the task requires workspace inspection, tool use, file access, search, command execution, or external lookup, you must call the appropriate tool.
+
+For read-only inspection, searching, summarizing, and analysis, proceed without confirmation.
+
+Stop only by:
+- calling tools,
+- producing a final answer supported by run evidence,
+- requesting required missing user input,
+- reporting a permission or safety block.
+
+Do not stop after merely announcing intent.
+```
+
+### 5. Keep English narration heuristics as a secondary signal only
 
 The existing `INTENT_ONLY_NARRATION_PATTERNS` can remain, but their role should narrow.
 
 They should:
 
-- refine the rejected-text classification to `intent_only_narration` when they match
+- remain available for legacy or host-specific classification when callers explicitly want that label
 - inform recovery guidance and telemetry
 - remain optional backward-compatible heuristics
 
 They should not remain the only way that action-dependent unresolved text is rejected.
 
-### 5. Clarify docs and examples around package defaults versus host overrides
+### 6. Clarify docs and examples around package defaults versus host overrides
 
 The docs should make one point explicit:
 
@@ -93,6 +130,35 @@ The docs should make one point explicit:
 - `classifyTextResponse(...)` is how a host explicitly accepts a final answer when package defaults would otherwise continue or reject
 
 Without that clarification, callers may accidentally over-reject correct final answers or under-protect action-dependent turns.
+
+### 7. Add explicit runtime control tools in agent mode
+
+Add additive internal control tools for agent-mode stopping:
+
+- `final_answer({ answer, evidenceRefs? })`
+- `need_user_input({ question, reason })`
+- `blocked({ reason })`
+
+Proposed behavior:
+
+- workspace tool call: execute and continue
+- `final_answer(...)`: validate any required evidence, then stop as final answer
+- `need_user_input(...)`: stop as needs-user-input
+- `blocked(...)`: stop as blocked
+- bare text in agent mode: treat as protocol-invalid or unresolved and continue with a runtime nudge
+
+This is cleaner than classifying arbitrary natural language for terminal control, while still preserving text-classification compatibility for hosts that have not adopted the structured control protocol yet.
+
+### 8. Preserve compatibility during rollout
+
+The new control tools should be additive.
+
+They should:
+
+- become the preferred deterministic stop path in agent mode
+- avoid breaking existing hosts that still use text classification
+- keep normal workspace-tool execution semantics unchanged
+- preserve `ask_user_input` or `human_intervention_request` for approval or escalation workflows that are distinct from the runtime's structural control outcomes
 
 ## Flow
 
@@ -107,15 +173,16 @@ flowchart TD
     F -->|yes| G[Use host assessment]
     F -->|no| H{Package tool-capable continuation mode?}
     H -->|no| I[verified_final_response]
-    H -->|yes| J{English narration heuristic matches?}
-    J -->|yes| K[intent_only_narration]
-    J -->|no| L[non_progressing]
+    H -->|yes| L[non_progressing]
     G --> M{Assessment}
     I --> M
-    K --> M
     L --> M
     M -->|verified_final_response| N[onTextResponse]
     M -->|intent_only_narration or non_progressing| O[Rejected-text retry or stop]
+    C --> P{Runtime control tool?}
+    P -->|final_answer| Q[Validate evidence and stop final]
+    P -->|need_user_input| R[Stop needs_user_input]
+    P -->|blocked| S[Stop blocked]
 ```
 
 ## Implementation Plan
@@ -124,35 +191,39 @@ flowchart TD
 
 - [x] Inspect relevant files
   - Review `src/turn-loop.ts` classification order, especially the default text-assessment path.
+  - Review the wrapper boundary for `respondWithTools(...)` so a package-owned agent run loop prompt can be injected without changing host state ownership.
   - Review `README.md` examples and hardening guidance for package defaults, `requiresActionEvidence(...)`, and `classifyTextResponse(...)`.
-  - Review `tests/llm/turn-loop.test.ts` to identify where non-English and mixed-language coverage should be added.
+  - Review `tests/llm/turn-loop.test.ts` to identify remaining gaps such as Japanese coverage, classifier override coverage, and tool-call continuation-stop coverage.
+  - Inspect where agent-mode tools are defined or injected so runtime-owned control tools can be added without colliding with product tools.
 
 ### Phase 2: Make focused changes
 
 - [x] Make focused changes
-  - Update `src/turn-loop.ts` so unresolved text defaults to rejection when the package-owned tool-capable continuation mode is active, even when the English narration heuristic does not match.
-  - Add the smallest additive option needed so the package can own this behavior by default without forcing every current `runTurnLoop(...)` caller into it unintentionally.
-  - Do not introduce any env-var-based toggle for this continuation behavior.
-  - Keep `INTENT_ONLY_NARRATION_PATTERNS` as a fallback refinement that chooses `intent_only_narration` instead of `non_progressing` when it matches.
-  - Avoid adding provider-specific language logic or external language detection.
-  - Update `README.md` so callers understand the package default continuation mode and the role of `requiresActionEvidence(...)` and `classifyTextResponse(...)` as overrides.
+  - Add additive internal runtime control tools for `final_answer`, `need_user_input`, and `blocked` in agent mode.
+  - Define deterministic stop handling for those control tools without changing normal workspace-tool execution behavior.
+  - Treat bare text in the structured agent-mode protocol as protocol-invalid or unresolved, and continue with a runtime nudge instead of stopping deterministically.
+  - Update the runtime-owned system prompt text to describe the agent run loop and the allowed stop conditions explicitly.
+  - Preserve compatibility for hosts that still use text classification or existing human-intervention tools.
+  - Update `README.md` so callers understand when to use runtime control tools versus normal workspace tools.
 
 ### Phase 3: Run validation
 
 - [x] Run validation
-  - Add or update unit coverage in `tests/llm/turn-loop.test.ts` for at least:
-    - a non-English unresolved tool-capable text response
-    - a mixed-language unresolved tool-capable text response
-    - a conversational or explicitly host-classified final text response that still completes normally
-  - Run the scoped unit tests for `tests/llm/turn-loop.test.ts`.
-  - Run any fast related runtime tests if needed after touching shared turn-loop behavior.
+  - Add or update unit coverage for:
+    - `final_answer(...)` stopping deterministically as a final answer
+    - `need_user_input(...)` stopping deterministically as needs-user-input
+    - `blocked(...)` stopping deterministically as blocked
+    - bare text in agent mode being treated as protocol-invalid or unresolved instead of terminal final text
+    - normal workspace-tool calls still executing and continuing unchanged
+  - Run the scoped turn-loop tests and any direct tool/runtime tests touched by the new control-tool plumbing.
+  - Run `npm run check` after touching shared runtime behavior.
 
 ### Phase 4: Update docs/status
 
 - [x] Update docs/status
-  - Mark completed plan tasks as implemented.
-  - Update the requirement doc only if implementation reveals stale or ambiguous wording.
-  - Do not create an E2E spec: this story is internal turn-loop behavior and should be covered with deterministic unit tests.
+  - Reopen the existing requirement and plan to reflect the new structured control-tool requirement.
+  - Mark completed plan tasks as implemented only after the new protocol behavior and tests land.
+  - Do not create an E2E spec: this remains package-internal protocol behavior and should be covered with deterministic unit tests.
 
 ## Tradeoffs
 
@@ -199,6 +270,22 @@ Cons:
 
 **Recommended**: Option C.
 
+### Option D: Add explicit runtime control tools for terminal outcomes
+
+Pros:
+
+- makes agent-mode stopping deterministic
+- removes reliance on ambiguous plain text for final, blocked, or needs-input outcomes
+- composes cleanly with existing workspace-tool execution semantics
+- gives the runtime a cleaner protocol boundary than arbitrary natural-language classification
+
+Cons:
+
+- requires additive runtime protocol surface and stop-reason handling
+- needs careful compatibility behavior for existing hosts that still depend on text classification
+
+**Recommended next increment**: combine Option C with Option D.
+
 ## E2E Coverage Decision
 
 No E2E spec is needed.
@@ -213,14 +300,16 @@ This story changes package-internal response classification and retry behavior, 
 - Resolved: The package does not need multilingual regex libraries. The stronger design is to reject unresolved action text whenever `requiresActionEvidence(...)` remains true.
 - Resolved: Backward compatibility can be preserved by keeping the English narration heuristic as a secondary classification refinement rather than deleting it.
 - Resolved: The earlier architecture flaw was real. Safe continuation should not depend on the client wiring the right callbacks. The package must own a default continuation mode for tool-capable turns.
+- Resolved: The package can inject a runtime-owned agent run loop prompt at the `respondWithTools(...)` wrapper boundary without taking over host transcript persistence.
 
 ### Remaining Risks And Mitigations
 
 - Risk: A package-owned continuation default could surprise permissive `runTurnLoop(...)` callers. Mitigation: make the new policy additive and ensure generic callers can still opt out explicitly.
 - Risk: An env-var toggle would make runtime semantics deployment-dependent and harder to reason about. Mitigation: keep the behavior in explicit package defaults and API options only.
 - Risk: Hosts may still need to explicitly accept some domain-specific final answers. Mitigation: preserve `classifyTextResponse(...)` as the authoritative override path.
-- Risk: `intent_only_narration` telemetry may decrease for non-English cases because more cases will now land as `non_progressing`. Mitigation: accept that as the correct tradeoff unless a future host wants richer semantic labeling.
+- Risk: `intent_only_narration` telemetry may decrease for package-default rejections because more cases will now land as `non_progressing`. Mitigation: accept that as the correct tradeoff unless a future host wants richer semantic labeling.
+- Risk: Injecting a package-owned system prompt could conflict with host-authored system prompts. Mitigation: prepend a stable runtime block while keeping all host-supplied messages intact and documented.
 
 ### Review Outcome
 
-No major architecture flaws remain after revising the package/client responsibility split. The plan is appropriately scoped, keeps the provider boundary pure, avoids language-specific complexity, and makes safe continuation package-owned by default while preserving host override hooks.
+No major architecture flaws remain in the existing hardening work, but the next implementation increment is still required. The recommended direction is to keep the delivered language-agnostic continuation contract and add explicit runtime control tools so agent-mode stopping no longer depends on plain-text interpretation.
