@@ -15,6 +15,7 @@
  * - Tool-call ids are normalized to OpenAI's 40-character limit.
  *
  * Recent changes:
+ * - 2026-05-15: Added additive normalized stop metadata from OpenAI-compatible `finish_reason` values.
  * - 2026-05-15: Switched to the shared provider-facing tool-name translator with reverse mapping for OpenAI-compatible tool calls.
  * - 2026-03-27: Initial package-owned OpenAI-compatible provider implementation.
  */
@@ -25,6 +26,7 @@ import type {
   LLMChatMessage,
   LLMProviderName,
   LLMResponse,
+  LLMStopKind,
   LLMStreamChunk,
   LLMToolDefinition,
   LLMWarning,
@@ -487,6 +489,21 @@ function createWarningChunkEmitter(onChunk: (chunk: LLMStreamChunk) => void, war
   };
 }
 
+function normalizeOpenAIStopKind(finishReason: string | null | undefined): LLMStopKind {
+  switch (finishReason) {
+    case 'tool_calls':
+      return 'tool_call';
+    case 'stop':
+      return 'natural_stop';
+    case 'length':
+      return 'length';
+    case 'content_filter':
+      return 'content_filter';
+    default:
+      return 'unknown';
+  }
+}
+
 export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest): Promise<LLMResponse> {
   const toolNameTranslator = createOpenAIToolNameTranslator(request.tools);
   const openaiMessages = convertMessagesToOpenAI(request.messages, toolNameTranslator);
@@ -648,6 +665,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     request.abortSignal ? { signal: request.abortSignal } : undefined,
   );
   const message = response.choices[0]?.message;
+  const finishReason = response.choices[0]?.finish_reason;
 
   if (!message) {
     throw new Error('No response message received from OpenAI');
@@ -680,6 +698,8 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
         content,
         tool_calls: toolCallsFormatted,
       },
+      stopKind: normalizeOpenAIStopKind(finishReason),
+      providerStopReason: finishReason ?? undefined,
       usage: response.usage
         ? {
           inputTokens: response.usage.prompt_tokens,
@@ -697,6 +717,8 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
       role: 'assistant',
       content,
     },
+    stopKind: normalizeOpenAIStopKind(finishReason),
+    providerStopReason: finishReason ?? undefined,
     usage: response.usage
       ? {
         inputTokens: response.usage.prompt_tokens,

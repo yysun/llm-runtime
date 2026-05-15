@@ -15,7 +15,8 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
- * - 2026-05-15: Replaced the runtime-facade `stream(...)` method with agentic `complete(...)` and `streamComplete(...)` method contracts backed by `agentic-complete.ts`.
+ * - 2026-05-15: Moved runtime-facade completion result/event contracts and HITL resume helpers out of the deleted legacy agentic loop module.
+ * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` contracts to the hardened completion-loop-backed runtime path.
  * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
  * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
@@ -27,9 +28,9 @@
  */
 
 import type {
-  CompleteResult as AgenticCompleteResult,
-  StreamCompleteEvent as AgenticStreamCompleteEvent,
-} from './agentic-complete.js';
+  RuntimeCompleteResult,
+  RuntimeStreamCompleteEvent,
+} from './runtime-complete-contract.js';
 
 export type LLMProviderName =
   | 'openai'
@@ -121,11 +122,20 @@ export interface LLMWarning {
   details?: Record<string, unknown>;
 }
 
+export type LLMStopKind =
+  | 'natural_stop'
+  | 'tool_call'
+  | 'length'
+  | 'content_filter'
+  | 'unknown';
+
 export interface LLMResponse {
   type: 'text' | 'tool_calls';
   content: string;
   tool_calls?: LLMToolCall[];
   assistantMessage: LLMChatMessage;
+  stopKind?: LLMStopKind;
+  providerStopReason?: string;
   usage?: LLMUsage;
   warnings?: LLMWarning[];
 }
@@ -349,13 +359,16 @@ export interface LLMEnvironmentOptions {
 }
 
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
+export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_result';
 export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
   maxIterations?: number;
   humanInputToolName?: string;
+  defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
+  rejectedTextRetryLimit?: number;
 }
 export type LLMRuntimeStreamCompleteOptions = LLMRuntimeCompleteOptions;
-export type LLMRuntimeCompleteResult = AgenticCompleteResult;
-export type LLMRuntimeStreamCompleteEvent = AgenticStreamCompleteEvent;
+export type LLMRuntimeCompleteResult = RuntimeCompleteResult;
+export type LLMRuntimeStreamCompleteEvent = RuntimeStreamCompleteEvent;
 export type LLMRuntimeResolveToolsOptions = Omit<LLMResolveToolsOptions, 'environment'>;
 export type LLMRuntimeExecuteToolOptions = LLMRuntimeResolveToolsOptions & LLMToolExecutionOptions;
 

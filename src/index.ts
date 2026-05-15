@@ -17,7 +17,7 @@
  * - Serves as the primary import target for `core` and external consumers.
  *
  * Recent changes:
- * - 2026-05-15: The runtime facade now exposes bound agentic `complete(...)` and `streamComplete(...)` helpers backed by `agentic-complete.ts`.
+ * - 2026-05-15: The runtime facade now exposes hardened `complete(...)` and `streamComplete(...)` helpers backed by the package completion loop.
  * - 2026-05-15: Exported package-owned `executeToolCall(...)` and `executeToolCalls(...)` helpers.
  * - 2026-05-15: Promoted `createRuntime(...)`, `complete(...)`, and `runCompletionLoop(...)` as the preferred public API names.
  * - 2026-03-29: Exported the generic host-agnostic completion-loop package API.
@@ -35,7 +35,7 @@ export * from './completion-loop.js';
 export {
   createAskUserInputResult,
   createHumanInputToolResult,
-} from './agentic-complete.js';
+} from './runtime-complete-contract.js';
 export {
   DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
   DEFAULT_WORKSPACE_TOOL_HINT,

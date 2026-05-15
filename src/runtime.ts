@@ -2,7 +2,7 @@
  * LLM Package Runtime API
  *
  * Purpose:
- * - Expose per-call provider helpers plus a runtime facade backed by `agentic-complete.ts`.
+ * - Expose per-call provider helpers plus a runtime facade backed by the hardened completion loop.
  *
  * Key features:
  * - Supports explicit `LLMEnvironment` injection for provider/MCP/skill dependencies.
@@ -15,7 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
- * - 2026-05-15: Replaced runtime-facade `stream(...)` with agentic `complete(...)` and `streamComplete(...)` wired directly through `agentic-complete.ts` while preserving tool resolution and execution behavior.
+ * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` methods to the hardened completion loop while preserving the existing runtime result and event contracts.
  * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
  * - 2026-05-15: Changed default built-in exposure to read-only and added package-owned tool execution helpers.
@@ -25,19 +25,11 @@
 
 import * as path from 'path';
 import {
-  complete as runAgenticComplete,
-  streamComplete as runAgenticStreamComplete,
-  type ChatMessage as AgenticChatMessage,
-  type CompleteOptions as AgenticCompleteOptions,
-  type ModelAdapter as AgenticModelAdapter,
-  type RuntimeTool as AgenticRuntimeTool,
-  type ToolCall as AgenticToolCall,
-} from './agentic-complete.js';
-import {
   HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
   createBuiltInToolDefinitions,
 } from './builtins.js';
+import { complete as runCompletionLoopComplete } from './completion-loop.js';
 import {
   createAnthropicClient,
   generateAnthropicResponse,
@@ -60,6 +52,7 @@ import {
   containsAgentRunLoopSystemPrompt,
   upsertManagedSystemPrompt,
 } from './prompt-contracts.js';
+import type { PendingHumanInput } from './runtime-complete-contract.js';
 import { createSkillRegistry } from './skills.js';
 import { createToolRegistry } from './tools.js';
 import type {
@@ -79,6 +72,8 @@ import type {
   LLMResponse,
   LLMRuntime,
   LLMRuntimeCompleteOptions,
+  LLMRuntimeCompleteResult,
+  LLMRuntimeStreamCompleteEvent,
   LLMStreamChunk,
   LLMStreamOptions,
   LLMToolCall,
@@ -149,6 +144,11 @@ function stableStringify(value: unknown): string {
 
   return JSON.stringify(value);
 }
+
+const INTENT_ONLY_NARRATION_PATTERNS = [
+  /^\s*(i(?:['’]?ll| will)|let me|i(?:['’]?m| am) going to|proceeding|checking|searching|looking up)\b/i,
+  /\b(i(?:['’]?ll| will)|let me)\s+(check|search|look|inspect|read|open|analyze|review|find|run)\b/i,
+] as const;
 
 function normalizeSkillRoots(roots?: string[]): string[] {
   return [...new Set((roots ?? []).map((root) => path.resolve(String(root || '').trim())).filter(Boolean))];
@@ -224,66 +224,6 @@ function getOrCreateSkillRegistry(
   return registry;
 }
 
-function stringifyToolCallArguments(value: string | Record<string, unknown>): string {
-  if (typeof value === 'string') {
-    return value;
-  }
-
-  return JSON.stringify(value) ?? '{}';
-}
-
-function normalizeLLMToolCallToAgentic(toolCall: LLMToolCall): AgenticToolCall {
-  return {
-    id: toolCall.id,
-    type: toolCall.type,
-    function: {
-      name: toolCall.function.name,
-      arguments: stringifyToolCallArguments(toolCall.function.arguments),
-    },
-  };
-}
-
-function normalizeAgenticToolCallToLLM(toolCall: AgenticToolCall): LLMToolCall {
-  return {
-    id: toolCall.id,
-    type: 'function',
-    function: {
-      name: toolCall.function.name,
-      arguments: stringifyToolCallArguments(toolCall.function.arguments),
-    },
-  };
-}
-
-function normalizeLLMMessageToAgentic(message: LLMChatMessage): AgenticChatMessage {
-  return {
-    role: message.role,
-    content: message.content,
-    tool_calls: message.tool_calls?.map(normalizeLLMToolCallToAgentic),
-    tool_call_id: message.tool_call_id,
-  };
-}
-
-function normalizeAgenticMessageToLLM(message: AgenticChatMessage): LLMChatMessage {
-  return {
-    role: message.role,
-    content: typeof message.content === 'string'
-      ? message.content
-      : message.content == null
-        ? ''
-        : String(message.content),
-    tool_calls: message.tool_calls?.map(normalizeAgenticToolCallToLLM),
-    tool_call_id: typeof message.tool_call_id === 'string' ? message.tool_call_id : undefined,
-  };
-}
-
-function normalizeAgenticToolArgs(args: unknown): Record<string, unknown> {
-  if (!args || typeof args !== 'object' || Array.isArray(args)) {
-    return { value: args };
-  }
-
-  return args as Record<string, unknown>;
-}
-
 function mergeAbortSignal(
   context: LLMToolExecutionContext | undefined,
   signal: AbortSignal | undefined,
@@ -302,92 +242,407 @@ function getCompleteBuiltIns(selection: BuiltInToolSelection | undefined): Built
   return selection === undefined ? DEFAULT_COMPLETE_BUILT_INS : selection;
 }
 
-function createAgenticRuntimeTool(
-  definition: LLMToolDefinition,
-  requestContext: LLMToolExecutionContext | undefined,
-): AgenticRuntimeTool {
-  const isHumanInputTool = HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(definition.name as any);
+type RuntimeCompletionState = {
+  messages: LLMChatMessage[];
+  output?: string | null;
+  pendingHumanInput?: PendingHumanInput;
+  error?: string;
+  raw?: unknown;
+};
 
+function classifyRuntimeNarration(responseText: string): 'intent_only_narration' | undefined {
+  const normalized = responseText.trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  return INTENT_ONLY_NARRATION_PATTERNS.some((pattern) => pattern.test(normalized))
+    ? 'intent_only_narration'
+    : undefined;
+}
+
+function appendTransientInstruction(
+  messages: LLMChatMessage[],
+  transientInstruction?: string,
+): LLMChatMessage[] {
+  if (!transientInstruction) {
+    return messages;
+  }
+
+  return [...messages, { role: 'system', content: transientInstruction }];
+}
+
+function normalizeToolResultContent(result: unknown): string {
+  if (typeof result === 'string') {
+    return result;
+  }
+
+  if (result === undefined) {
+    return 'null';
+  }
+
+  try {
+    return JSON.stringify(result) ?? 'null';
+  } catch {
+    return JSON.stringify({ error: String(result) });
+  }
+}
+
+function createToolResultMessage(toolCall: LLMToolCall, result: unknown): LLMChatMessage {
   return {
-    name: definition.name,
-    definition: {
-      type: 'function',
-      function: {
-        name: definition.name,
-        description: definition.description,
-        parameters: definition.parameters,
-      },
-    },
-    kind: isHumanInputTool ? 'human_input' : undefined,
-    execute: definition.execute
-      ? async (args, context) => await definition.execute?.(
-        normalizeAgenticToolArgs(args),
-        {
-          ...(mergeAbortSignal(requestContext, context.signal) ?? {}),
-          messages: context.messages.map((message) => ({
-            ...normalizeAgenticMessageToLLM(message),
-            ...(typeof message.name === 'string' ? { name: message.name } : {}),
-          })),
-          toolCallId: context.toolCall.id,
-        },
-      )
-      : undefined,
+    role: 'tool',
+    tool_call_id: toolCall.id,
+    content: normalizeToolResultContent(result),
   };
 }
 
-function createAgenticModelAdapter(
-  environment: LLMEnvironment,
-  request: LLMRuntimeCompleteOptions,
-): AgenticModelAdapter {
-  return {
-    call: async (input) => {
-      const response = await generate({
-        provider: request.provider,
-        model: request.model,
-        messages: input.messages.map(normalizeAgenticMessageToLLM),
-        temperature: request.temperature,
-        maxTokens: request.maxTokens,
-        webSearch: request.webSearch,
-        providerConfig: request.providerConfig,
-        providers: request.providers,
-        mcpConfig: request.mcpConfig,
-        skillRoots: request.skillRoots,
-        builtIns: getCompleteBuiltIns(request.builtIns),
-        extraTools: request.extraTools,
-        tools: request.tools,
-        environment,
-        context: mergeAbortSignal(request.context, input.signal),
-      });
-
-      return {
-        message: normalizeLLMMessageToAgentic(response.assistantMessage),
-        raw: response,
-      };
-    },
-  };
+function isToolExecutionFailureArtifact(value: unknown): value is LLMToolExecutionFailureArtifact {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && (value as { errorType?: unknown }).errorType === 'tool_execution_failed'
+    && typeof (value as { message?: unknown }).message === 'string',
+  );
 }
 
-async function createAgenticCompleteOptions(
+function buildRuntimeCompletionModelRequest(
   environment: LLMEnvironment,
   request: LLMRuntimeCompleteOptions,
-): Promise<AgenticCompleteOptions> {
-  const resolvedTools = await buildResolvedToolSetAsync({
-    environment,
+) {
+  return {
+    provider: request.provider,
+    model: request.model,
+    temperature: request.temperature,
+    maxTokens: request.maxTokens,
+    webSearch: request.webSearch,
+    providerConfig: request.providerConfig,
+    providers: request.providers,
+    mcpConfig: request.mcpConfig,
+    skillRoots: request.skillRoots,
     builtIns: getCompleteBuiltIns(request.builtIns),
     extraTools: request.extraTools,
     tools: request.tools,
-  });
+    environment,
+    context: request.context,
+  };
+}
+
+function createRuntimeFailureMessage(reason: string): string {
+  switch (reason) {
+    case 'rejected_text_response':
+      return 'Assistant response did not complete the task with required tool evidence.';
+    case 'empty_text_stop':
+      return 'Assistant returned neither tool calls nor non-empty text.';
+    case 'tool_calls_response':
+      return 'Completion loop stopped after handling tool calls.';
+    case 'unhandled_response':
+      return 'Assistant returned an unhandled response.';
+    case 'timeout':
+      return 'Completion loop timed out before producing a final answer.';
+    case 'repeated_tool_call_stopped':
+      return 'Completion loop stopped after repeating the same tool calls.';
+    case 'max_tool_rounds_exceeded':
+      return 'Completion loop exceeded the maximum number of consecutive tool turns.';
+    default:
+      return 'Completion loop failed before producing a final answer.';
+  }
+}
+
+function adaptRuntimeCompleteResult(result: {
+  state: RuntimeCompletionState;
+  reason: string;
+  response: LLMResponse | null;
+  stop: { maxIterations: number };
+}): LLMRuntimeCompleteResult {
+  if (result.state.pendingHumanInput) {
+    return {
+      status: 'waiting_for_human',
+      messages: result.state.messages,
+      pendingHumanInput: result.state.pendingHumanInput,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'text_response' && result.state.output !== undefined) {
+    return {
+      status: 'completed',
+      messages: result.state.messages,
+      output: result.state.output,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'max_iterations_exceeded') {
+    return {
+      status: 'max_iterations',
+      messages: result.state.messages,
+      error: result.state.error ?? `Reached maxIterations=${result.stop.maxIterations} before completion.`,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
 
   return {
-    model: createAgenticModelAdapter(environment, request),
-    messages: upsertManagedSystemPrompt(request.messages, {
-      includeAgentRunLoopContract: true,
-    }).map(normalizeLLMMessageToAgentic),
-    tools: Object.values(resolvedTools).map((tool) => createAgenticRuntimeTool(tool, request.context)),
-    ...(request.maxIterations !== undefined ? { maxIterations: request.maxIterations } : {}),
-    ...(request.humanInputToolName ? { humanInputToolName: request.humanInputToolName } : {}),
-    signal: request.context?.abortSignal,
+    status: 'failed',
+    messages: result.state.messages,
+    error: result.state.error ?? createRuntimeFailureMessage(result.reason),
+    raw: result.state.raw ?? result.response ?? undefined,
   };
+}
+
+function createAsyncEventQueue<T>() {
+  const pendingValues: T[] = [];
+  const pendingResolvers: Array<(value: IteratorResult<T>) => void> = [];
+  let closed = false;
+
+  return {
+    push(value: T) {
+      if (closed) {
+        return;
+      }
+
+      const resolver = pendingResolvers.shift();
+      if (resolver) {
+        resolver({ value, done: false });
+        return;
+      }
+
+      pendingValues.push(value);
+    },
+    close() {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      while (pendingResolvers.length > 0) {
+        pendingResolvers.shift()?.({ value: undefined as T, done: true });
+      }
+    },
+    async *iterate(): AsyncGenerator<T> {
+      while (true) {
+        if (pendingValues.length > 0) {
+          yield pendingValues.shift() as T;
+          continue;
+        }
+
+        if (closed) {
+          return;
+        }
+
+        const next = await new Promise<IteratorResult<T>>((resolve) => {
+          pendingResolvers.push(resolve);
+        });
+
+        if (next.done) {
+          return;
+        }
+
+        yield next.value;
+      }
+    },
+  };
+}
+
+function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runRuntimeCompletion(
+  environment: LLMEnvironment,
+  request: LLMRuntimeCompleteOptions,
+  emitEvent?: (event: LLMRuntimeStreamCompleteEvent) => Promise<void> | void,
+): Promise<LLMRuntimeCompleteResult> {
+  const humanInputToolName = request.humanInputToolName ?? 'ask_user_input';
+  const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
+    initialState: {
+      messages: request.messages,
+    },
+    modelRequest: buildRuntimeCompletionModelRequest(environment, request),
+    maxIterations: request.maxIterations,
+    defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
+    rejectedTextRetryLimit: request.rejectedTextRetryLimit,
+    abortSignal: request.context?.abortSignal,
+    buildMessages: async ({ state, transientInstruction }) => appendTransientInstruction(state.messages, transientInstruction),
+    onIterationStart: async ({ iteration }) => {
+      await emitEvent?.({ type: 'model_start', iteration });
+    },
+    onModelResponse: async ({ iteration, response }) => {
+      await emitEvent?.({
+        type: 'assistant_message',
+        message: response.assistantMessage,
+        iteration,
+      });
+    },
+    classifyTextResponse: async ({ responseText }) => classifyRuntimeNarration(responseText),
+    onTextResponse: async ({ state, responseText, response }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        output: responseText,
+        raw: response,
+      },
+    }),
+    onRejectedTextResponse: async ({ state, response, responseText }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        error: `Assistant response did not complete the task with required evidence: ${responseText}`,
+        raw: response,
+      },
+    }),
+    onToolCallsResponse: async ({ state, response, toolExecutor, iteration }) => {
+      const nextMessages = [...state.messages, response.assistantMessage];
+      const toolCalls = response.tool_calls ?? [];
+      const humanInputToolCalls = toolCalls.filter((toolCall) => (
+        toolCall.function.name === humanInputToolName
+        || HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolCall.function.name as any)
+      ));
+
+      if (humanInputToolCalls.length > 0) {
+        if (toolCalls.length !== 1 || humanInputToolCalls.length !== 1) {
+          return {
+            state: {
+              ...state,
+              messages: nextMessages,
+              error: 'Assistant mixed ask_user_input with other tool calls in the same turn. ask_user_input must be the only tool call when pausing for human input.',
+              raw: response,
+            },
+          };
+        }
+
+        const pendingToolCall = humanInputToolCalls[0];
+        const parsedArguments = parseToolCallArguments(pendingToolCall);
+        if (!parsedArguments.ok) {
+          return {
+            state: {
+              ...state,
+              messages: nextMessages,
+              error: parsedArguments.message,
+              raw: response,
+            },
+          };
+        }
+
+        const pendingHumanInput: PendingHumanInput = {
+          toolCallId: pendingToolCall.id,
+          toolName: pendingToolCall.function.name,
+          request: parsedArguments.args,
+        };
+
+        return {
+          state: {
+            ...state,
+            messages: nextMessages,
+            pendingHumanInput,
+            raw: response,
+          },
+        };
+      }
+
+      if (!toolExecutor) {
+        return {
+          state: {
+            ...state,
+            messages: nextMessages,
+            error: 'Tool executor unavailable for runtime completion.',
+            raw: response,
+          },
+        };
+      }
+
+      const toolMessages = [...nextMessages];
+      for (const toolCall of toolCalls) {
+        const parsedArguments = parseToolCallArguments(toolCall);
+        const executionContext: LLMToolExecutionContext = {
+          ...(request.context ?? {}),
+          messages: toolMessages.map((message) => ({ ...message })),
+        };
+        await emitEvent?.({
+          type: 'tool_start',
+          toolCall,
+          args: parsedArguments.ok ? parsedArguments.args : undefined,
+          iteration,
+        });
+
+        const toolResult = await toolExecutor.executeToolCall(
+          toolCall,
+          executionContext,
+          { errorMode: 'return-artifact' },
+        );
+        toolMessages.push(createToolResultMessage(toolCall, toolResult));
+
+        if (isToolExecutionFailureArtifact(toolResult)) {
+          await emitEvent?.({
+            type: 'tool_error',
+            toolCall,
+            error: toolResult.message,
+            iteration,
+          });
+          continue;
+        }
+
+        await emitEvent?.({
+          type: 'tool_result',
+          toolCall,
+          result: toolResult,
+          iteration,
+        });
+      }
+
+      return {
+        state: {
+          ...state,
+          messages: toolMessages,
+          raw: response,
+        },
+        next: { control: 'continue' },
+      };
+    },
+    onEmptyTextStop: async ({ state, response }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        error: 'Assistant returned neither tool calls nor non-empty text.',
+        raw: response,
+      },
+    }),
+    onUnhandledResponse: async ({ state, response }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        error: 'Assistant returned an unhandled response.',
+        raw: response,
+      },
+    }),
+  });
+
+  const runtimeResult = adaptRuntimeCompleteResult(loopResult);
+
+  if (runtimeResult.status === 'waiting_for_human') {
+    await emitEvent?.({
+      type: 'waiting_for_human',
+      pendingHumanInput: runtimeResult.pendingHumanInput!,
+      messages: runtimeResult.messages,
+      iteration: loopResult.iterations,
+    });
+    return runtimeResult;
+  }
+
+  if (runtimeResult.status === 'completed') {
+    await emitEvent?.({
+      type: 'completed',
+      result: runtimeResult,
+      iteration: loopResult.iterations,
+    });
+    return runtimeResult;
+  }
+
+  await emitEvent?.({
+    type: 'failed',
+    result: runtimeResult,
+    iteration: loopResult.iterations,
+  });
+  return runtimeResult;
 }
 
 export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
@@ -411,13 +666,26 @@ export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
       ...request,
       environment: runtime,
     }),
-    complete: async (request) => await runAgenticComplete(
-      await createAgenticCompleteOptions(runtime, request),
-    ),
+    complete: async (request) => await runRuntimeCompletion(runtime, request),
     streamComplete: async function* (request) {
-      const completeOptions = await createAgenticCompleteOptions(runtime, request);
+      const events = createAsyncEventQueue<LLMRuntimeStreamCompleteEvent>();
+      void runRuntimeCompletion(runtime, request, async (event) => {
+        events.push(event);
+      }).catch(async (error) => {
+        events.push({
+          type: 'failed',
+          result: {
+            status: 'failed',
+            messages: request.messages,
+            error: stringifyError(error),
+          },
+          iteration: 0,
+        });
+      }).finally(() => {
+        events.close();
+      });
 
-      for await (const event of runAgenticStreamComplete(completeOptions)) {
+      for await (const event of events.iterate()) {
         yield event;
       }
     },

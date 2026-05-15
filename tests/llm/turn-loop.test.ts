@@ -320,7 +320,7 @@ describe('llm-runtime completion loop', () => {
     });
     expect(String(seenMessages[0]?.[0]?.content ?? '').match(/<llm-runtime-loop-contract>/g)?.length ?? 0).toBe(1);
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
-    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires required user input.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires user input.');
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Prefer action over explanation.');
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before safe discovery.');
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use ask_user_input only when:');

@@ -57,7 +57,10 @@ import {
   type LLMEnvironmentOptions,
   type SkillFileSystemAdapter,
 } from '../../src/index.js';
-import { askUserInputTool } from '../../src/agentic-complete.js';
+import {
+  ASK_USER_INPUT_TOOL_DESCRIPTION,
+  ASK_USER_INPUT_TOOL_PARAMETERS,
+} from '../../src/human-input-contract.js';
 
 function createMockSkillFileSystem(files: Record<string, string>): SkillFileSystemAdapter {
   const normalizedFiles = new Map(
@@ -345,7 +348,7 @@ describe('llm-runtime runtime', () => {
     await expect(runtime.dispose()).resolves.toBeUndefined();
   });
 
-  it('runs runtime.complete through agentic-complete with the existing tool system', async () => {
+  it('runs runtime.complete through the hardened completion loop with the existing tool system', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const lookupToolCall = {
@@ -429,13 +432,13 @@ describe('llm-runtime runtime', () => {
       }),
     ]));
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
-    expect(seenSystemPrompts[0]).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires required user input.');
+    expect(seenSystemPrompts[0]).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires user input.');
     expect(seenSystemPrompts[0]).toContain('Prefer action over explanation.');
 
     await runtime.dispose();
   });
 
-  it('treats plain assistant text as terminal even when it announces future work', async () => {
+  it('rejects plain assistant narration that only announces future work', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     mockGenerateOpenAIResponse.mockResolvedValue({
@@ -461,11 +464,9 @@ describe('llm-runtime runtime', () => {
       messages: [{ role: 'user', content: 'Inspect the project files.' }],
     });
 
-    expect(result).toMatchObject({
-      status: 'completed',
-      output: 'I will inspect the project files next.',
-    });
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('required evidence');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
 
     await runtime.dispose();
   });
@@ -591,7 +592,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('defaults runtime.complete to ask_user_input and passes request context into agentic tools', async () => {
+  it('defaults runtime.complete to ask_user_input and passes request context into completion-loop tools', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const abortController = new AbortController();
@@ -703,7 +704,7 @@ describe('llm-runtime runtime', () => {
     expect(createAskUserInputResult(pending, answer)).toEqual(createHumanInputToolResult(pending, answer));
   });
 
-  it('reuses the canonical ask_user_input contract in the agentic helper tool', () => {
+  it('reuses the canonical ask_user_input contract in the built-in tool catalog', () => {
     const tool = resolveTools({
       builtIns: {
         ask_user_input: true,
@@ -711,8 +712,8 @@ describe('llm-runtime runtime', () => {
     }).ask_user_input;
 
     expect(tool).toBeDefined();
-    expect(askUserInputTool.definition.function.description).toBe(tool?.description);
-    expect(askUserInputTool.definition.function.parameters).toEqual(tool?.parameters);
+    expect(ASK_USER_INPUT_TOOL_DESCRIPTION).toBe(tool?.description);
+    expect(ASK_USER_INPUT_TOOL_PARAMETERS).toEqual(tool?.parameters);
   });
 
   it('streams agentic lifecycle events through runtime.streamComplete', async () => {

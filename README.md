@@ -17,7 +17,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 ## What This Package Owns
 
 - Provider dispatch for `generate(...)`
-- Bound runtime-facade agentic helpers through `runtime.complete(...)` and `runtime.streamComplete(...)`
+- Bound runtime-facade hardened completion helpers through `runtime.complete(...)` and `runtime.streamComplete(...)`
 - Generic host-agnostic completion orchestration through `complete(...)`, with `runCompletionLoop(...)` as the lower-level API
 - Intrinsic completion-loop safety limits, stop semantics, trace summaries, and lifecycle hooks
 - Built-in tools such as file access, shell execution, and skill loading
@@ -44,7 +44,7 @@ The published package targets Node.js 18 and later and exposes a single root ent
 - `complete(...)`
 - `runCompletionLoop(...)`
 
-The package is per-call first. You can call `generate(...)` directly, use `complete(...)` or `runCompletionLoop(...)` for callback-driven orchestration, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies plus bound agentic helpers.
+The package is per-call first. You can call `generate(...)` directly, use `complete(...)` or `runCompletionLoop(...)` for callback-driven orchestration, or create an explicit `runtime` when your harness wants stable provider, MCP, and skill dependencies plus bound hardened completion helpers.
 
 ## Cleanup
 
@@ -189,18 +189,20 @@ Skills are reusable instruction assets discovered from skill roots and loaded th
 
 ## `runtime.complete(...)` / `runtime.streamComplete(...)`
 
-The runtime facade exposes a package-owned agentic helper for harnesses that want one bounded tool loop without wiring `runCompletionLoop(...)` callbacks by hand.
+The runtime facade exposes the same hardened package-owned completion loop through a simpler runtime-shaped contract for harnesses that want one bounded tool loop without wiring `runCompletionLoop(...)` callbacks by hand.
 
-The runtime helper contract is intentionally simple:
+The runtime helper behavior is:
 
 - If the assistant returns one or more normal tool calls, the runtime executes them, appends tool results, and continues the loop.
 - If the assistant calls `ask_user_input` as the only tool call in the turn, the runtime pauses and returns `status: 'waiting_for_human'` instead of executing that tool.
 - If the assistant mixes `ask_user_input` with any other tool call in the same turn, the runtime fails the turn instead of partially executing tools before pausing.
-- If the assistant returns plain text without tool calls, that text is terminal for the run, even if it narrates future work like "I will...".
+- By default, runtime completion uses `defaultTextResponseMode: 'require_tool_result'`, so unresolved plain text is not terminal before current-run tool evidence exists.
+- Intent-only narration such as "I will inspect the files now" is retried and then rejected instead of being treated as a completed run.
+- Final plain text is still accepted after the current run has produced the required tool evidence, or when the caller explicitly opts into a more permissive text mode.
 - If the assistant returns neither tool calls nor non-empty text, the runtime fails the turn.
 - If the loop does not reach a terminal state before `maxIterations`, it returns `status: 'max_iterations'`.
 
-This simple runtime helper does not apply the generic `complete(...)` hardening and text-classification callbacks described later in this README. Use `complete(...)` or `runCompletionLoop(...)` when your harness needs callback-driven recovery, custom text classification, or package-managed control-tool handling.
+`runtime.complete(...)` and `runtime.streamComplete(...)` keep the simple runtime result and event contract, but they no longer bypass the generic `complete(...)` hardening described later in this README. Use `complete(...)` or `runCompletionLoop(...)` when your harness needs callback-driven lifecycle hooks, host-owned classification logic, or direct access to the lower-level loop result metadata.
 
 When a run pauses for human input, resume it by appending a tool-result message created with `createHumanInputToolResult(...)` or `createAskUserInputResult(...)` and then calling `runtime.complete(...)` or `runtime.streamComplete(...)` again.
 

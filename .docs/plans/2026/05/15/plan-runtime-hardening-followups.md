@@ -6,15 +6,17 @@
 
 ## Objective
 
-Close the remaining hardening gaps in the completion loop, provider adapters, and tool-execution helpers while preserving existing public behavior for callers that do not opt into new ergonomics.
+Close the remaining hardening gaps in the completion loop, provider adapters, tool-execution helpers, and runtime facade while preserving existing public behavior for callers that do not opt into new ergonomics.
 
 ## Current Architecture Summary
 
 - `src/completion-loop.ts` owns loop repetition, agent-control handling, response classification, stop metadata, and the preferred `complete(...)` wrapper.
+- `src/runtime.ts` still routes the public runtime facade `complete(...)` and `streamComplete(...)` through `src/agentic-complete.ts`, which treats any non-empty assistant text as terminal.
 - `complete(...)` currently decides default evidence requirements by comparing the current count of `role: 'tool'` messages against a baseline count captured from the first built message set.
 - `src/runtime.ts` owns tool resolution and exposes package-owned `executeToolCall(...)` and `executeToolCalls(...)` helpers, but those helpers currently throw on invalid JSON, unknown tools, and non-executable tool definitions.
 - Runtime-facade `complete(...)` binds model invocation to the runtime environment, but `onToolCallsResponse(...)` does not receive an executor bound to the same effective tool surface.
 - `src/openai-direct.ts` has provider-facing tool-name translation with reverse mapping. `src/anthropic-direct.ts` and `src/google-direct.ts` still pass runtime tool names directly.
+- `LLMResponse` currently omits normalized stop metadata even when providers return stop reasons such as OpenAI `finish_reason`.
 - Focused coverage belongs in `tests/llm/turn-loop.test.ts`, `tests/llm/runtime.test.ts`, and the provider adapter suites.
 
 ## Proposed Design
@@ -81,6 +83,29 @@ Planned behavior:
 - Keep `callModel`-only callers unchanged; they can continue to execute tools themselves or ignore the optional executor.
 - Make the bound executor use the new recoverable error mode when the caller requests it.
 
+### 6. Route the runtime facade through the hardened completion loop
+
+Replace the runtime facade's dependency on `src/agentic-complete.ts` with the package-managed `src/completion-loop.ts` path while keeping the runtime result contract stable.
+
+Planned behavior:
+
+- Build runtime-facade loop state from the existing `LLMRuntimeCompleteOptions` request and resolved runtime environment.
+- Reuse the package-managed `modelRequest` path so runtime completion inherits the same prompt contract, tool resolution, bound executor, evidence tracking, and retry policy as top-level `complete(...)`.
+- Default the runtime facade to `defaultTextResponseMode: 'require_tool_result'` for agentic execution unless the caller explicitly overrides it.
+- Adapt loop terminal states back into the existing runtime result shape so completed, waiting-for-input, blocked, failed, and max-iteration outcomes remain source-compatible.
+- Make `streamComplete(...)` emit the hardened loop events or an additive compatibility projection rather than the permissive legacy stream events.
+
+### 7. Preserve additive provider stop metadata
+
+Extend `LLMResponse` with a normalized stop-kind plus raw provider stop reason so hosts can inspect why the model stopped without changing existing response handling.
+
+Planned behavior:
+
+- Add a public `LLMStopKind` union to `src/types.ts`.
+- Add additive `stopKind?: LLMStopKind` and `providerStopReason?: string` fields to `LLMResponse`.
+- Map OpenAI-compatible `finish_reason` values such as `stop`, `tool_calls`, `length`, and `content_filter` into normalized stop kinds.
+- Leave providers that do not currently expose stop reasons unchanged unless their adapters can populate the same additive fields safely.
+
 ## Flow
 
 ```mermaid
@@ -109,6 +134,7 @@ flowchart TD
   - Review `src/runtime.ts` and `src/types.ts` for the current `executeToolCall(...)`, runtime facade, and tool-resolution option types.
   - Review `src/openai-direct.ts`, `src/anthropic-direct.ts`, and `src/google-direct.ts` for tool definition conversion, assistant tool-call replay, and returned tool-call mapping.
   - Review existing tests in `tests/llm/turn-loop.test.ts`, `tests/llm/runtime.test.ts`, and provider adapter suites to place focused regression coverage.
+  - Confirm that the public runtime facade still routes through `src/agentic-complete.ts` and reproduces the narration-as-completion bug.
 
 ### Phase 2: Make focused changes
 
@@ -119,6 +145,9 @@ flowchart TD
   - Add opt-in non-throwing tool-execution artifacts to `executeToolCall(...)` and `executeToolCalls(...)` while preserving default throwing behavior.
   - Add an optional bound `toolExecutor` to `onToolCallsResponse(...)` params on package-managed completion paths.
   - Update public types and source file comment blocks for touched source files.
+  - Rewire `createRuntime().complete(...)` and `createRuntime().streamComplete(...)` to the hardened completion-loop path.
+  - Add a default runtime watchdog classification for intent-only narration and make the runtime facade strict by default.
+  - Extend `LLMResponse` and OpenAI-compatible responses with additive stop metadata.
 
 ### Phase 3: Run validation
 
@@ -129,16 +158,17 @@ flowchart TD
   - Add runtime tests for default throwing tool execution and opt-in recoverable artifacts.
   - Add runtime or completion-loop tests proving the bound executor uses the same per-call tool surface as the model request.
   - Add provider adapter tests for Anthropic and Google tool-name round trips, plus shared translator collision and long-name cases.
-  - Run focused tests for the touched suites, then run `npm run check`.
-  - Verified with focused unit tests, full unit tests, `npm run check`, and `npm run build`.
+  - Add runtime tests proving narration-only assistant text is rejected on the runtime facade before tool evidence exists.
+  - Add runtime tests proving tool-backed completion still succeeds through the runtime facade.
+  - Add provider tests for additive stop metadata on OpenAI-compatible responses.
+  - Run focused tests for the touched suites, then run `npm run build`.
 
 ### Phase 4: Update docs/status
 
 - [x] Update docs/status
-  - Updated README snippets for the bound executor and recoverable artifact mode.
-  - Updated the REQ acceptance checkboxes after implementation and validation passed.
-  - Added a done doc after implementation completed.
-  - Deferred the follow-up wiki refresh until this implementation lands in git history, because the wiki ingest workflow reads committed `HEAD` and ignores uncommitted changes.
+  - Update the runtime-facing documentation and relevant source-file comment blocks to reflect the hardened runtime facade path.
+  - Update the REQ acceptance checkboxes after implementation and validation pass.
+  - Add or refresh the done doc after the full RPD sequence completes.
 
 ## E2E Decision
 
@@ -157,15 +187,25 @@ Review notes:
 - The non-throwing execution artifact should be intentionally small and stable. It should not reuse validation artifacts if that would blur schema-validation failures with execution-surface failures.
 - The bound executor must be optional and additive. Existing hosts that own execution should not be forced into package-owned execution semantics.
 - Guard reordering must preserve valid terminal control-tool precedence. The regression tests should prove both malformed retries and valid terminal stops.
+- Routing the runtime facade through the hardened loop is lower risk than trying to duplicate the new watchdog logic inside `src/agentic-complete.ts`, because it removes the split behavior instead of maintaining two completion policies.
+- The runtime default should be strict for agentic work. If a future host needs permissive chat semantics from the runtime facade, that should be an explicit opt-out instead of the default.
 
 Tradeoffs:
 
 - A callback-return flag such as `observedToolEvidence` would be more explicit than inferring progress from `continue`, but it would add more caller burden. The initial implementation can infer progress for compatibility and reserve an explicit flag for a later refinement if needed.
 - A single strict common provider name policy is simpler, but provider-specific policy inputs keep the package flexible if Anthropic or Google constraints differ from OpenAI.
 - Returning artifacts for executor-thrown errors is useful for agent loops, but it can hide severe programming mistakes if made the default. Keeping `throw` as the default preserves the current library contract.
+- Reusing the hardened completion loop may require a small compatibility adapter for runtime result shapes, but that tradeoff is preferable to preserving two public `complete()` implementations with divergent safety behavior.
+- Stop metadata should remain observational only. It can inform watchdogs and hosts, but it should not be treated as proof that work is actually complete.
 
 ## Open Questions
 
 - Should `return-artifact` catch errors thrown by executable tool implementations, or only pre-execution resolution and argument errors?
 - Should the bound `toolExecutor` expose a helper for converting results into `role: 'tool'` chat messages, or should it return raw execution results only?
 - Should current-run tool-progress tracking be exposed in trace metadata for debugging, or kept as an internal acceptance signal only?
+
+Decision update:
+
+- Rewire the runtime facade to the hardened loop now rather than adding a second copy of watchdog logic to `src/agentic-complete.ts`.
+- Add a small English-biased default narration classifier for obvious intent-only text on the runtime facade, with structural evidence checks still providing the stronger language-agnostic guard.
+- Treat stop metadata as additive diagnostics only, not as a completion signal.

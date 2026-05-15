@@ -35,6 +35,7 @@ describe('llm-runtime openai-direct', () => {
             return {
               choices: [
                 {
+                  finish_reason: 'tool_calls',
                   message: {
                     content: 'Need normalized MCP tool',
                     tool_calls: [
@@ -80,6 +81,8 @@ describe('llm-runtime openai-direct', () => {
     expect(providerToolName.length).toBeLessThanOrEqual(64);
     expect(response.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
     expect(response.assistantMessage.tool_calls?.[0]?.function.name).toBe(runtimeToolName);
+    expect(response.stopKind).toBe('tool_call');
+    expect(response.providerStopReason).toBe('tool_calls');
   });
 
   it('serializes reasoning effort using the chat-completions reasoning_effort field', async () => {
@@ -92,6 +95,7 @@ describe('llm-runtime openai-direct', () => {
             return {
               choices: [
                 {
+                  finish_reason: 'stop',
                   message: {
                     content: 'reasoning enabled',
                   },
@@ -103,7 +107,7 @@ describe('llm-runtime openai-direct', () => {
       },
     } as any;
 
-    await generateOpenAIResponse({
+    const response = await generateOpenAIResponse({
       client: fakeClient,
       provider: 'openai',
       model: 'gpt-5',
@@ -120,6 +124,8 @@ describe('llm-runtime openai-direct', () => {
       reasoning_effort: 'medium',
     }));
     expect(capturedRequest).not.toHaveProperty('reasoning');
+    expect(response.stopKind).toBe('natural_stop');
+    expect(response.providerStopReason).toBe('stop');
   });
 
   it('passes chat-completions web search options through to OpenAI', async () => {
@@ -265,6 +271,8 @@ describe('llm-runtime openai-direct', () => {
     expect(response).toEqual({
       type: 'tool_calls',
       content: 'Need a tool',
+      stopKind: 'unknown',
+      providerStopReason: undefined,
       tool_calls: [
         {
           id: 'tool-call-1',

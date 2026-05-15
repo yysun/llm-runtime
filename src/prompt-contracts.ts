@@ -5,7 +5,7 @@ const AGENT_RUN_LOOP_PROMPT_MARKER = 'You are operating inside an agent run loop
 const AGENT_RUN_LOOP_PROMPT_BLOCK = [
   AGENT_RUN_LOOP_PROMPT_MARKER,
   '',
-  'Your job is to continue until the user\'s task is complete, blocked, or requires required user input.',
+  'Your job is to continue until the user\'s task is complete, blocked, or requires user input.',
   '',
   'You may briefly tell the user what you are about to do, but narration is not completion. Do not stop after merely announcing intent.',
   '',
