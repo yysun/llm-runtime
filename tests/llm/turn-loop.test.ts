@@ -42,7 +42,7 @@ import {
   runTurnLoop as legacyPathRunTurnLoop,
   respondWithTools as legacyPathRespondWithTools,
 } from '../../src/turn-loop.js';
-import type { LLMChatMessage, LLMResponse, PendingHitlToolResult } from '../../src/types.js';
+import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
 function text(content: string): LLMResponse {
   return {
@@ -70,26 +70,6 @@ function toolCall(name: string, args: Record<string, unknown>, id = 'tool-1'): L
         function: { name, arguments: JSON.stringify(args) },
       }],
     },
-  };
-}
-
-function pendingUserInputResult(requestId = 'hitl-pending-1'): PendingHitlToolResult {
-  return {
-    ok: false,
-    pending: true,
-    status: 'pending',
-    confirmed: false,
-    terminalReason: 'pending_user_input',
-    suspended: true,
-    requestId,
-    type: 'single-select',
-    allowSkip: false,
-    questions: [{
-      header: 'Format',
-      id: 'format',
-      question: 'Which format?',
-      options: [{ id: 'pdf', label: 'PDF' }],
-    }],
   };
 }
 
@@ -150,7 +130,6 @@ describe('llm-runtime completion loop', () => {
             { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
           ],
         },
-        acknowledgedEvidence: { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText }) => ({
@@ -181,7 +160,6 @@ describe('llm-runtime completion loop', () => {
             { role: 'user', content: `Compacted summary of ${response.tool_calls?.[0]?.function.name} result.` } satisfies LLMChatMessage,
           ],
         },
-        acknowledgedEvidence: { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText }) => ({
@@ -443,9 +421,6 @@ describe('llm-runtime completion loop', () => {
               } satisfies LLMChatMessage,
             ],
         },
-        acknowledgedEvidence: response.tool_calls?.[0]?.function.name === 'ask_user_input'
-          ? { interaction: true }
-          : { action: true },
         next: { control: 'continue' },
       }),
       onRejectedTextResponse: async ({ state, classification, responseText, response }) => ({
@@ -745,6 +720,73 @@ describe('llm-runtime completion loop', () => {
     }));
   });
 
+  it('complete does not enable agent control mode when no control handler is wired', async () => {
+    const responses = [
+      toolCall('lookup_record', { id: '42' }, 'lookup-bound-1'),
+      text('Found record 42.'),
+    ];
+    mockGenerate.mockImplementation(async () => responses.shift() ?? text('unexpected'));
+    mockExecuteToolCall.mockResolvedValueOnce(JSON.stringify({ ok: true, id: '42' }));
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Lookup record 42.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      modelRequest: {
+        provider: 'openai',
+        model: 'gpt-5',
+        builtIns: false,
+        extraTools: [{
+          name: 'lookup_record',
+          description: 'Lookup a record.',
+          evidenceKind: 'read',
+          parameters: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+            additionalProperties: false,
+          },
+        }],
+      },
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response, toolExecutor }) => {
+        const toolResult = await toolExecutor?.executeToolCall(response.tool_calls?.[0]!);
+        return {
+          state: {
+            ...state,
+            messages: [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: String(toolResult),
+              } satisfies LLMChatMessage,
+            ],
+          },
+          next: { control: 'continue' },
+        };
+      },
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('Found record 42.');
+    expect(mockGenerate).toHaveBeenCalledWith(expect.not.objectContaining({
+      extraTools: expect.arrayContaining([expect.objectContaining({ name: 'final_answer' })]),
+    }));
+    for (const call of mockGenerate.mock.calls) {
+      const passedExtraTools = (call[0]?.extraTools ?? []) as Array<{ name: string }>;
+      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('final_answer');
+      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('need_user_input');
+      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('blocked');
+    }
+  });
+
   it('does not treat human-input tools as action evidence', async () => {
     const responses = [
       toolCall('ask_user_input', {
@@ -927,9 +969,6 @@ describe('llm-runtime completion loop', () => {
               } satisfies LLMChatMessage,
             ],
         },
-        acknowledgedEvidence: response.tool_calls?.[0]?.function.name === 'ask_user_input'
-          ? { interaction: true }
-          : { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText }) => ({
@@ -1001,9 +1040,6 @@ describe('llm-runtime completion loop', () => {
               } satisfies LLMChatMessage,
             ],
         },
-        acknowledgedEvidence: response.tool_calls?.[0]?.function.name === 'ask_user_input'
-          ? { interaction: true }
-          : { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText }) => ({
@@ -1046,7 +1082,7 @@ describe('llm-runtime completion loop', () => {
         }],
       }, 'bound-hitl-1'))
       .mockResolvedValueOnce(text('I will proceed now.'));
-    mockExecuteToolCall.mockResolvedValueOnce(JSON.stringify(pendingUserInputResult('bound-hitl-1')));
+    mockExecuteToolCall.mockResolvedValueOnce(JSON.stringify({ pending: true }));
 
     const result = await complete({
       initialState: {
@@ -1092,60 +1128,15 @@ describe('llm-runtime completion loop', () => {
     });
 
     expect(mockExecuteToolCall).toHaveBeenCalledTimes(1);
-    expect(result.reason).toBe('pending_user_input');
-    expect(result.pendingUserInput).toEqual(expect.objectContaining({
-      terminalReason: 'pending_user_input',
-      suspended: true,
-      requestId: 'bound-hitl-1',
-    }));
-  });
-
-  it('does not treat generic pending tool messages as trusted pending_user_input stops', async () => {
-    const responses = [
-      toolCall('ask_user_input', {
-        questions: [{
-          header: 'Format',
-          id: 'format',
-          question: 'Which format?',
-          options: [{ id: 'pdf', label: 'PDF' }],
-        }],
-      }, 'hitl-fake-pending-1'),
-      text('Great, I will now generate the file.'),
-    ];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'Generate a report.' } satisfies LLMChatMessage] as LLMChatMessage[],
-        rejected: null as null | { classification: string; responseText: string },
-      },
-      emptyTextRetryLimit: 0,
-      rejectedTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            {
-              role: 'tool',
-              tool_call_id: response.tool_calls?.[0]?.id,
-              content: JSON.stringify({ pending: true }),
-            } satisfies LLMChatMessage,
-            { role: 'user', content: 'Selected: pdf' } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
-        state: { ...state, rejected: { classification, responseText } },
-      }),
-      onTextResponse: async ({ state }) => ({ state }),
-    });
-
     expect(result.reason).toBe('rejected_text_response');
-    expect(result.pendingUserInput).toBeNull();
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'non_progressing',
+        requiresActionEvidence: true,
+        observedInteractionProgress: true,
+        observedActionEvidence: false,
+      }),
+    ]);
   });
 
   it('treats custom executable tools as action evidence by default', async () => {
@@ -1175,7 +1166,6 @@ describe('llm-runtime completion loop', () => {
             } satisfies LLMChatMessage,
           ],
         },
-        acknowledgedEvidence: { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText }) => ({
@@ -1254,7 +1244,6 @@ describe('llm-runtime completion loop', () => {
             { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
           ],
         },
-        acknowledgedEvidence: { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText, response }) => ({
@@ -1300,7 +1289,6 @@ describe('llm-runtime completion loop', () => {
             { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
           ],
         },
-        acknowledgedEvidence: { action: true },
         next: { control: 'continue' },
       }),
       onTextResponse: async ({ state, responseText, response }) => ({

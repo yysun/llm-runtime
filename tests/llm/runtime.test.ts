@@ -40,17 +40,6 @@ import {
   type SkillFileSystemAdapter,
 } from '../../src/index.js';
 
-function pendingUserInputMatcher(requestId: string) {
-  return expect.objectContaining({
-    status: 'pending',
-    pending: true,
-    confirmed: false,
-    terminalReason: 'pending_user_input',
-    suspended: true,
-    requestId,
-  });
-}
-
 function createMockSkillFileSystem(files: Record<string, string>): SkillFileSystemAdapter {
   const normalizedFiles = new Map(
     Object.entries(files).map(([filePath, content]) => [filePath, content]),
@@ -783,8 +772,6 @@ describe('llm-runtime runtime', () => {
 
     expect(result).toContain('"status": "pending"');
     expect(result).toContain('"pending": true');
-    expect(result).toContain('"terminalReason": "pending_user_input"');
-    expect(result).toContain('"suspended": true');
     expect(result).toContain('"requestId": "hitl-call-1"');
     expect(result).toContain('"type": "single-select"');
     expect(result).toContain('"allowSkip": false');
@@ -808,7 +795,6 @@ describe('llm-runtime runtime', () => {
     });
 
     expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"terminalReason": "pending_user_input"');
     expect(result).toContain('"requestId": "hitl-call-alias-1"');
     expect(result).toContain('"question": "Continue?"');
   });
@@ -833,7 +819,6 @@ describe('llm-runtime runtime', () => {
     });
 
     expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"terminalReason": "pending_user_input"');
     expect(result).toContain('"requestId": "hitl-call-alias-2"');
     expect(result).toContain('"question": "Continue?"');
   });
@@ -848,7 +833,6 @@ describe('llm-runtime runtime', () => {
     const deprecatedSchema = tools.ask_user_question?.parameters as any;
 
     expect(tools.ask_user_input?.description).toContain('Use questions[]');
-    expect(tools.ask_user_input?.description).toContain('cannot be safely resolved through read-only lookup, search, or inspection');
     expect(tools.ask_user_input?.description).toContain('do not use allowSkip for approval-gated or otherwise blocking decisions');
     expect(tools.ask_user_input?.description).toContain('Do not add a kind field');
     expect(tools.ask_user_input?.description).toContain('Flat question/options payloads are not supported');
@@ -873,7 +857,6 @@ describe('llm-runtime runtime', () => {
     expect(askSchema.required).toEqual(['questions']);
     expect(legacySchema).toEqual(askSchema);
     expect(deprecatedSchema).toEqual(askSchema);
-    expect(tools.human_intervention_request?.description).toContain('cannot be safely resolved through read-only lookup, search, or inspection');
     expect(tools.human_intervention_request?.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
     expect(tools.ask_user_question?.description).toContain('Prefer `ask_user_input` for new prompts');
   });
@@ -895,9 +878,13 @@ describe('llm-runtime runtime', () => {
     });
 
     const parsed = JSON.parse(String(result));
-    expect(parsed).toEqual(pendingUserInputMatcher('hitl-structured-1'));
-    expect(parsed.type).toBe('single-select');
-    expect(parsed.allowSkip).toBe(false);
+    expect(parsed).toMatchObject({
+      status: 'pending',
+      pending: true,
+      requestId: 'hitl-structured-1',
+      type: 'single-select',
+      allowSkip: false,
+    });
     expect(parsed.selectedOption).toBeUndefined();
     expect(parsed.selectedOptions).toBeUndefined();
     expect(parsed.question).toBeUndefined();
