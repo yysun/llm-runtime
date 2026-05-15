@@ -3,7 +3,7 @@ title: "Project Wiki"
 type: "index"
 status: "active"
 language: "default"
-last_commit: "29033dd339e5e9df5249fddab7aebf82abd32fb9"
+last_commit: "3e2192f3c658efee02870a3b95a0c061b5c8c6a0"
 updated_at: "2026-05-15"
 ---
 
@@ -36,4 +36,4 @@ Quality and recent changes:
 - [[turn-loop-safety-and-lifecycle]] captures the April 2026 expansion that added hard loop limits, trace metadata, synthetic tool-call marking, and public cleanup APIs.
 - [[approval-and-synthetic-tool-call-messages]] explains the difference between host-mediated HITL approval artifacts and runtime-generated synthetic tool-call messages.
 
-Coverage note: this ingest now covers the public API, runtime/provider adapter surfaces, provider-specific web search behavior, MCP transport defaults, and both mocked and live provider verification. Tracked docs such as `docs/ideas.md` and the recent `.docs/` web-search artifacts are represented where they inform runtime behavior, but they are still summarized rather than mirrored verbatim.
+Coverage note: this ingest now also reflects the May 2026 filesystem built-in surface (`search_files`, `create_directory`, `path_exists`), the structured human-input question schema behind `ask_user_input`, the package-owned `respondWithTools(...)` continuation defaults, and the new presentation-oriented Azure/Gemini turn-loop runners. Tracked docs such as `docs/ideas.md` and the recent `.docs/` implementation artifacts are represented where they inform runtime behavior, but they are still summarized rather than mirrored verbatim.

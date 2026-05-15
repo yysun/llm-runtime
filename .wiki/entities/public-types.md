@@ -2,12 +2,13 @@
 title: "Public Types"
 type: "entity"
 status: "active"
+language: "default"
 source_paths:
   - "src/types.ts"
   - "src/index.ts"
   - "src/turn-loop.ts"
   - "src/runtime.ts"
-updated_at: "2026-04-23"
+updated_at: "2026-05-15"
 ---
 
 `src/types.ts` defines the package-native contracts exported from the root entrypoint.
@@ -18,10 +19,14 @@ Key entities:
 - `LLMEnvironment`, `LLMEnvironmentOptions`, `MCPRegistry`, and `SkillRegistry` define the stable runtime dependencies described in [[environment-vs-per-call]]. Provider config types now include first-class Azure support through `AzureConfig`, and MCP server definitions include `streamable-http` alongside `stdio` and `sse`.
 - `LLMWebSearchOptions` plus `webSearch?: boolean | LLMWebSearchOptions` on `LLMGenerateOptions` and `LLMStreamOptions` define the public per-call search surface described in [[web-search-across-providers]].
 - `ToolValidationIssue` and `ToolValidationFailureArtifact` are part of the public correction and recovery path described in [[src-tool-validation]].
+- `BuiltInToolName` now includes the filesystem trio `search_files`, `create_directory`, and `path_exists` in place of the removed `grep` name.
+- Human-input public types now model structured choice prompts through `HitlSelectionType`, `HitlInputQuestion`, and `HitlInputOption`.
 
 Recent type surface changes:
 - `LLMToolCall.synthetic?: boolean` lets callers distinguish normalized plain-text tool intents from model-emitted tool calls when `runTurnLoop(...)` synthetic marking is enabled.
-- The root entrypoint also re-exports the turn-loop trace and lifecycle types defined in `src/turn-loop.ts`, so callers can type metrics and stop metadata without reaching into internal modules.
+- `TurnLoopDefaultTextResponseMode` adds the public `'permissive' | 'require_tool_result'` switch for turn-loop text handling.
+- The root entrypoint now exports a dedicated `respondWithTools(...)` wrapper alongside the generic turn-loop API.
+- The root entrypoint also re-exports the turn-loop trace and lifecycle types defined in `src/turn-loop.ts`, so callers can type metrics, stop metadata, and wrapper defaults without reaching into internal modules.
 
 Design intent:
 - Provider names are plain string unions rather than app-local enums.
