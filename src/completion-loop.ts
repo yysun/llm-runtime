@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Defaulted `complete(...)` to permissive text-response mode so general chat hosts accept conversational responses; strict callers opt in via `defaultTextResponseMode: 'require_tool_result'`. The post-interaction structural rejection still fires regardless of mode.
  * - 2026-05-15: Replaced English-language narration and unsupported-evidence-claim regex heuristics with language-agnostic structural classification, and made post-interaction-answer text without action evidence unconditionally non-progressing regardless of the host's `requiresActionEvidence` opinion.
  * - 2026-05-15: Auto-enabled `complete(...)` agent control mode only when the caller wires a final/need-input/blocked handler, so hosts that drive completion through `onTextResponse` are not silently switched into strict control-tool semantics.
  * - 2026-05-15: Added read-only-before-HITL prompt guidance and default rejection of unsupported evidence claims without action evidence.
@@ -1782,7 +1783,7 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
     || options.onBlockedToolCall,
   );
   const agentControlMode = options.agentControlMode ?? hasAgentControlHandlers;
-  const defaultTextResponseMode = options.defaultTextResponseMode ?? 'require_tool_result';
+  const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
   const modelRequest = options.modelRequest && agentControlMode
     ? withAgentControlTools(options.modelRequest)
     : options.modelRequest;

@@ -194,6 +194,7 @@ describe('llm-runtime completion loop', () => {
         rejected: null as null | { classification: string; responseText: string },
       },
       rejectedTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => text("I'll inspect the file now.")),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
@@ -307,6 +308,7 @@ describe('llm-runtime completion loop', () => {
         rejected: null as null | { classification: string; responseText: string },
       },
       rejectedTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => text('I searched records and found no exact match.')),
       buildMessages: async ({ state }) => state.messages,
       onRejectedTextResponse: async ({ state, classification, responseText }) => ({
@@ -896,7 +898,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.classifications).toEqual([
       expect.objectContaining({
         classification: 'non_progressing',
-        requiresActionEvidence: true,
+        requiresActionEvidence: false,
         observedInteractionProgress: true,
         observedActionEvidence: false,
       }),
@@ -927,6 +929,7 @@ describe('llm-runtime completion loop', () => {
         rejected: null as null | { classification: string; responseText: string },
       },
       emptyTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel,
       buildMessages: async ({ state }) => state.messages,
       onToolCallsResponse: async ({ state, response }) => ({
@@ -1186,7 +1189,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.classifications).toEqual([
       expect.objectContaining({
         classification: 'non_progressing',
-        requiresActionEvidence: true,
+        requiresActionEvidence: false,
         observedInteractionProgress: true,
         observedActionEvidence: false,
       }),
@@ -1245,7 +1248,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('Found record 42.');
   });
 
-  it('respondWithTools rejects non-English unresolved text before any tool result by default', async () => {
+  it('respondWithTools rejects non-English unresolved text before any tool result under require_tool_result mode', async () => {
     const result = await respondWithTools({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
@@ -1253,6 +1256,7 @@ describe('llm-runtime completion loop', () => {
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => text('我现在去检查文件。')),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
@@ -1285,6 +1289,7 @@ describe('llm-runtime completion loop', () => {
         finalText: '',
       },
       emptyTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
       buildMessages: async ({ state, transientInstruction }) => (
         transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
@@ -1316,7 +1321,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('完成了');
   });
 
-  it('respondWithTools retries unresolved action text twice by default before a tool call succeeds', async () => {
+  it('respondWithTools retries unresolved action text twice in require_tool_result mode before a tool call succeeds', async () => {
     const responses = [
       text('我先检查一下文件。'),
       text('先にファイルを確認します。'),
@@ -1330,6 +1335,7 @@ describe('llm-runtime completion loop', () => {
         finalText: '',
       },
       emptyTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
       buildMessages: async ({ state, transientInstruction }) => (
         transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
@@ -1362,7 +1368,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.finalText).toBe('completed');
   });
 
-  it('respondWithTools rejects mixed-language unresolved text before any tool result by default', async () => {
+  it('respondWithTools rejects mixed-language unresolved text before any tool result under require_tool_result mode', async () => {
     const result = await respondWithTools({
       initialState: {
         messages: [{ role: 'user', content: 'find contact by name Jazz Gill' } satisfies LLMChatMessage],
@@ -1370,6 +1376,7 @@ describe('llm-runtime completion loop', () => {
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => text('好的，我先 search 一下。')),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
@@ -1389,7 +1396,7 @@ describe('llm-runtime completion loop', () => {
     });
   });
 
-  it('respondWithTools rejects Japanese unresolved text before any tool result by default', async () => {
+  it('respondWithTools rejects Japanese unresolved text before any tool result under require_tool_result mode', async () => {
     const result = await respondWithTools({
       initialState: {
         messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage],
@@ -1397,6 +1404,7 @@ describe('llm-runtime completion loop', () => {
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 0,
+      defaultTextResponseMode: 'require_tool_result',
       callModel: vi.fn(async () => text('先にファイルを確認します。')),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
