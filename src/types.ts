@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-15: Added explicit pending-user-input HITL artifacts and callback-side evidence acknowledgment support for completion loops.
  * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
  * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
@@ -247,6 +248,8 @@ export interface PendingHitlToolResult {
   pending: true;
   status: 'pending';
   confirmed: false;
+  terminalReason: 'pending_user_input';
+  suspended: true;
   requestId: string;
   type: HitlSelectionType;
   allowSkip: boolean;

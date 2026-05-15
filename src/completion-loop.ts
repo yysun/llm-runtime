@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Added trusted `pending_user_input` suspension handling and explicit callback-side evidence acknowledgment for handled tool rounds.
  * - 2026-05-15: Added read-only-before-HITL prompt guidance and default rejection of unsupported evidence claims without action evidence.
  * - 2026-05-15: Stopped default plain-text retries while interaction requests are still unanswered and strengthened post-answer recovery instructions.
  * - 2026-05-15: Separated human-interaction progress from action evidence in `complete(...)` and exposed evidence metadata in loop traces.
@@ -39,6 +40,7 @@ import type {
   LLMToolCall,
   LLMToolExecutionContext,
   LLMToolExecutionErrorMode,
+  PendingHitlToolResult,
 } from './types.js';
 
 type ParsedToolIntent = {
@@ -84,6 +86,7 @@ export type TurnLoopTerminalReason =
   | 'text_response'
   | 'final_answer'
   | 'needs_user_input'
+  | 'pending_user_input'
   | 'blocked'
   | 'tool_calls_response'
   | 'empty_text_stop'
@@ -99,6 +102,7 @@ export type TurnLoopStepBranch =
   | 'tool_calls_stop'
   | 'final_answer_stop'
   | 'needs_user_input_stop'
+  | 'pending_user_input_stop'
   | 'blocked_stop'
   | 'text_response_continue'
   | 'text_response_stop'
@@ -193,6 +197,7 @@ export interface TurnLoopStopMetadata {
   maxConsecutiveToolTurns: number;
   maxWallTimeMs: number;
   controlOutput?: TurnLoopControlOutput;
+  pendingUserInput?: PendingHitlToolResult;
   timedOutDuringIteration?: number;
   repeatedToolCall?: TurnLoopRepeatedToolCallStopDetail;
 }
@@ -305,9 +310,16 @@ export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
 export const DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS = 120000;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_SAME_TOOL_CALL_BATCHES = 2;
 
+export interface TurnLoopEvidenceAcknowledgment {
+  interaction?: boolean;
+  action?: boolean;
+}
+
 export type TurnLoopStepResult<TState> = {
   state: TState;
   next?: TurnLoopControl;
+  acknowledgedEvidence?: TurnLoopEvidenceAcknowledgment;
+  pendingUserInput?: PendingHitlToolResult | string;
 };
 
 export type TurnLoopPackageModelRequest =
@@ -433,6 +445,7 @@ export interface RunCompletionLoopResult<TState> {
   emptyTextRetryCount: number;
   rejectedTextRetryCount: number;
   controlOutput: TurnLoopControlOutput | null;
+  pendingUserInput: PendingHitlToolResult | null;
   reason: TurnLoopTerminalReason;
   response: LLMResponse | null;
   elapsedMs: number;
@@ -521,6 +534,65 @@ function isActionEvidenceKind(evidenceKind: LLMToolEvidenceKind | undefined): bo
     || evidenceKind === 'write'
     || evidenceKind === 'external_action'
     || evidenceKind === 'artifact';
+}
+
+function tryParseJsonObject(value: unknown): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function isValidPendingHitlQuestionArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((question) => {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) {
+      return false;
+    }
+
+    const entry = question as Record<string, unknown>;
+    return typeof entry.header === 'string'
+      && typeof entry.id === 'string'
+      && typeof entry.question === 'string'
+      && Array.isArray(entry.options);
+  });
+}
+
+function tryParsePendingUserInputResult(value: unknown): PendingHitlToolResult | null {
+  const parsed = tryParseJsonObject(value);
+  if (!parsed) {
+    return null;
+  }
+
+  if (
+    parsed.ok !== false
+    || parsed.pending !== true
+    || parsed.status !== 'pending'
+    || parsed.confirmed !== false
+    || parsed.terminalReason !== 'pending_user_input'
+    || parsed.suspended !== true
+    || typeof parsed.requestId !== 'string'
+    || (parsed.type !== 'single-select' && parsed.type !== 'multiple-select')
+    || typeof parsed.allowSkip !== 'boolean'
+    || !isValidPendingHitlQuestionArray(parsed.questions)
+  ) {
+    return null;
+  }
+
+  return parsed as unknown as PendingHitlToolResult;
 }
 
 function createConfiguredToolDefinitionMap(
@@ -953,24 +1025,11 @@ function resolveModelCaller<TState, TMessage extends LLMChatMessage>(
 
 function createCompletionToolExecutor(
   request: TurnLoopPackageModelRequest | undefined,
-  observeToolEvidence: (toolCalls: LLMToolCall[]) => void,
+  observeToolExecution: (params: { toolCall: LLMToolCall; result: unknown }) => void,
 ): TurnLoopToolExecutor | undefined {
   if (!request) {
     return undefined;
   }
-
-  const configuredToolDefinitions = createConfiguredToolDefinitionMap(request);
-
-  const recordToolEvidence = (toolCalls: LLMToolCall[]) => {
-    const observedToolCalls = toolCalls.filter((toolCall) => {
-      const evidenceKind = classifyToolEvidence(toolCall.function.name, configuredToolDefinitions);
-      return evidenceKind === 'interaction' || isActionEvidenceKind(evidenceKind);
-    });
-
-    if (observedToolCalls.length > 0) {
-      observeToolEvidence(observedToolCalls);
-    }
-  };
 
   const resolveOptions: Omit<LLMExecuteToolCallOptions, 'toolCall' | 'context' | 'errorMode'> = {
     environment: request.environment,
@@ -990,7 +1049,7 @@ function createCompletionToolExecutor(
         toolCall,
         context,
       });
-      recordToolEvidence([toolCall]);
+      observeToolExecution({ toolCall, result });
       return result;
     },
     executeToolCalls: async (toolCalls, context, options = {}) => {
@@ -1000,7 +1059,9 @@ function createCompletionToolExecutor(
         toolCalls,
         context,
       });
-      recordToolEvidence(toolCalls);
+      toolCalls.forEach((toolCall, index) => {
+        observeToolExecution({ toolCall, result: result[index] });
+      });
       return result;
     },
   };
@@ -1064,6 +1125,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     response: LLMResponse | null;
     stop: TurnLoopStopMetadata;
     controlOutput?: TurnLoopControlOutput | null;
+    pendingUserInput?: PendingHitlToolResult | null;
   }): Promise<RunCompletionLoopResult<TState>> {
     const result: RunCompletionLoopResult<TState> = {
       state,
@@ -1071,6 +1133,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
       emptyTextRetryCount,
       rejectedTextRetryCount,
       controlOutput: params.controlOutput ?? null,
+      pendingUserInput: params.pendingUserInput ?? null,
       reason: params.reason,
       response: params.response,
       elapsedMs: getElapsedMs(),
@@ -1491,6 +1554,24 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         iteration,
       });
       state = next?.state ?? state;
+      const pendingUserInput = tryParsePendingUserInputResult(next?.pendingUserInput);
+      if (pendingUserInput) {
+        recordStep(iteration, response, 'pending_user_input_stop');
+        return await finalize({
+          reason: 'pending_user_input',
+          response,
+          pendingUserInput,
+          stop: {
+            reason: 'pending_user_input',
+            iteration,
+            elapsedMs: getElapsedMs(),
+            maxIterations,
+            maxConsecutiveToolTurns,
+            maxWallTimeMs,
+            pendingUserInput,
+          },
+        });
+      }
       if (next?.next?.control === 'continue') {
         recordStep(iteration, response, 'tool_calls_continue');
         transientInstruction = next.next.transientInstruction;
@@ -1773,18 +1854,35 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
   }>();
   let observedInteractionProgress = false;
   let observedActionEvidence = false;
-  const observeToolEvidence = (toolCalls: LLMToolCall[]) => {
+  let observedPendingUserInput: PendingHitlToolResult | null = null;
+  const observeInteractionToolCalls = (toolCalls: LLMToolCall[]) => {
     for (const toolCall of toolCalls) {
       const evidenceKind = classifyToolEvidence(toolCall.function.name, configuredToolDefinitions);
       if (evidenceKind === 'interaction') {
         observedInteractionProgress = true;
       }
-      if (isActionEvidenceKind(evidenceKind)) {
-        observedActionEvidence = true;
-      }
     }
   };
-  const toolExecutor = createCompletionToolExecutor(modelRequest, observeToolEvidence);
+  const observeToolExecution = (params: { toolCall: LLMToolCall; result: unknown }) => {
+    const evidenceKind = classifyToolEvidence(params.toolCall.function.name, configuredToolDefinitions);
+    if (evidenceKind === 'interaction') {
+      observedInteractionProgress = true;
+      observedPendingUserInput = tryParsePendingUserInputResult(params.result) ?? observedPendingUserInput;
+      return;
+    }
+    if (isActionEvidenceKind(evidenceKind)) {
+      observedActionEvidence = true;
+    }
+  };
+  const acknowledgeEvidence = (acknowledgedEvidence: TurnLoopEvidenceAcknowledgment | undefined) => {
+    if (acknowledgedEvidence?.interaction) {
+      observedInteractionProgress = true;
+    }
+    if (acknowledgedEvidence?.action) {
+      observedActionEvidence = true;
+    }
+  };
+  const toolExecutor = createCompletionToolExecutor(modelRequest, observeToolExecution);
 
   const result = await runCompletionLoop({
     ...options,
@@ -1796,14 +1894,26 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
       return messages;
     },
     onToolCallsResponse: async (params) => {
+      observedPendingUserInput = null;
       const next = await callerOnToolCallsResponse({
         ...params,
         toolExecutor,
       });
+      acknowledgeEvidence(next?.acknowledgedEvidence);
+      const pendingUserInput = tryParsePendingUserInputResult(next?.pendingUserInput) ?? observedPendingUserInput;
       if (next?.next?.control === 'continue') {
-        observeToolEvidence(params.response.tool_calls ?? []);
+        observeInteractionToolCalls(params.response.tool_calls ?? []);
       }
-      return next;
+      if (!pendingUserInput) {
+        return next;
+      }
+
+      return {
+        state: next?.state ?? params.state,
+        next: next?.next,
+        acknowledgedEvidence: next?.acknowledgedEvidence,
+        pendingUserInput,
+      } satisfies TurnLoopStepResult<TState>;
     },
     classifyTextResponse: async (params) => {
       classificationObservations.set(params.iteration, {

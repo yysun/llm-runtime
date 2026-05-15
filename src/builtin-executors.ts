@@ -15,6 +15,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-15: Added explicit `pending_user_input` suspension metadata to package-owned HITL pending artifacts.
  * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
  * - 2026-05-15: Added the deprecated `ask_user_question` HITL executor alias alongside `ask_user_input`.
  * - 2026-03-27: Added package-owned executors for built-in tools.
@@ -765,6 +766,8 @@ async function createHitlExecutor(toolName: BuiltInToolName, _options: BuiltInEx
     pending: true,
     status: 'pending',
     confirmed: false,
+    terminalReason: 'pending_user_input',
+    suspended: true,
     requestId: typeof context?.toolCallId === 'string' ? context.toolCallId : '',
     type: normalized.type,
     allowSkip: normalized.allowSkip,
