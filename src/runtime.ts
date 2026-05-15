@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
  * - 2026-05-15: Changed default built-in exposure to read-only, added package-owned tool execution helpers, and gated deprecated HITL alias exposure.
  * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
@@ -96,7 +97,8 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'create_directory',
 ] as const;
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
-  'If `ask_user_input` is available, use it for clarification, missing user input, approvals, or other human decisions. `human_intervention_request` and `ask_user_question` are the same tool.',
+  'Use `ask_user_input` only for required human decisions. Do not use it as a substitute for safe read-only lookup, search, or inspection. `human_intervention_request` and `ask_user_question` are the same tool.',
+  'Do not ask the user to disambiguate before performing a safe broad read-only search. If ambiguity can be resolved safely through read-only tools, search first and present matches.',
   'Treat phrases such as "ask the user", "request approval", or "HITL" as referring to this tool when present.',
   'Use `allowSkip` only for non-blocking prompts, not required approvals or blocking decisions.',
   'Do not invent human answers.',

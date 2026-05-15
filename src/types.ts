@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
  * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, optional deprecated alias exposure, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
@@ -198,10 +199,19 @@ export interface LLMToolExecutionContext {
   metadata?: Record<string, unknown>;
 }
 
+export type LLMToolEvidenceKind =
+  | 'none'
+  | 'interaction'
+  | 'read'
+  | 'write'
+  | 'external_action'
+  | 'artifact';
+
 export interface LLMToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  evidenceKind?: LLMToolEvidenceKind;
   execute?: (args: Record<string, unknown>, context?: LLMToolExecutionContext) => Promise<unknown> | unknown;
 }
 

@@ -2,6 +2,8 @@
  * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
  * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
  * Recent changes:
+ * - 2026-05-15: Added a reusable scripted mock LLM scenario helper and a Jazz Gill package-managed flow regression.
+ * - 2026-05-15: Added action-evidence separation regressions for HITL tools, bound executors, custom tools, and trace metadata.
  * - 2026-05-15: Added regressions for run-scoped evidence, malformed control-tool retries, and merged loop-contract prompt injection.
  * - 2026-05-15: Added preferred `runCompletionLoop(...)` and `complete(...)` coverage alongside legacy alias coverage.
  * - 2026-05-15: Added agent control tool coverage for deterministic final, needs-input, and blocked outcomes.
@@ -28,10 +30,14 @@ vi.mock('../../src/runtime.js', () => ({
 import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
+  DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
+  DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION,
+  DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
   runTurnLoop,
 } from '../../src/completion-loop.js';
 import { complete, respondWithTools } from '../../src/index.js';
+import { createMockLLMScenario } from './mock-llm-scenario.test-support.js';
 import {
   runTurnLoop as legacyPathRunTurnLoop,
   respondWithTools as legacyPathRespondWithTools,
@@ -289,7 +295,166 @@ describe('llm-runtime completion loop', () => {
       content: expect.stringContaining(DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT),
     });
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('<llm-runtime-loop-contract>');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before performing a safe broad search.');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use ask_user_input only when the missing input cannot be safely discovered through read-only tools');
     expect(seenMessages[0]?.[1]).toEqual({ role: 'user', content: 'inspect the file' });
+  });
+
+  it('rejects unsupported search result claims without action evidence', async () => {
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'find Alex Smith' } satisfies LLMChatMessage],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => text('I searched records and found no exact match.')),
+      buildMessages: async ({ state }) => state.messages,
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+      onToolCallsResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'unsupported_evidence_claim',
+        requiresActionEvidence: true,
+      }),
+    ]);
+    expect(result.retries).toEqual([
+      expect.objectContaining({
+        kind: 'rejected_text',
+        decision: 'stop',
+        transientInstruction: DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION,
+      }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'unsupported_evidence_claim',
+      responseText: 'I searched records and found no exact match.',
+    });
+  });
+
+  it('confirms the Jazz Gill follow-up flow with a scripted mock LLM on the package-managed path', async () => {
+    const scenario = createMockLLMScenario([
+      toolCall('ask_user_input', {
+        type: 'single-select',
+        questions: [{
+          header: 'Entity Type',
+          id: 'jazz-gill-entity-type',
+          question: 'What type of record are you looking for?',
+          options: [
+            { id: 'contact', label: 'Contact' },
+            { id: 'account', label: 'Account' },
+            { id: 'not-sure', label: 'Not sure' },
+          ],
+        }],
+      }, 'jazz-hitl-1'),
+      ({ messages }) => {
+        expect(messages.some((message) => message.role === 'user' && message.content === 'contact')).toBe(true);
+        return text('I searched Contacts by name for Jazz Gill and found no exact match.');
+      },
+      ({ messages }) => {
+        expect(String(messages.at(-1)?.content ?? '')).toContain(DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION);
+        return toolCall('search_records', {
+          query: 'Jazz Gill',
+          entityType: 'contact',
+        }, 'jazz-search-1');
+      },
+      text('No matching contact record was found for Jazz Gill.'),
+    ]);
+    mockGenerate.mockImplementation(async (request: { messages: LLMChatMessage[] }) => await scenario.callModel(request));
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'find jazz gill' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      agentControlMode: false,
+      modelRequest: {
+        provider: 'openai',
+        model: 'gpt-5',
+        builtIns: { ask_user_input: true },
+        extraTools: [{
+          name: 'search_records',
+          description: 'Search records by name.',
+          evidenceKind: 'read',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string' },
+              entityType: { type: 'string' },
+            },
+            required: ['query'],
+            additionalProperties: false,
+          },
+        }],
+      },
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction
+          ? [...state.messages, { role: 'system', content: transientInstruction } satisfies LLMChatMessage]
+          : state.messages
+      ),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: response.tool_calls?.[0]?.function.name === 'ask_user_input'
+            ? [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ pending: true }),
+              } satisfies LLMChatMessage,
+              { role: 'user', content: 'contact' } satisfies LLMChatMessage,
+            ]
+            : [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ matches: [] }),
+              } satisfies LLMChatMessage,
+            ],
+        },
+        next: { control: 'continue' },
+      }),
+      onRejectedTextResponse: async ({ state, classification, responseText, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          rejected: { classification, responseText },
+        },
+      }),
+      onTextResponse: async ({ state, responseText, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          finalText: responseText,
+        },
+      }),
+    });
+
+    expect(mockGenerate).toHaveBeenCalledTimes(4);
+    expect(String(scenario.seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before performing a safe broad search.');
+    expect(result.reason).toBe('text_response');
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({ toolName: 'ask_user_input', countsAsActionEvidence: false }),
+      expect.objectContaining({ toolName: 'search_records', evidenceKind: 'read', countsAsActionEvidence: true }),
+    ]);
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'unsupported_evidence_claim' }),
+      expect.objectContaining({ classification: 'verified_final_response' }),
+    ]);
+    expect(result.state.finalText).toBe('No matching contact record was found for Jazz Gill.');
+    expect(result.state.rejected).toEqual({
+      classification: 'unsupported_evidence_claim',
+      responseText: 'I searched Contacts by name for Jazz Gill and found no exact match.',
+    });
   });
 
   it('complete defaults emptyTextRetryLimit when the caller omits it', async () => {
@@ -553,6 +718,410 @@ describe('llm-runtime completion loop', () => {
         function: expect.objectContaining({ name: 'project_lookup' }),
       }),
     }));
+  });
+
+  it('does not treat human-input tools as action evidence', async () => {
+    const responses = [
+      toolCall('ask_user_input', {
+        questions: [{
+          header: 'Format',
+          id: 'format',
+          question: 'Which format?',
+          options: [{ id: 'pdf', label: 'PDF' }],
+        }],
+      }, 'hitl-1'),
+      text('Great, I will now generate the file.'),
+    ];
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Generate a report.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: JSON.stringify({ pending: true }),
+            } satisfies LLMChatMessage,
+            { role: 'user', content: 'Selected: pdf' } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({
+        toolName: 'ask_user_input',
+        evidenceKind: 'interaction',
+        countsAsActionEvidence: false,
+      }),
+    ]);
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'non_progressing',
+        requiresActionEvidence: true,
+        observedInteractionProgress: true,
+        observedActionEvidence: false,
+      }),
+    ]);
+    expect(result.state.rejected).toEqual({
+      classification: 'non_progressing',
+      responseText: 'Great, I will now generate the file.',
+    });
+  });
+
+  it('does not retry plain text while an interaction request is still unanswered', async () => {
+    const callModel = vi.fn(async () => {
+      return callModel.mock.calls.length === 1
+        ? toolCall('ask_user_input', {
+          questions: [{
+            header: 'Entity Type',
+            id: 'entity-type',
+            question: 'Which type?',
+            options: [{ id: 'contact', label: 'Contact' }],
+          }],
+        }, 'hitl-pending-1')
+        : text('What type of record are you looking for?');
+    });
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Find Jazz Gill.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      callModel,
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: JSON.stringify({ pending: true }),
+            } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(callModel).toHaveBeenCalledTimes(2);
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.retries).toEqual([
+      expect.objectContaining({
+        kind: 'rejected_text',
+        decision: 'stop',
+        retryLimit: 0,
+        transientInstruction: DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
+      }),
+    ]);
+  });
+
+  it('retries with a post-interaction instruction and then continues with a task tool', async () => {
+    const responses = [
+      toolCall('ask_user_input', {
+        questions: [{
+          header: 'Entity Type',
+          id: 'entity-type',
+          question: 'Which type?',
+          options: [{ id: 'contact', label: 'Contact' }],
+        }],
+      }, 'hitl-followup-1'),
+      text('I searched Contacts and did not find Jazz Gill.'),
+      toolCall('lookup_record', { name: 'Jazz Gill', entityType: 'contact' }, 'lookup-continue-1'),
+      text('No matching contact record was found for Jazz Gill.'),
+    ];
+    const callModel = vi.fn(async ({ messages }: { messages: LLMChatMessage[] }) => {
+      const nextResponse = responses.shift() ?? text('unexpected');
+
+      if (callModel.mock.calls.length === 3) {
+        expect(messages.at(-1)).toEqual(expect.objectContaining({ role: 'system' }));
+        expect(messages.at(-1)?.content).toContain(DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION);
+      }
+
+      return nextResponse;
+    });
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Find Jazz Gill.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel,
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction
+          ? [...state.messages, { role: 'system', content: transientInstruction } satisfies LLMChatMessage]
+          : state.messages
+      ),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: response.tool_calls?.[0]?.function.name === 'ask_user_input'
+            ? [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ pending: true }),
+              } satisfies LLMChatMessage,
+              { role: 'user', content: 'contact' } satisfies LLMChatMessage,
+            ]
+            : [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ ok: true, matches: [] }),
+              } satisfies LLMChatMessage,
+            ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.retries).toEqual([
+      expect.objectContaining({
+        kind: 'rejected_text',
+        decision: 'retry',
+        transientInstruction: DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
+      }),
+    ]);
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({ toolName: 'ask_user_input', countsAsActionEvidence: false }),
+      expect.objectContaining({ toolName: 'lookup_record', countsAsActionEvidence: true }),
+    ]);
+    expect(result.state.finalText).toBe('No matching contact record was found for Jazz Gill.');
+  });
+
+  it('accepts final text after human input and later action evidence', async () => {
+    const responses = [
+      toolCall('ask_user_input', {
+        questions: [{
+          header: 'Format',
+          id: 'format',
+          question: 'Which format?',
+          options: [{ id: 'pdf', label: 'PDF' }],
+        }],
+      }, 'hitl-1'),
+      toolCall('write_file', {
+        filePath: 'output/report.md',
+        content: '# Report',
+      }, 'write-1'),
+      text('Done. The report has been generated.'),
+    ];
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Generate a report.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: response.tool_calls?.[0]?.function.name === 'ask_user_input'
+            ? [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ pending: true }),
+              } satisfies LLMChatMessage,
+              { role: 'user', content: 'Selected: pdf' } satisfies LLMChatMessage,
+            ]
+            : [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: JSON.stringify({ ok: true }),
+              } satisfies LLMChatMessage,
+            ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('Done. The report has been generated.');
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({
+        toolName: 'ask_user_input',
+        evidenceKind: 'interaction',
+        countsAsActionEvidence: false,
+      }),
+      expect.objectContaining({
+        toolName: 'write_file',
+        evidenceKind: 'write',
+        countsAsActionEvidence: true,
+      }),
+    ]);
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'verified_final_response',
+        requiresActionEvidence: false,
+        observedInteractionProgress: true,
+        observedActionEvidence: true,
+      }),
+    ]);
+  });
+
+  it('bound executors do not let ask_user_input satisfy action evidence', async () => {
+    mockGenerate
+      .mockResolvedValueOnce(toolCall('ask_user_input', {
+        questions: [{
+          header: 'Format',
+          id: 'format',
+          question: 'Which format?',
+          options: [{ id: 'pdf', label: 'PDF' }],
+        }],
+      }, 'bound-hitl-1'))
+      .mockResolvedValueOnce(text('I will proceed now.'));
+    mockExecuteToolCall.mockResolvedValueOnce(JSON.stringify({ pending: true }));
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Generate a report.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        rejected: null as null | { classification: string; responseText: string },
+      },
+      emptyTextRetryLimit: 0,
+      rejectedTextRetryLimit: 0,
+      modelRequest: {
+        provider: 'openai',
+        model: 'gpt-5',
+        builtIns: { ask_user_input: true },
+      },
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response, toolExecutor }) => {
+        const toolResult = await toolExecutor?.executeToolCall(
+          response.tool_calls?.[0]!,
+          { workingDirectory: '/tmp/project' },
+          { errorMode: 'return-artifact' },
+        );
+
+        return {
+          state: {
+            ...state,
+            messages: [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: String(toolResult),
+              } satisfies LLMChatMessage,
+              { role: 'user', content: 'Selected: pdf' } satisfies LLMChatMessage,
+            ],
+          },
+          next: { control: 'continue' as const },
+        };
+      },
+      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
+        state: { ...state, rejected: { classification, responseText } },
+      }),
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(mockExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(result.reason).toBe('rejected_text_response');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'non_progressing',
+        requiresActionEvidence: true,
+        observedInteractionProgress: true,
+        observedActionEvidence: false,
+      }),
+    ]);
+  });
+
+  it('treats custom executable tools as action evidence by default', async () => {
+    const responses = [
+      toolCall('lookup_record', { id: '42' }, 'lookup-1'),
+      text('Found record 42.'),
+    ];
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'Lookup record 42.' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: JSON.stringify({ ok: true, id: '42' }),
+            } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.toolCalls).toEqual([
+      expect.objectContaining({
+        toolName: 'lookup_record',
+        evidenceKind: 'external_action',
+        countsAsActionEvidence: true,
+      }),
+    ]);
+    expect(result.classifications).toEqual([
+      expect.objectContaining({
+        classification: 'verified_final_response',
+        observedInteractionProgress: false,
+        observedActionEvidence: true,
+      }),
+    ]);
+    expect(result.state.finalText).toBe('Found record 42.');
   });
 
   it('respondWithTools rejects non-English unresolved text before any tool result by default', async () => {

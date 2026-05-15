@@ -15,6 +15,9 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-15: Added read-only-before-HITL prompt guidance and default rejection of unsupported evidence claims without action evidence.
+ * - 2026-05-15: Stopped default plain-text retries while interaction requests are still unanswered and strengthened post-answer recovery instructions.
+ * - 2026-05-15: Separated human-interaction progress from action evidence in `complete(...)` and exposed evidence metadata in loop traces.
  * - 2026-05-15: Added bound tool executors for package-managed completion loops and guarded malformed control retries with normal tool-loop stop checks.
  * - 2026-05-15: Made completion evidence run-scoped, merged the loop contract into the first system message, and rejected malformed control-tool payloads.
  * - 2026-05-15: Added agent-mode control tools and deterministic stop handling for final answers, user-input requests, and blocked outcomes.
@@ -32,6 +35,7 @@ import type {
   LLMResponse,
   LLMStreamOptions,
   LLMToolDefinition,
+  LLMToolEvidenceKind,
   LLMToolCall,
   LLMToolExecutionContext,
   LLMToolExecutionErrorMode,
@@ -51,6 +55,26 @@ export const AGENT_CONTROL_TOOL_NAMES = [
 export type AgentControlToolName = typeof AGENT_CONTROL_TOOL_NAMES[number];
 
 const AGENT_CONTROL_TOOL_NAME_SET = new Set<string>(AGENT_CONTROL_TOOL_NAMES);
+const INTERACTION_TOOL_NAME_SET = new Set<string>([
+  'ask_user_input',
+  'ask_user_question',
+  'human_intervention_request',
+]);
+const READ_EVIDENCE_TOOL_NAME_SET = new Set<string>([
+  'load_skill',
+  'web_fetch',
+  'read_file',
+  'list_files',
+  'search_files',
+  'path_exists',
+]);
+const WRITE_EVIDENCE_TOOL_NAME_SET = new Set<string>([
+  'write_file',
+  'create_directory',
+]);
+const EXTERNAL_ACTION_TOOL_NAME_SET = new Set<string>([
+  'shell_cmd',
+]);
 
 export type TurnLoopControl =
   | { control: 'stop' }
@@ -90,6 +114,7 @@ export type TurnLoopStepBranch =
 export type TurnLoopTextResponseClassification =
   | 'verified_final_response'
   | 'intent_only_narration'
+  | 'unsupported_evidence_claim'
   | 'non_progressing';
 
 export type TurnLoopDefaultTextResponseMode = 'permissive' | 'require_tool_result';
@@ -116,6 +141,8 @@ export interface TurnLoopToolCallSummary {
   iteration: number;
   toolCallId: string;
   toolName: string;
+  evidenceKind: LLMToolEvidenceKind;
+  countsAsActionEvidence: boolean;
   toolArguments: string;
   normalizedArguments: string;
   toolIndex: number;
@@ -130,6 +157,8 @@ export interface TurnLoopClassificationSummary {
   iteration: number;
   classification: TurnLoopTextResponseClassification;
   requiresActionEvidence: boolean;
+  observedInteractionProgress: boolean;
+  observedActionEvidence: boolean;
   responseText: string;
   transientInstruction?: string;
   elapsedMs: number;
@@ -246,7 +275,11 @@ export const DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT = [
   '',
   'If the task requires workspace inspection, tool use, file access, search, command execution, or external lookup, you must call the appropriate tool.',
   '',
-  'For read-only inspection, searching, summarizing, and analysis, proceed without confirmation.',
+  'For read-only inspection, lookup, search, summarization, and analysis, call the appropriate read-only tool without asking for confirmation.',
+  '',
+  'Do not ask the user to disambiguate before performing a safe broad search. If multiple entity types, locations, files, or records could match, search broadly first and present matches.',
+  '',
+  'Use ask_user_input only when the missing input cannot be safely discovered through read-only tools, or when the next step requires approval, preference, or a side effect.',
   '',
   'Stop only by:',
   '- calling tools,',
@@ -254,12 +287,18 @@ export const DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT = [
   '- requesting required missing user input,',
   '- reporting a permission or safety block.',
   '',
+  'If you call a human-interaction tool such as ask_user_input, do not restate the same question in plain assistant text while waiting.',
+  'After the user answers, use that answer immediately and call the next task tool in the same turn unless the task is already complete.',
+  '',
   'Do not stop after merely announcing intent.',
 ].join('\n');
 export const DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT = DEFAULT_AGENT_RUN_LOOP_SYSTEM_PROMPT;
 export const COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG = 'llm-runtime-loop-contract';
 export const DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION = 'The last response announced work but did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool in this turn. If prior tool results already contain enough evidence, provide the final answer based on those results.';
+export const DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION = 'The last response claimed search, inspection, or other tool-backed results without run evidence. Do not claim unsupported results. Call the appropriate tool now, or answer only from existing tool results.';
 export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last response did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool. If prior tool results already contain enough evidence, provide the final answer based on those results.';
+export const DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION = 'The user already answered the interaction request. Do not ask the same question again and do not narrate unverified results. Use the user\'s answer now and call the appropriate task tool in this turn.';
+export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You already requested required user input. Do not repeat the same question in assistant text and do not call the same interaction tool again before the user answers. Wait for the user answer, then continue with the appropriate task tool.';
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
@@ -418,14 +457,129 @@ function normalizeTextAssessment(
   return assessment;
 }
 
-function getDefaultRejectedTextInstruction(
-  classification: Exclude<TurnLoopTextResponseClassification, 'verified_final_response'>,
-): string {
+function isUnsupportedEvidenceClaim(responseText: string): boolean {
+  const normalizedText = String(responseText || '').trim().toLowerCase();
+  if (!normalizedText) {
+    return false;
+  }
+
+  const evidenceVerbPattern = /\b(i|we)\s+(searched|checked|looked up|looked|inspected|read|reviewed|scanned|queried|examined|verified|found)\b/;
+  const noResultsPattern = /\b(?:no|there (?:is|are) no|found no)\s+(?:exact\s+)?(?:match(?:es)?|matching\s+(?:records?|results?|contacts?|accounts?|files?)|records?|results?|contacts?|accounts?|files?)\b/;
+  const sourceClaimPattern = /\b(?:the file|the database|the crm|the records?|the results?)\s+(?:does not|did not|do not|were not|was not)\b/;
+  const foundResultPattern = /\b(?:no matching|matching|exact match|exact matches|found no exact match|did not find)\b/;
+
+  return evidenceVerbPattern.test(normalizedText)
+    || noResultsPattern.test(normalizedText)
+    || sourceClaimPattern.test(normalizedText)
+    || foundResultPattern.test(normalizedText);
+}
+
+function getDefaultRejectedTextInstruction(params: {
+  classification: Exclude<TurnLoopTextResponseClassification, 'verified_final_response'>;
+  messages: LLMChatMessage[];
+  observedInteractionProgress: boolean;
+  observedActionEvidence: boolean;
+}): string {
+  const { classification, messages, observedInteractionProgress, observedActionEvidence } = params;
+  const latestConversationMessage = [...messages].reverse().find((message) => message.role !== 'system');
+
+  if (observedInteractionProgress && !observedActionEvidence) {
+    if (latestConversationMessage?.role === 'user') {
+      return DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION;
+    }
+
+    return DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION;
+  }
+
   if (classification === 'intent_only_narration') {
     return DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION;
   }
 
+  if (classification === 'unsupported_evidence_claim') {
+    return DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION;
+  }
+
   return DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION;
+}
+
+function shouldPauseRejectedTextRetriesForPendingInteraction(params: {
+  messages: LLMChatMessage[];
+  observedInteractionProgress: boolean;
+  observedActionEvidence: boolean;
+}): boolean {
+  const { messages, observedInteractionProgress, observedActionEvidence } = params;
+  if (!observedInteractionProgress || observedActionEvidence) {
+    return false;
+  }
+
+  const latestConversationMessage = [...messages].reverse().find((message) => message.role !== 'system');
+  return latestConversationMessage?.role !== 'user';
+}
+
+function isActionEvidenceKind(evidenceKind: LLMToolEvidenceKind | undefined): boolean {
+  return evidenceKind === 'read'
+    || evidenceKind === 'write'
+    || evidenceKind === 'external_action'
+    || evidenceKind === 'artifact';
+}
+
+function createConfiguredToolDefinitionMap(
+  request: TurnLoopPackageModelRequest | undefined,
+): ReadonlyMap<string, LLMToolDefinition> {
+  const definitions = new Map<string, LLMToolDefinition>();
+
+  for (const tool of request?.extraTools ?? []) {
+    definitions.set(tool.name, tool);
+  }
+
+  for (const [toolName, tool] of Object.entries(request?.tools ?? {})) {
+    definitions.set(toolName, tool);
+  }
+
+  return definitions;
+}
+
+function classifyToolEvidence(
+  toolName: string,
+  toolDefinitions?: ReadonlyMap<string, LLMToolDefinition>,
+): LLMToolEvidenceKind {
+  const configuredKind = toolDefinitions?.get(toolName)?.evidenceKind;
+  if (configuredKind) {
+    return configuredKind;
+  }
+
+  if (INTERACTION_TOOL_NAME_SET.has(toolName)) {
+    return 'interaction';
+  }
+
+  if (AGENT_CONTROL_TOOL_NAME_SET.has(toolName)) {
+    return 'none';
+  }
+
+  if (READ_EVIDENCE_TOOL_NAME_SET.has(toolName)) {
+    return 'read';
+  }
+
+  if (WRITE_EVIDENCE_TOOL_NAME_SET.has(toolName)) {
+    return 'write';
+  }
+
+  if (EXTERNAL_ACTION_TOOL_NAME_SET.has(toolName)) {
+    return 'external_action';
+  }
+
+  return 'external_action';
+}
+
+function summarizeToolEvidence(
+  toolName: string,
+  toolDefinitions?: ReadonlyMap<string, LLMToolDefinition>,
+): { evidenceKind: LLMToolEvidenceKind; countsAsActionEvidence: boolean } {
+  const evidenceKind = classifyToolEvidence(toolName, toolDefinitions);
+  return {
+    evidenceKind,
+    countsAsActionEvidence: isActionEvidenceKind(evidenceKind),
+  };
 }
 
 function countToolResultMessages(messages: LLMChatMessage[]): number {
@@ -437,6 +591,7 @@ export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'final_answer',
       description: 'End the agent run with the final answer. Use this only when the answer is complete and supported by run evidence.',
+      evidenceKind: 'none',
       parameters: {
         type: 'object',
         properties: {
@@ -457,6 +612,7 @@ export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
     {
       name: 'need_user_input',
       description: 'Stop the agent run because required user input is missing.',
+      evidenceKind: 'none',
       parameters: {
         type: 'object',
         properties: {
@@ -797,11 +953,24 @@ function resolveModelCaller<TState, TMessage extends LLMChatMessage>(
 
 function createCompletionToolExecutor(
   request: TurnLoopPackageModelRequest | undefined,
-  markObservedRunToolProgress: () => void,
+  observeToolEvidence: (toolCalls: LLMToolCall[]) => void,
 ): TurnLoopToolExecutor | undefined {
   if (!request) {
     return undefined;
   }
+
+  const configuredToolDefinitions = createConfiguredToolDefinitionMap(request);
+
+  const recordToolEvidence = (toolCalls: LLMToolCall[]) => {
+    const observedToolCalls = toolCalls.filter((toolCall) => {
+      const evidenceKind = classifyToolEvidence(toolCall.function.name, configuredToolDefinitions);
+      return evidenceKind === 'interaction' || isActionEvidenceKind(evidenceKind);
+    });
+
+    if (observedToolCalls.length > 0) {
+      observeToolEvidence(observedToolCalls);
+    }
+  };
 
   const resolveOptions: Omit<LLMExecuteToolCallOptions, 'toolCall' | 'context' | 'errorMode'> = {
     environment: request.environment,
@@ -821,7 +990,7 @@ function createCompletionToolExecutor(
         toolCall,
         context,
       });
-      markObservedRunToolProgress();
+      recordToolEvidence([toolCall]);
       return result;
     },
     executeToolCalls: async (toolCalls, context, options = {}) => {
@@ -831,7 +1000,7 @@ function createCompletionToolExecutor(
         toolCalls,
         context,
       });
-      markObservedRunToolProgress();
+      recordToolEvidence(toolCalls);
       return result;
     },
   };
@@ -867,6 +1036,8 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
   let lastToolBatchSignature: string | null = null;
   let consecutiveSameToolBatchCount = 0;
   let syntheticToolCallSequence = 0;
+  let observedInteractionProgress = false;
+  let observedActionEvidence = false;
   const startedAt = Date.now();
   const steps: TurnLoopStepSummary[] = [];
   const toolCalls: TurnLoopToolCallSummary[] = [];
@@ -1090,12 +1261,19 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         iteration,
         toolCallId: toolCall.id,
         toolName: toolCall.function.name,
+        ...summarizeToolEvidence(toolCall.function.name),
         toolArguments: toolCall.function.arguments,
         normalizedArguments: normalizeToolArguments(toolCall.function.arguments),
         toolIndex,
         source: toolCallSource,
         synthetic: Boolean(toolCall.synthetic),
       }));
+      if (batchToolCalls.some((toolCall) => toolCall.evidenceKind === 'interaction')) {
+        observedInteractionProgress = true;
+      }
+      if (batchToolCalls.some((toolCall) => toolCall.countsAsActionEvidence)) {
+        observedActionEvidence = true;
+      }
       const batchSignature = createToolCallBatchSignature(batchToolCalls);
       consecutiveSameToolBatchCount = batchSignature && batchSignature === lastToolBatchSignature
         ? consecutiveSameToolBatchCount + 1
@@ -1359,7 +1537,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
       const assessment = explicitAssessment
         ?? {
           classification: requiresActionEvidence || agentControlMode
-            ? 'non_progressing'
+            ? (requiresActionEvidence && !observedActionEvidence && isUnsupportedEvidenceClaim(responseText)
+              ? 'unsupported_evidence_claim'
+              : 'non_progressing')
             : 'verified_final_response',
           transientInstruction: agentControlMode
             ? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION
@@ -1370,6 +1550,8 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         iteration,
         classification: assessment.classification,
         requiresActionEvidence,
+        observedInteractionProgress,
+        observedActionEvidence,
         responseText,
         transientInstruction: assessment.transientInstruction,
         elapsedMs: getElapsedMs(),
@@ -1427,7 +1609,13 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         requiresActionEvidence,
       });
       state = next?.state ?? state;
-      const rejectedTextRetryLimit = options.rejectedTextRetryLimit ?? (requiresActionEvidence ? 2 : 0);
+      const rejectedTextRetryLimit = shouldPauseRejectedTextRetriesForPendingInteraction({
+        messages,
+        observedInteractionProgress,
+        observedActionEvidence,
+      })
+        ? 0
+        : (options.rejectedTextRetryLimit ?? (requiresActionEvidence ? 2 : 0));
 
       if (rejectedTextRetryCount < rejectedTextRetryLimit && next?.next?.control !== 'stop') {
         const retryCountBefore = rejectedTextRetryCount;
@@ -1435,8 +1623,18 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         transientInstruction = next?.next?.control === 'continue'
           ? (next.next.transientInstruction
             ?? assessment.transientInstruction
-            ?? getDefaultRejectedTextInstruction(assessment.classification))
-          : (assessment.transientInstruction ?? getDefaultRejectedTextInstruction(assessment.classification));
+            ?? getDefaultRejectedTextInstruction({
+              classification: assessment.classification,
+              messages,
+              observedInteractionProgress,
+              observedActionEvidence,
+            }))
+          : (assessment.transientInstruction ?? getDefaultRejectedTextInstruction({
+            classification: assessment.classification,
+            messages,
+            observedInteractionProgress,
+            observedActionEvidence,
+          }));
         retries.push({
           iteration,
           kind: 'rejected_text',
@@ -1461,6 +1659,12 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         retryLimit: rejectedTextRetryLimit,
         elapsedMs: getElapsedMs(),
         classification: assessment.classification,
+        transientInstruction: assessment.transientInstruction ?? getDefaultRejectedTextInstruction({
+          classification: assessment.classification,
+          messages,
+          observedInteractionProgress,
+          observedActionEvidence,
+        }),
       });
       recordStep(iteration, response, 'rejected_text_stop');
       return await finalize({
@@ -1554,6 +1758,7 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
   options: CompleteOptions<TState, TMessage>,
 ): Promise<RunCompletionLoopResult<TState>> {
   const callerBuildMessages = options.buildMessages;
+  const callerClassifyTextResponse = options.classifyTextResponse;
   const callerRequiresActionEvidence = options.requiresActionEvidence;
   const callerOnToolCallsResponse = options.onToolCallsResponse;
   const agentControlMode = options.agentControlMode ?? Boolean(options.modelRequest);
@@ -1561,13 +1766,27 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
   const modelRequest = options.modelRequest && agentControlMode
     ? withAgentControlTools(options.modelRequest)
     : options.modelRequest;
-  let observedRunToolProgress = false;
-  const markObservedRunToolProgress = () => {
-    observedRunToolProgress = true;
+  const configuredToolDefinitions = createConfiguredToolDefinitionMap(modelRequest);
+  const classificationObservations = new Map<number, {
+    observedInteractionProgress: boolean;
+    observedActionEvidence: boolean;
+  }>();
+  let observedInteractionProgress = false;
+  let observedActionEvidence = false;
+  const observeToolEvidence = (toolCalls: LLMToolCall[]) => {
+    for (const toolCall of toolCalls) {
+      const evidenceKind = classifyToolEvidence(toolCall.function.name, configuredToolDefinitions);
+      if (evidenceKind === 'interaction') {
+        observedInteractionProgress = true;
+      }
+      if (isActionEvidenceKind(evidenceKind)) {
+        observedActionEvidence = true;
+      }
+    }
   };
-  const toolExecutor = createCompletionToolExecutor(modelRequest, markObservedRunToolProgress);
+  const toolExecutor = createCompletionToolExecutor(modelRequest, observeToolEvidence);
 
-  return await runCompletionLoop({
+  const result = await runCompletionLoop({
     ...options,
     emptyTextRetryLimit: options.emptyTextRetryLimit ?? 0,
     modelRequest,
@@ -1582,18 +1801,41 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
         toolExecutor,
       });
       if (next?.next?.control === 'continue') {
-        markObservedRunToolProgress();
+        observeToolEvidence(params.response.tool_calls ?? []);
       }
       return next;
     },
+    classifyTextResponse: async (params) => {
+      classificationObservations.set(params.iteration, {
+        observedInteractionProgress,
+        observedActionEvidence,
+      });
+      return await callerClassifyTextResponse?.(params);
+    },
     requiresActionEvidence: async (params) => {
       const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'
-        && !observedRunToolProgress;
+        && !observedActionEvidence;
       return await callerRequiresActionEvidence?.(params) ?? packageRequiresActionEvidence;
     },
     defaultTextResponseMode,
     rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 2,
   });
+
+  for (const toolCallSummary of result.toolCalls) {
+    const evidence = summarizeToolEvidence(toolCallSummary.toolName, configuredToolDefinitions);
+    toolCallSummary.evidenceKind = evidence.evidenceKind;
+    toolCallSummary.countsAsActionEvidence = evidence.countsAsActionEvidence;
+  }
+
+  for (const classificationSummary of result.classifications) {
+    const observation = classificationObservations.get(classificationSummary.iteration);
+    if (observation) {
+      classificationSummary.observedInteractionProgress = observation.observedInteractionProgress;
+      classificationSummary.observedActionEvidence = observation.observedActionEvidence;
+    }
+  }
+
+  return result;
 }
 
 /** @deprecated Use RunCompletionLoopOptions */

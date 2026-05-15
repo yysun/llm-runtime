@@ -14,6 +14,7 @@
  * - Avoids real filesystem, network, and provider clients.
  *
  * Recent changes:
+ * - 2026-05-15: Added provider-dispatch coverage for search-plus-HITL tool exposure on lookup-style requests.
  * - 2026-03-27: Initial provider-dispatch coverage for the publishable `llm-runtime` runtime.
  */
 
@@ -375,6 +376,8 @@ describe('llm-runtime runtime provider dispatch', () => {
 
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use `allowSkip` only for non-blocking prompts');
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not invent human answers.');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not use it as a substitute for safe read-only lookup, search, or inspection');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not ask the user to disambiguate before performing a safe broad read-only search');
 
     await generate({
       provider: 'openai',
@@ -404,6 +407,48 @@ describe('llm-runtime runtime provider dispatch', () => {
         content: 'I may need clarification.',
       },
     ]);
+  });
+
+  it('passes search tools and read-only-first HITL guidance to the mocked provider client', async () => {
+    const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
+
+    await generate({
+      provider: 'openai',
+      providerConfig: {
+        apiKey: 'test-openai-key',
+      },
+      model: 'gpt-5',
+      messages: [
+        {
+          role: 'user',
+          content: 'find jazz gill',
+        },
+      ],
+      builtIns: {
+        ask_user_input: true,
+      },
+      extraTools: [{
+        name: 'search_records',
+        description: 'Search records by name.',
+        evidenceKind: 'read',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    const request = mockGenerateOpenAIResponse.mock.calls.at(-1)?.[0];
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT);
+    expect(String(request?.messages?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before performing a safe broad read-only search');
+    expect(request?.tools).toEqual(expect.objectContaining({
+      ask_user_input: expect.objectContaining({ name: 'ask_user_input' }),
+      search_records: expect.objectContaining({ name: 'search_records' }),
+    }));
   });
 
   it('injects workspace tool guidance when structured workspace tools are available', async () => {
