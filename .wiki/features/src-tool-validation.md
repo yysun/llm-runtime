@@ -11,7 +11,9 @@ source_paths:
 updated_at: "2026-05-15"
 ---
 
-`src/tool-validation.ts` enforces deterministic guardrails before any built-in or MCP-backed tool executes.
+`src/tool-validation.ts` checks tool arguments before any built-in or Model Context Protocol (MCP)-backed tool runs.
+
+In plain terms, this is the package's safety gate for tool inputs: it fixes a few common model mistakes, rejects unsupported fields, and returns a structured error artifact when the arguments are still wrong.
 
 Facts from source:
 - Validation checks required parameters, unknown keys, and simple primitive types from the tool schema.

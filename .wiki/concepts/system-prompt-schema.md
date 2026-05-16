@@ -4,20 +4,25 @@ type: "concept"
 status: "active"
 language: "default"
 source_paths:
+  - "src/prompt-contracts.ts"
   - "src/runtime.ts"
   - "src/openai-direct.ts"
   - "src/anthropic-direct.ts"
   - "src/google-direct.ts"
+  - "tests/llm/runtime.test.ts"
   - "tests/llm/runtime-provider.test.ts"
 updated_at: "2026-05-14"
 ---
 
-This page describes the stable system-prompt shape that callers should assemble before passing messages to `generate(...)` or `stream(...)`.
+This page explains the safest way to build the first system message before calling `generate(...)` or `stream(...)`.
+
+In plain terms, put your app's rules, any repository instructions from `AGENTS.md`, and your own tool-use preferences into one combined system message, then let the runtime append its own package-managed guidance after that.
 
 Facts from source:
 - `src/runtime.ts` does not have a special AGENTS.md field. The caller is responsible for turning any client system prompt, AGENTS.md content, and custom tool policy into normal chat `messages`.
-- `src/runtime.ts` appends runtime-owned tool guidance onto the first existing `system` message when one exists, or creates a new leading `system` message when none exists.
-- The runtime can inject two tool-policy blocks: one for human-intervention tools (`ask_user_input` / `human_intervention_request`) and one for structured workspace tools (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`).
+- `src/runtime.ts` appends runtime-owned guidance onto the first existing `system` message when one exists, or creates a new leading `system` message when none exists.
+- The runtime-managed content is wrapped in a tagged block from `src/prompt-contracts.ts`, so repeated injections replace the package-owned section instead of stacking duplicate guidance.
+- The runtime can inject up to three managed sections depending on the surface: the agent run-loop contract used by completion helpers, the `ask_user_input` hint, and the structured workspace-tool hint (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`).
 - `src/openai-direct.ts` preserves `system` messages as ordinary system-role entries.
 - `src/anthropic-direct.ts` extracts only the first `system` message into Anthropic's top-level `system` field.
 - `src/google-direct.ts` overwrites `systemInstruction` as it iterates, so the last `system` message wins.
@@ -31,6 +36,11 @@ Recommended schema:
    - Client-owned tool policy
 3. After that combined system block, include the normal `user` / `assistant` / `tool` transcript.
 4. Let the runtime append its own tool guidance after the caller-owned sections.
+
+What the runtime adds today:
+- `generate(...)` and `stream(...)` can append the human-input hint and workspace-tool hint when those tools are enabled.
+- `complete(...)` and `runtime.complete(...)` also append the agent run-loop contract so the model is reminded that narration is not completion.
+- The managed block is inserted into the same first system message rather than as a separate transport field, which keeps cross-provider behavior stable.
 
 Suggested section layout:
 
@@ -93,4 +103,4 @@ Practical rule:
 - If the caller includes shell examples, keep them short, recipe-style, and aligned with `rg`, `find`, `head`, `tail`, and `sed -n` rather than open-ended shell pipelines.
 - Avoid sending multiple independent system messages unless the caller is intentionally accepting cross-provider differences.
 
-Read this with [[src-runtime]] for the injection path and with [[provider-adapters]] for the provider-specific message normalization differences.
+Read this with [[src-runtime]] for the injection path, with [[src-prompt-contracts]] for the reusable managed-block helpers, and with [[provider-adapters]] for the provider-specific message normalization differences.

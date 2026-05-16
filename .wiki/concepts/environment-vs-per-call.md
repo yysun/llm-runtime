@@ -9,7 +9,9 @@ source_paths:
 updated_at: "2026-04-12"
 ---
 
-The package is designed around one rule: stable harness state belongs in `environment`, while request-specific state stays per call.
+The package is designed around one rule: keep long-lived app setup in `environment`, and keep request-specific state on each individual call.
+
+Here, "harness" just means the host app or test runner that calls `llm-runtime`.
 
 Facts from source:
 - `createLLMEnvironment(...)` builds or accepts an explicit provider config store, MCP registry, skill registry, and default `reasoningEffort` / `toolPermission` values.

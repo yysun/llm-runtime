@@ -9,7 +9,9 @@ source_paths:
 updated_at: "2026-04-23"
 ---
 
-`src/mcp.ts` converts MCP server config into executable package-native tools.
+`src/mcp.ts` turns Model Context Protocol (MCP) server settings into normal tools that `llm-runtime` can call.
+
+In plain terms, if you point the package at an MCP server, this module handles the connection, discovers the server's tools, and exposes them through the same tool system as the built-ins.
 
 Facts from source:
 - The registry accepts both `servers` and legacy `mcpServers`, then normalizes them into one config shape.

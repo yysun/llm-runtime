@@ -8,6 +8,7 @@ source_paths:
   - ".docs/reqs/2026/05/14/req-builtin-filesystem-tools.md"
   - "src/builtin-executors.ts"
   - "src/builtins.ts"
+  - "src/human-input-contract.ts"
   - "src/types.ts"
   - "tests/llm/runtime.test.ts"
 updated_at: "2026-05-15"
@@ -18,7 +19,7 @@ updated_at: "2026-05-15"
 Facts from source:
 - File and shell executors enforce a trusted working-directory scope rather than accepting arbitrary filesystem access.
 - `load_skill` resolves content from the configured skill registry and returns structured skill context text.
-- `ask_user_input` and `human_intervention_request` now share the same executor. They validate a structured `questions[]` array, default `type` to `single-select`, preserve `allowSkip`, and return a serialized `PendingHitlToolResult` instead of calling a host adapter.
+- `ask_user_input` validates a structured `questions[]` array, defaults `type` to `single-select`, preserves `allowSkip`, and returns a serialized `PendingHitlToolResult` instead of calling a host adapter.
 - The current pending HITL payload includes `status: "pending"`, `confirmed: false`, a `requestId` derived from `toolCallId` when available, the normalized selection `type`, `allowSkip`, and the validated `questions` array.
 - `shell_cmd` resolves an optional `directory` under the trusted working directory, executes with `shell: false`, ignores stdin, captures stdout/stderr, and terminates on timeout.
 - `search_files` walks the trusted workspace, ignores common noise such as `node_modules`, `.git`, and `dist`, and returns deterministic sorted matches for the requested path pattern.
