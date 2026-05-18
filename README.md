@@ -123,13 +123,21 @@ For routine workspace operations, prefer the structured built-ins over `shell_cm
 
 - `list_files` for directory listing
 - `search_files` for glob-like file discovery
-- `read_file` for bounded file inspection
+- `read_file` for paginated file inspection
 - `path_exists` for file or directory existence checks
 - `create_directory` for directory creation
 
 Treat `shell_cmd` as a fallback for explicit command execution, git workflows, and cases the structured workspace tools do not cover.
 
 `search_files` is the built-in file-discovery tool for glob-like path matching. `create_directory` creates directories recursively inside the trusted working directory. `path_exists` reports whether a file or directory currently exists and, when it does, whether it is a file or directory.
+
+`read_file` requires a target `filePath` (or alias `path`) and supports paginated reads with a 1-based `offset` plus an optional `limit`. Omitting `limit` uses the default page size for a single read, but the public contract does not impose a fixed hard maximum line cap.
+
+`write_file` requires a target `filePath` (or alias `path`) plus `content`, and supports `create` and `overwrite` modes.
+
+`list_files` lists entries from the requested workspace path. Hidden dot-prefixed paths are excluded unless `includeHidden: true` is passed. `search_files` searches from the requested workspace root using a glob-like `pattern`; hidden dot-prefixed paths are excluded unless `includeHidden: true` is passed there as well.
+
+`path_exists` also reports symbolic-link presence so callers can distinguish a missing path from an existing symlink that does not currently resolve to a regular file or directory.
 
 `ask_user_input` is the public built-in human-intervention tool. The older `human_intervention_request` and `ask_user_question` names are no longer part of the public tool surface.
 

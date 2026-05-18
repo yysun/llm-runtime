@@ -15,6 +15,7 @@
  * - Built-in tool aliases mirror current runtime compatibility behavior where practical.
  *
  * Recent changes:
+ * - 2026-05-18: Added `write_file` path alias normalization so validation matches the file-tool schema contract.
  * - 2026-03-27: Added package-owned validation for built-in tool execution.
  * - 2026-05-14: Updated filesystem built-in alias normalization for the new tool surface.
  */
@@ -65,6 +66,16 @@ function normalizeKnownParameterAliases(toolName: string, args: Record<string, u
 
   if (
     toolName === 'read_file'
+    && normalizedArgs.filePath === undefined
+    && normalizedArgs.path !== undefined
+  ) {
+    normalizedArgs.filePath = normalizedArgs.path;
+    delete normalizedArgs.path;
+    corrections.push('path -> filePath');
+  }
+
+  if (
+    toolName === 'write_file'
     && normalizedArgs.filePath === undefined
     && normalizedArgs.path !== undefined
   ) {

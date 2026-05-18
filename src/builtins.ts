@@ -15,6 +15,7 @@
  * - `ask_user_input` is the public HITL built-in.
  *
  * Recent changes:
+ * - 2026-05-18: Aligned file-tool schema requirements with executor behavior and removed `read_file` wording that implied a fixed hard cap.
  * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
  * - 2026-05-15: Removed deprecated HITL alias tools from the public built-in surface.
  * - 2026-05-15: Changed the default built-in exposure to a read-only set.
@@ -160,7 +161,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   read_file: {
     description:
-      'Read file contents with bounded line pagination. Relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
+      'Read file contents with line pagination. Relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
     parameters: {
       type: 'object',
       properties: {
@@ -178,10 +179,10 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
         },
         limit: {
           type: 'number',
-          description: 'Maximum number of lines to return.',
+          description: 'Optional number of lines to return for this page.',
         },
       },
-      required: [],
+      required: ['filePath'],
       additionalProperties: false,
     },
   },
@@ -209,7 +210,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
           description: 'Optional write mode.',
         },
       },
-      required: ['content'],
+      required: ['filePath', 'content'],
       additionalProperties: false,
     },
   },

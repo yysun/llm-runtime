@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-18: Added focused contract coverage for file-tool validation, uncapped read pagination, hidden entry discovery, and symlink-aware path checks.
  * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
  * - 2026-05-15: Added `createRuntime(...)` facade coverage.
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
@@ -1056,6 +1057,160 @@ describe('llm-runtime runtime', () => {
     });
   });
 
+  it('reads files without a fixed hard line cap when limit is explicit', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const lines = Array.from({ length: 250 }, (_, index) => `line-${index + 1}`);
+      await fs.writeFile(path.join(workspacePath, 'long.txt'), lines.join('\n'));
+
+      const tools = resolveTools({
+        builtIns: {
+          read_file: true,
+        },
+      });
+
+      const result = await tools.read_file?.execute?.({
+        filePath: 'long.txt',
+        limit: 250,
+      }, {
+        workingDirectory: workspacePath,
+      });
+      const parsed = JSON.parse(String(result));
+
+      expect(parsed).toMatchObject({
+        filePath: path.join(workspacePath, 'long.txt'),
+        offset: 1,
+        limit: 250,
+        totalLines: 250,
+      });
+      expect(parsed.content.split('\n')).toHaveLength(250);
+      expect(parsed.content.split('\n').at(-1)).toBe('line-250');
+    });
+  });
+
+  it('keeps read_file scoped to the trusted working directory', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const skillRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-skill-'));
+
+      try {
+        const skillPath = path.join(skillRoot, 'sample-skill');
+        await fs.mkdir(skillPath, { recursive: true });
+        await fs.writeFile(path.join(skillPath, 'SKILL.md'), '# Sample skill\n\nUsed for test discovery.');
+        await fs.writeFile(path.join(skillPath, 'external.txt'), 'outside workspace file');
+
+        const result = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-scope-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'external.txt' }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+          },
+        });
+
+        expect(String(result)).toContain('Error: read_file failed');
+        expect(String(result)).toContain('ENOENT');
+      } finally {
+        await fs.rm(skillRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('lists hidden and previously excluded paths only when requested', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      await fs.mkdir(path.join(workspacePath, '.git'), { recursive: true });
+      await fs.mkdir(path.join(workspacePath, 'node_modules', 'demo'), { recursive: true });
+      await fs.writeFile(path.join(workspacePath, '.env'), 'SECRET=1');
+      await fs.writeFile(path.join(workspacePath, '.git', 'config'), '[core]');
+      await fs.writeFile(path.join(workspacePath, 'node_modules', 'demo', 'index.js'), 'export {};');
+
+      const tools = resolveTools({
+        builtIns: {
+          list_files: true,
+          search_files: true,
+        },
+      });
+
+      const defaultList = JSON.parse(String(await tools.list_files?.execute?.({}, {
+        workingDirectory: workspacePath,
+      })));
+      expect(defaultList.entries).not.toContain('.env');
+      expect(defaultList.entries).not.toContain('.git/');
+      expect(defaultList.entries).toContain('node_modules/');
+
+      const hiddenList = JSON.parse(String(await tools.list_files?.execute?.({
+        includeHidden: true,
+        recursive: true,
+        maxDepth: 3,
+      }, {
+        workingDirectory: workspacePath,
+      })));
+      expect(hiddenList.entries).toEqual(expect.arrayContaining([
+        '.env',
+        '.git/',
+        '.git/config',
+        'node_modules/',
+        'node_modules/demo/',
+      ]));
+
+      const defaultSearch = JSON.parse(String(await tools.search_files?.execute?.({
+        pattern: '**/*.js',
+      }, {
+        workingDirectory: workspacePath,
+      })));
+      expect(defaultSearch.entries).toEqual(['node_modules/demo/index.js']);
+
+      const hiddenSearch = JSON.parse(String(await tools.search_files?.execute?.({
+        pattern: '**/*.js',
+        includeHidden: true,
+      }, {
+        workingDirectory: workspacePath,
+      })));
+      expect(hiddenSearch.entries).toEqual(['node_modules/demo/index.js']);
+    });
+  });
+
+  it('writes files and validates missing target paths before execution', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const tools = resolveTools({
+        builtIns: {
+          write_file: true,
+        },
+      });
+
+      const result = await tools.write_file?.execute?.({
+        path: 'notes/output.txt',
+        content: 'hello write tool',
+      }, {
+        workingDirectory: workspacePath,
+      });
+      const parsed = JSON.parse(String(result));
+
+      expect(parsed).toMatchObject({
+        ok: true,
+        status: 'success',
+        mode: 'overwrite',
+      });
+      await expect(fs.readFile(path.join(workspacePath, 'notes', 'output.txt'), 'utf8')).resolves.toBe('hello write tool');
+
+      const invalid = await tools.write_file?.execute?.({
+        content: 'missing path',
+      }, {
+        workingDirectory: workspacePath,
+      });
+
+      expect(String(invalid)).toContain('"errorType": "tool_parameter_validation_failed"');
+      expect(String(invalid)).toContain('Required parameter \'filePath\' is missing or empty');
+    });
+  });
+
   it('creates directories idempotently and reports path existence', async () => {
     await withTempWorkspace(async (workspacePath) => {
       const tools = resolveTools({
@@ -1126,6 +1281,47 @@ describe('llm-runtime runtime', () => {
         type: null,
         isDirectory: false,
         isFile: false,
+        isSymbolicLink: false,
+      });
+    });
+  });
+
+  it('reports symlink-aware path existence semantics', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      await fs.writeFile(path.join(workspacePath, 'target.txt'), 'ready');
+      await fs.symlink('target.txt', path.join(workspacePath, 'link.txt'));
+      await fs.symlink('missing.txt', path.join(workspacePath, 'dangling.txt'));
+
+      const tools = resolveTools({
+        builtIns: {
+          path_exists: true,
+        },
+      });
+
+      const linkResult = JSON.parse(String(await tools.path_exists?.execute?.({
+        path: 'link.txt',
+      }, {
+        workingDirectory: workspacePath,
+      })));
+      const danglingResult = JSON.parse(String(await tools.path_exists?.execute?.({
+        path: 'dangling.txt',
+      }, {
+        workingDirectory: workspacePath,
+      })));
+
+      expect(linkResult).toMatchObject({
+        exists: true,
+        type: 'file',
+        isFile: true,
+        isDirectory: false,
+        isSymbolicLink: true,
+      });
+      expect(danglingResult).toMatchObject({
+        exists: true,
+        type: 'other',
+        isFile: false,
+        isDirectory: false,
+        isSymbolicLink: true,
       });
     });
   });
@@ -1177,6 +1373,19 @@ describe('llm-runtime runtime', () => {
         content: 'hello from helper',
       }));
     });
+  });
+
+  it('rejects missing file paths for read_file during validation', async () => {
+    const tools = resolveTools({
+      builtIns: {
+        read_file: true,
+      },
+    });
+
+    const result = await tools.read_file?.execute?.({});
+
+    expect(String(result)).toContain('"errorType": "tool_parameter_validation_failed"');
+    expect(String(result)).toContain('Required parameter \'filePath\' is missing or empty');
   });
 
   it('keeps public tool execution throwing by default for setup errors', async () => {

@@ -15,6 +15,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-18: Removed the fixed `read_file` hard cap, kept reads workspace-scoped, made hidden entry discovery opt-in, and made `path_exists` symlink-aware.
  * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
  * - 2026-05-15: Kept a single public HITL executor at `ask_user_input`.
  * - 2026-03-27: Added package-owned executors for built-in tools.
@@ -45,7 +46,7 @@ type BuiltInExecutorOptions = {
   skillRegistry: SkillRegistry;
 };
 
-const DEFAULT_READ_LIMIT = 200;
+const DEFAULT_READ_PAGE_SIZE = 200;
 const DEFAULT_LIST_MAX_ENTRIES = 200;
 const DEFAULT_LIST_MAX_DEPTH = 2;
 const DEFAULT_SEARCH_MAX_RESULTS = 200;
@@ -208,16 +209,6 @@ function matchesIncludePattern(candidatePath: string, pattern: string): boolean 
   return candidatePath.includes(normalizedPattern);
 }
 
-function shouldIgnoreRelativePath(relativePath: string): boolean {
-  const normalized = normalizePath(relativePath).replace(/\/$/, '');
-  if (!normalized) {
-    return false;
-  }
-
-  const segments = normalized.split('/');
-  return segments.includes('node_modules') || segments.includes('.git') || segments.includes('dist');
-}
-
 async function collectDirectoryEntries(rootPath: string, options: {
   includeHidden: boolean;
   maxDepth: number;
@@ -239,7 +230,7 @@ async function collectDirectoryEntries(rootPath: string, options: {
 
       const absolutePath = path.join(currentPath, directoryEntry.name);
       const relativePath = normalizePath(path.relative(rootPath, absolutePath));
-      if (!relativePath || shouldIgnoreRelativePath(relativePath)) {
+      if (!relativePath) {
         continue;
       }
 
@@ -276,7 +267,11 @@ function toUtf8String(value: unknown): string {
   return value == null ? '' : String(value);
 }
 
-async function createReadFileExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+function splitFileLines(content: string): string[] {
+  return content === '' ? [] : content.split(/\r?\n/);
+}
+
+async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedFilePath = String(args.filePath ?? args.path ?? '').trim();
@@ -284,37 +279,11 @@ async function createReadFileExecutor(options: BuiltInExecutorOptions, args: Rec
       return 'Error: read_file failed - filePath is required';
     }
 
-    let resolvedPath = resolveScopedPath(requestedFilePath, trustedWorkingDirectory);
-    let rawContent = '';
-
-    try {
-      rawContent = await fs.readFile(resolvedPath, 'utf8');
-    } catch (error) {
-      const skills = await options.skillRegistry.listSkills();
-      let fallbackLoaded = false;
-      for (const skill of skills) {
-        const skillRoot = path.dirname(skill.sourcePath);
-        const candidatePath = path.resolve(skillRoot, requestedFilePath);
-        if (!isPathWithinRoot(candidatePath, skillRoot)) {
-          continue;
-        }
-        try {
-          rawContent = await fs.readFile(candidatePath, 'utf8');
-          resolvedPath = candidatePath;
-          fallbackLoaded = true;
-          break;
-        } catch {
-          // continue
-        }
-      }
-      if (!fallbackLoaded) {
-        throw error;
-      }
-    }
-
-    const lines = toUtf8String(rawContent).split(/\r?\n/);
+    const resolvedPath = resolveScopedPath(requestedFilePath, trustedWorkingDirectory);
+    const rawContent = await fs.readFile(resolvedPath, 'utf8');
+    const lines = splitFileLines(toUtf8String(rawContent));
     const offset = clamp(Number(args.offset ?? 1), 1, Number.MAX_SAFE_INTEGER);
-    const limit = clamp(Number(args.limit ?? DEFAULT_READ_LIMIT), 1, DEFAULT_READ_LIMIT);
+    const limit = clamp(Number(args.limit ?? DEFAULT_READ_PAGE_SIZE), 1, Number.MAX_SAFE_INTEGER);
 
     return JSON.stringify({
       filePath: resolvedPath,
@@ -377,7 +346,7 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
     const requestedPath = String(args.path ?? '.');
     const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
     const recursive = Boolean(args.recursive ?? false);
-    const includeHidden = Boolean(args.includeHidden ?? true);
+    const includeHidden = Boolean(args.includeHidden ?? false);
     const maxDepth = clamp(Number(args.maxDepth ?? (recursive ? DEFAULT_LIST_MAX_DEPTH : 1)), 1, DEFAULT_LIST_MAX_DEPTH);
     const maxEntries = clamp(Number(args.maxEntries ?? DEFAULT_LIST_MAX_ENTRIES), 1, DEFAULT_LIST_MAX_ENTRIES);
     const includePattern = String(args.includePattern ?? '').trim();
@@ -430,7 +399,7 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
     const searchRoot = args.path
       ? resolveScopedPath(String(args.path), trustedWorkingDirectory)
       : trustedWorkingDirectory;
-    const includeHidden = Boolean(args.includeHidden ?? true);
+    const includeHidden = Boolean(args.includeHidden ?? false);
     const maxResults = clamp(Number(args.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS), 1, DEFAULT_SEARCH_MAX_RESULTS);
 
     const entries = await collectDirectoryEntries(searchRoot, {
@@ -509,20 +478,27 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
     }
 
     const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
-    const stats = await fs.stat(resolvedPath).catch(() => null);
+    const stats = await fs.lstat(resolvedPath).catch(() => null);
+    const isSymbolicLink = stats?.isSymbolicLink() ?? false;
+    const targetStats = isSymbolicLink
+      ? await fs.stat(resolvedPath).catch(() => null)
+      : stats;
+
+    const type = stats == null
+      ? null
+      : targetStats?.isDirectory()
+        ? 'directory'
+        : targetStats?.isFile()
+          ? 'file'
+          : 'other';
 
     return JSON.stringify({
       path: resolvedPath,
       exists: stats != null,
-      type: stats == null
-        ? null
-        : stats.isDirectory()
-          ? 'directory'
-          : stats.isFile()
-            ? 'file'
-            : 'other',
-      isDirectory: stats?.isDirectory() ?? false,
-      isFile: stats?.isFile() ?? false,
+      type,
+      isDirectory: targetStats?.isDirectory() ?? false,
+      isFile: targetStats?.isFile() ?? false,
+      isSymbolicLink,
     }, null, 2);
   } catch (error) {
     return `Error: path_exists failed - ${error instanceof Error ? error.message : String(error)}`;
