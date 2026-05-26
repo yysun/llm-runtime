@@ -364,7 +364,6 @@ export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOption
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
-  humanInputToolName?: string;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;
 }

@@ -52,7 +52,6 @@ import {
   containsAgentRunLoopSystemPrompt,
   upsertManagedSystemPrompt,
 } from './prompt-contracts.js';
-import type { PendingHumanInput } from './runtime-complete-contract.js';
 import { createSkillRegistry } from './skills.js';
 import { createToolRegistry } from './tools.js';
 import type {
@@ -245,10 +244,19 @@ function getCompleteBuiltIns(selection: BuiltInToolSelection | undefined): Built
 type RuntimeCompletionState = {
   messages: LLMChatMessage[];
   output?: string | null;
-  pendingHumanInput?: PendingHumanInput;
+  toolCalls?: LLMToolCall[];
   error?: string;
   raw?: unknown;
 };
+
+function hasHostExecutableTool(
+  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools'>,
+  toolName: string,
+): boolean {
+  const extraTool = request.extraTools?.find((tool) => String(tool.name || '').trim() === toolName);
+  const directTool = request.tools?.[toolName];
+  return typeof extraTool?.execute === 'function' || typeof directTool?.execute === 'function';
+}
 
 function classifyRuntimeNarration(responseText: string): 'intent_only_narration' | undefined {
   const normalized = responseText.trim();
@@ -354,11 +362,11 @@ function adaptRuntimeCompleteResult(result: {
   response: LLMResponse | null;
   stop: { maxIterations: number };
 }): LLMRuntimeCompleteResult {
-  if (result.state.pendingHumanInput) {
+  if (result.reason === 'tool_calls_response' && result.state.toolCalls?.length) {
     return {
-      status: 'waiting_for_human',
+      status: 'tool_calls',
       messages: result.state.messages,
-      pendingHumanInput: result.state.pendingHumanInput,
+      toolCalls: result.state.toolCalls,
       raw: result.state.raw ?? result.response ?? undefined,
     };
   }
@@ -452,7 +460,6 @@ async function runRuntimeCompletion(
   request: LLMRuntimeCompleteOptions,
   emitEvent?: (event: LLMRuntimeStreamCompleteEvent) => Promise<void> | void,
 ): Promise<LLMRuntimeCompleteResult> {
-  const humanInputToolName = request.humanInputToolName ?? 'ask_user_input';
   const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
     initialState: {
       messages: request.messages,
@@ -495,47 +502,17 @@ async function runRuntimeCompletion(
     onToolCallsResponse: async ({ state, response, toolExecutor, iteration }) => {
       const nextMessages = [...state.messages, response.assistantMessage];
       const toolCalls = response.tool_calls ?? [];
-      const humanInputToolCalls = toolCalls.filter((toolCall) => (
-        toolCall.function.name === humanInputToolName
-        || HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolCall.function.name as any)
+      const hostHandledHumanInputToolCalls = toolCalls.filter((toolCall) => (
+        HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolCall.function.name as any)
+        && !hasHostExecutableTool(request, toolCall.function.name)
       ));
 
-      if (humanInputToolCalls.length > 0) {
-        if (toolCalls.length !== 1 || humanInputToolCalls.length !== 1) {
-          return {
-            state: {
-              ...state,
-              messages: nextMessages,
-              error: 'Assistant mixed ask_user_input with other tool calls in the same turn. ask_user_input must be the only tool call when pausing for human input.',
-              raw: response,
-            },
-          };
-        }
-
-        const pendingToolCall = humanInputToolCalls[0];
-        const parsedArguments = parseToolCallArguments(pendingToolCall);
-        if (!parsedArguments.ok) {
-          return {
-            state: {
-              ...state,
-              messages: nextMessages,
-              error: parsedArguments.message,
-              raw: response,
-            },
-          };
-        }
-
-        const pendingHumanInput: PendingHumanInput = {
-          toolCallId: pendingToolCall.id,
-          toolName: pendingToolCall.function.name,
-          request: parsedArguments.args,
-        };
-
+      if (hostHandledHumanInputToolCalls.length > 0) {
         return {
           state: {
             ...state,
             messages: nextMessages,
-            pendingHumanInput,
+            toolCalls,
             raw: response,
           },
         };
@@ -620,11 +597,10 @@ async function runRuntimeCompletion(
 
   const runtimeResult = adaptRuntimeCompleteResult(loopResult);
 
-  if (runtimeResult.status === 'waiting_for_human') {
+  if (runtimeResult.status === 'tool_calls') {
     await emitEvent?.({
-      type: 'waiting_for_human',
-      pendingHumanInput: runtimeResult.pendingHumanInput!,
-      messages: runtimeResult.messages,
+      type: 'tool_calls',
+      result: runtimeResult,
       iteration: loopResult.iterations,
     });
     return runtimeResult;

@@ -26,6 +26,7 @@
 
 export * from './types.js';
 export * from './builtins.js';
+export * from './human-input-contract.js';
 export * from './llm-config.js';
 export * from './mcp.js';
 export * from './skills.js';

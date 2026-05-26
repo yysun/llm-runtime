@@ -234,7 +234,7 @@ describe('llm-runtime completion loop', () => {
     expect(result.state.seenTexts).toEqual(['done']);
   });
 
-  it('defaults complete() package-managed built-ins to include ask_user_input', async () => {
+  it('defaults complete() package-managed built-ins to read-only tools plus ask_user_input', async () => {
     mockGenerate.mockResolvedValueOnce(text('done'));
 
     await complete({
@@ -323,7 +323,7 @@ describe('llm-runtime completion loop', () => {
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires user input.');
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Prefer action over explanation.');
     expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before safe discovery.');
-    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use ask_user_input only when:');
+    expect(String(seenMessages[0]?.[0]?.content ?? '')).toContain('Use an available user-input tool only when:');
     expect(seenMessages[0]?.[1]).toEqual({ role: 'user', content: 'inspect the file' });
   });
 

@@ -414,7 +414,11 @@ export function createBuiltInToolDefinitions(options: {
 
 export function assertNoBuiltInToolNameCollisions(tools: LLMToolDefinition[]): void {
   for (const tool of tools) {
-    if (BUILT_IN_TOOL_NAMES.includes(tool.name as BuiltInToolName)) {
+    const toolName = String(tool.name || '').trim() as BuiltInToolName;
+    if (
+      BUILT_IN_TOOL_NAMES.includes(toolName)
+      && !HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)
+    ) {
       throw new Error(`Tool name "${tool.name}" is reserved by llm-runtime built-ins.`);
     }
   }

@@ -117,7 +117,7 @@ When `builtIns` is omitted, the package now exposes a read-only default set:
 - `read_file`
 - `path_exists`
 
-Write-capable or interactive built-ins such as `shell_cmd`, `write_file`, `create_directory`, `web_fetch`, and `ask_user_input` require explicit opt-in. Pass `builtIns: true` or `builtIns: 'all'` to opt back into the full package-owned set.
+Write-capable built-ins such as `shell_cmd`, `write_file`, `create_directory`, and `web_fetch` require explicit opt-in. Pass `builtIns: true` or `builtIns: 'all'` to opt back into the full package-owned set. Package-managed completion also exposes the `ask_user_input` contract by default so the model can request required human input.
 
 For routine workspace operations, prefer the structured built-ins over `shell_cmd`:
 
@@ -139,13 +139,13 @@ Treat `shell_cmd` as a fallback for explicit command execution, git workflows, a
 
 `path_exists` also reports symbolic-link presence so callers can distinguish a missing path from an existing symlink that does not currently resolve to a regular file or directory.
 
-`ask_user_input` is the public built-in human-intervention tool. The older `human_intervention_request` and `ask_user_question` names are no longer part of the public tool surface.
+`ask_user_input` is the public human-intervention tool contract. The older `human_intervention_request` and `ask_user_question` names are no longer part of the public tool surface.
 
-When the built-in human-intervention tool is enabled, the runtime also injects a small system-level hint telling the model to prefer that tool for clarification, approval, and other human-in-the-loop decisions. This helps generic skills that say things like "ask the user" or "use an ask-question tool" map onto the built-in HITL tool without each skill naming it explicitly.
+When a human-intervention tool is available, the runtime also injects a small system-level hint telling the model to prefer that tool for clarification, approval, and other human-in-the-loop decisions. This helps generic skills that say things like "ask the user" or "use an ask-question tool" map onto the HITL tool without each skill naming it explicitly.
 
-The tool descriptions and the loop-contract system prompt both instruct the model to reach for `ask_user_input` only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. Safe broad searches should happen before HITL disambiguation prompts.
+The tool descriptions and the loop-contract system prompt both instruct the model to reach for user input only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision. Safe broad searches should happen before HITL disambiguation prompts.
 
-`ask_user_input` should usually be enabled for interactive harnesses that can pause, surface a question to a human, and then resume with the selected answer. It should usually be disabled for unattended batch runs, deterministic tests, or autonomous workflows that are not allowed to wait for human input.
+Interactive harnesses decide how to pause, surface a question to a human, and resume with the selected answer. If a host provides an executable `ask_user_input` tool, runtime helpers execute that host tool normally. If `ask_user_input` is only present through the default completion contract, runtime helpers return the tool call batch to the host; they do not wait for a human or apply a human-input timeout.
 
 The `ask_user_input` parameter shape is:
 
@@ -202,8 +202,8 @@ The runtime facade exposes the same hardened package-owned completion loop throu
 The runtime helper behavior is:
 
 - If the assistant returns one or more normal tool calls, the runtime executes them, appends tool results, and continues the loop.
-- If the assistant calls `ask_user_input` as the only tool call in the turn, the runtime pauses and returns `status: 'waiting_for_human'` instead of executing that tool.
-- If the assistant mixes `ask_user_input` with any other tool call in the same turn, the runtime fails the turn instead of partially executing tools before pausing.
+- `ask_user_input` is exposed by default in package-managed completion. If the host supplies it as an executable tool, runtime helpers execute that host tool normally.
+- If `ask_user_input` comes only from the default contract, runtime helpers return `status: 'tool_calls'` with the assistant message and tool call batch so the host can handle it.
 - By default, runtime completion uses `defaultTextResponseMode: 'require_tool_result'`, so unresolved plain text is not terminal before current-run tool evidence exists.
 - Intent-only narration such as "I will inspect the files now" is retried and then rejected instead of being treated as a completed run.
 - Final plain text is still accepted after the current run has produced the required tool evidence, or when the caller explicitly opts into a more permissive text mode.
@@ -212,62 +212,57 @@ The runtime helper behavior is:
 
 `runtime.complete(...)` and `runtime.streamComplete(...)` keep the simple runtime result and event contract, but they no longer bypass the generic `complete(...)` hardening described later in this README. Use `complete(...)` or `runCompletionLoop(...)` when your harness needs callback-driven lifecycle hooks, host-owned classification logic, or direct access to the lower-level loop result metadata.
 
-`runtime.streamComplete(...)` is a lifecycle event stream, not a true token-by-token text stream. The hardened runtime wrapper emits events such as `model_start`, `assistant_message`, `tool_start`, `tool_result`, `waiting_for_human`, `completed`, and `failed`. It does not currently forward text token deltas from the hardened completion loop.
+`runtime.streamComplete(...)` is a lifecycle event stream, not a true token-by-token text stream. The hardened runtime wrapper emits events such as `model_start`, `assistant_message`, `tool_start`, `tool_result`, `tool_calls`, `completed`, and `failed`. It does not currently forward text token deltas from the hardened completion loop.
 
 Provider adapters may still stream internally. For example, the OpenAI provider helper can consume streaming chunks and assemble a final response while emitting chunk callbacks at the provider layer, but the runtime-level completion wrapper currently exposes only the higher-level lifecycle events.
 
-When a run pauses for human input, resume it by appending a tool-result message created with `createHumanInputToolResult(...)` or `createAskUserInputResult(...)` and then calling `runtime.complete(...)` or `runtime.streamComplete(...)` again.
+For host-owned human input flows, resume by appending a tool-result message created with `createHumanInputToolResult(...)` or `createAskUserInputResult(...)` and then calling `complete(...)`, `runtime.complete(...)`, or `runtime.streamComplete(...)` again.
 
 Minimal resume pattern:
 
 ```ts
 import {
   createHumanInputToolResult,
-  createRuntime,
 } from 'llm-runtime';
 
-const runtime = createRuntime({
-  providers: {
-    openai: {
-      apiKey: process.env.OPENAI_API_KEY!,
-    },
-  },
-});
-
-const firstPass = await runtime.complete({
-  provider: 'openai',
-  model: 'gpt-5',
-  messages: [{ role: 'user', content: 'Do the task and ask me if you need a choice.' }],
-  builtIns: {
-    ask_user_input: true,
-    read_file: true,
-  },
-});
-
-if (firstPass.status === 'waiting_for_human') {
-  const resumedMessages = [
-    ...firstPass.messages,
-    createHumanInputToolResult(firstPass.pendingHumanInput, {
-      answers: {
-        scope: 'all',
+const messagesBeforeTheHostPaused = [
+  { role: 'user', content: 'Find the token and ask me about scope.' },
+  {
+    role: 'assistant',
+    content: '',
+    tool_calls: [{
+      id: 'call_123',
+      type: 'function',
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope should I use?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
       },
-    }),
-  ];
+    }],
+  },
+];
 
-  const resumed = await runtime.complete({
-    provider: 'openai',
-    model: 'gpt-5',
-    messages: resumedMessages,
-    builtIns: {
-      ask_user_input: true,
-      read_file: true,
+const resumedMessages = [
+  ...messagesBeforeTheHostPaused,
+  createHumanInputToolResult({
+    toolCallId: 'call_123',
+    toolName: 'ask_user_input',
+    request: {
+      questions: [{
+        header: 'Scope',
+        id: 'scope',
+        question: 'Which scope should I use?',
+        options: [
+          { id: 'all', label: 'All' },
+          { id: 'one', label: 'One' },
+        ],
+      }],
     },
-  });
-
-  if (resumed.status === 'completed') {
-    console.log(resumed.output);
-  }
-}
+  }, {
+    answers: {
+      scope: 'all',
+    },
+  }),
+];
 ```
 
 ## `complete(...)` / `runCompletionLoop(...)`
@@ -594,7 +589,7 @@ const result = await runCompletionLoop({
 ## Example
 
 ```ts
-import { createHumanInputToolResult, createRuntime } from 'llm-runtime';
+import { createRuntime } from 'llm-runtime';
 
 const runtime = createRuntime({
   providers: {
@@ -647,7 +642,6 @@ const completion = await runtime.complete({
     },
   ],
   builtIns: {
-    ask_user_input: true,
     read_file: true,
     search_files: true,
   },
@@ -655,32 +649,6 @@ const completion = await runtime.complete({
 
 if (completion.status === 'completed') {
   console.log(completion.output);
-}
-
-if (completion.status === 'waiting_for_human') {
-  console.log(completion.pendingHumanInput.request);
-
-  const resumed = await runtime.complete({
-    provider: 'openai',
-    model: 'gpt-5',
-    messages: [
-      ...completion.messages,
-      createHumanInputToolResult(completion.pendingHumanInput, {
-        answers: {
-          scope: 'all',
-        },
-      }),
-    ],
-    builtIns: {
-      ask_user_input: true,
-      read_file: true,
-      search_files: true,
-    },
-  });
-
-  if (resumed.status === 'completed') {
-    console.log(resumed.output);
-  }
 }
 
 for await (const event of runtime.streamComplete({

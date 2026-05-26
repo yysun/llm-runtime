@@ -47,7 +47,6 @@ vi.mock('../../src/openai-direct.js', async () => {
 });
 
 import {
-  type PendingHumanInput,
   type RuntimeCompleteResult,
   type RuntimeCompleteStatus,
   type RuntimeStreamCompleteEvent,
@@ -571,54 +570,56 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('fails runtime.complete when ask_user_input is mixed with other tool calls', async () => {
+  it('handles ask_user_input alongside other runtime tool calls without special pausing', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const executeLookup = vi.fn(async () => ({ token: 'project-token' }));
-
-    mockGenerateOpenAIResponse.mockResolvedValue({
-      type: 'tool_calls',
-      content: '',
-      tool_calls: [
-        {
-          id: 'lookup-mixed-1',
-          type: 'function' as const,
-          function: {
-            name: 'project_lookup',
-            arguments: '{"query":"token"}',
-          },
+    const executeAskUserInput = vi.fn(async () => ({ pending: true }));
+    const toolCalls = [
+      {
+        id: 'lookup-mixed-1',
+        type: 'function' as const,
+        function: {
+          name: 'project_lookup',
+          arguments: '{"query":"token"}',
         },
-        {
-          id: 'hitl-mixed-1',
-          type: 'function' as const,
-          function: {
-            name: 'ask_user_input',
-            arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
-          },
-        },
-      ],
-      assistantMessage: {
-        role: 'assistant',
-        content: '',
-        tool_calls: [
-          {
-            id: 'lookup-mixed-1',
-            type: 'function' as const,
-            function: {
-              name: 'project_lookup',
-              arguments: '{"query":"token"}',
-            },
-          },
-          {
-            id: 'hitl-mixed-1',
-            type: 'function' as const,
-            function: {
-              name: 'ask_user_input',
-              arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
-            },
-          },
-        ],
       },
+      {
+        id: 'hitl-mixed-1',
+        type: 'function' as const,
+        function: {
+          name: 'ask_user_input',
+          arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
+        },
+      },
+    ];
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      const toolResultIds = request.messages
+        .filter((message: any) => message.role === 'tool')
+        .map((message: any) => message.tool_call_id);
+
+      if (toolResultIds.includes('lookup-mixed-1') && toolResultIds.includes('hitl-mixed-1')) {
+        return {
+          type: 'text',
+          content: 'done',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'done',
+          },
+        };
+      }
+
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: toolCalls,
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: toolCalls,
+        },
+      };
     });
 
     const runtime = createRuntime({
@@ -633,9 +634,6 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Find the token and ask me about scope.' }],
-      builtIns: {
-        ask_user_input: true,
-      },
       extraTools: [{
         name: 'project_lookup',
         description: 'Lookup the project token.',
@@ -648,12 +646,76 @@ describe('llm-runtime runtime', () => {
           additionalProperties: false,
         },
         execute: executeLookup,
+      }, {
+        name: 'ask_user_input',
+        description: 'Host-owned user input tool.',
+        parameters: {
+          type: 'object',
+          properties: {
+            questions: { type: 'array' },
+          },
+          required: ['questions'],
+          additionalProperties: false,
+        },
+        execute: executeAskUserInput,
       }],
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.error).toContain('ask_user_input must be the only tool call');
-    expect(executeLookup).not.toHaveBeenCalled();
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('done');
+    expect(executeLookup).toHaveBeenCalledTimes(1);
+    expect(executeAskUserInput).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
+  it('returns default ask_user_input tool calls to the host without executing a runtime HITL wait', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'hitl-default-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"},{"id":"one","label":"One"}]}]}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      expect(request.tools.ask_user_input).toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [askToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [askToolCall],
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Ask me about scope.' }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([askToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Ask me about scope.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [askToolCall] }),
+    ]);
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
@@ -692,7 +754,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('defaults runtime.complete to ask_user_input and passes request context into completion-loop tools', async () => {
+  it('defaults runtime.complete to read-only plus ask_user_input built-ins and passes request context into completion-loop tools', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const abortController = new AbortController();
@@ -707,9 +769,8 @@ describe('llm-runtime runtime', () => {
     let seenContext: any;
 
     mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
-      expect(request.tools).toEqual(expect.objectContaining({
-        ask_user_input: expect.objectContaining({ name: 'ask_user_input' }),
-      }));
+      expect(request.tools.ask_user_input).toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+      expect(request.tools.read_file).toEqual(expect.objectContaining({ name: 'read_file' }));
 
       const hasLookupResult = request.messages.some((message: any) => (
         message.role === 'tool' && message.tool_call_id === 'lookup-context-1'
@@ -805,26 +866,20 @@ describe('llm-runtime runtime', () => {
   });
 
   it('exports the runtime completion contract types from the package root', () => {
-    const pending: PendingHumanInput = {
-      toolCallId: 'hitl-1',
-      toolName: 'ask_user_input',
-      request: { questions: [] },
-    };
-    const status: RuntimeCompleteStatus = 'waiting_for_human';
+    const status: RuntimeCompleteStatus = 'tool_calls';
     const result: RuntimeCompleteResult = {
       status,
       messages: [],
-      pendingHumanInput: pending,
+      toolCalls: [],
     };
     const event: RuntimeStreamCompleteEvent = {
-      type: 'waiting_for_human',
-      pendingHumanInput: pending,
-      messages: [],
+      type: 'tool_calls',
+      result,
       iteration: 1,
     };
 
-    expect(result.pendingHumanInput).toEqual(pending);
-    expect(event.type).toBe('waiting_for_human');
+    expect(result.toolCalls).toEqual([]);
+    expect(event.type).toBe('tool_calls');
   });
 
   it('reuses the canonical ask_user_input contract in the built-in tool catalog', () => {
@@ -1775,7 +1830,7 @@ describe('llm-runtime runtime', () => {
     expect(result).toContain("Unknown parameter 'question' is not allowed");
   });
 
-  it('rejects attempts to override reserved built-in tool names', () => {
+  it('rejects attempts to override reserved operational built-in tool names', () => {
     expect(() => resolveTools({
       extraTools: [
         {
@@ -1788,17 +1843,18 @@ describe('llm-runtime runtime', () => {
       'Tool name "read_file" is reserved by llm-runtime built-ins.',
     );
 
-    expect(() => resolveTools({
+    expect(resolveTools({
       extraTools: [
         {
           name: 'ask_user_input',
-          description: 'override',
+          description: 'Host-owned user input tool.',
           parameters: { type: 'object' },
         },
       ],
-    })).toThrow(
-      'Tool name "ask_user_input" is reserved by llm-runtime built-ins.',
-    );
+    }).ask_user_input).toEqual(expect.objectContaining({
+      name: 'ask_user_input',
+      description: 'Host-owned user input tool.',
+    }));
   });
 
   it('returns a durable validation artifact for missing required parameters', async () => {
