@@ -25,7 +25,7 @@ source_paths:
   - "tests/e2e/llm-turn-loop-gemini-presentation.ts"
   - "tests/e2e/llm-turn-loop-hardening.ts"
   - "tests/e2e/llm-turn-loop-showcase.ts"
-- "tests/e2e/support/llm-provider-e2e-support.ts"
+  - "tests/e2e/support/llm-provider-e2e-support.ts"
 updated_at: "2026-05-27"
 ---
 
@@ -33,12 +33,12 @@ The repository splits validation into deterministic unit tests and showcase-styl
 
 Facts from source:
 - `npm test` runs `vitest` over `tests/llm`, covering runtime config, skill precedence, tool resolution, MCP integration, provider dispatch, and turn-loop behavior.
-- Adapter-focused unit suites validate provider request mapping directly: `tests/llm/openai-direct.test.ts` covers `reasoning_effort`, OpenAI/Azure `web_search_options`, normalized tool-call responses, and OpenAI-compatible finish-reason metadata; `tests/llm/anthropic-direct.test.ts` proves Anthropic web search is added as a provider-side server tool, that server blocks do not leak into host tool calls, and that `stop_reason` is preserved; `tests/llm/google-direct.test.ts` covers Google Search grounding, Gemini-safe schema dereferencing and field stripping, and additive `finishReason` preservation.
+- Adapter-focused unit suites validate provider request mapping directly: `tests/llm/openai-direct.test.ts` covers `reasoning_effort`, OpenAI/Azure `web_search_options`, normalized tool-call responses, OpenAI-compatible finish-reason metadata, and streamed tool argument chunks; `tests/llm/anthropic-direct.test.ts` proves Anthropic web search is added as a provider-side server tool, that server blocks do not leak into host tool calls, that `input_json_delta` streams as `toolCallDelta`, and that `stop_reason` is preserved; `tests/llm/google-direct.test.ts` covers Google Search grounding, Gemini-safe schema dereferencing and field stripping, and additive `finishReason` preservation.
 - `tests/llm/provider-tool-names.test.ts` isolates the shared provider tool-name translator so collisions, reserved names, and long tool names stay reversible across adapters.
 - `tests/llm/runtime-provider.test.ts` proves the runtime forwards explicit `webSearch` only when requested, including OpenAI, Azure, Gemini, Anthropic, XAI, `openai-compatible`, and Ollama dispatch paths.
 - `tests/llm/mcp-runtime.test.ts` uses mocked MCP SDK clients to prove namespaced tool resolution, cache reuse, public cleanup, fail-fast stdio validation, and URL-only `streamable-http` transport defaults without real processes or sockets.
 - `tests/llm/turn-loop.test.ts` now covers hard-stop reasons, lifecycle hook ordering, synthetic tool-call marking, repeated-call suppression, timeout behavior, timeout-after-tool-result diagnostics, package-managed model dispatch, agent control-tool stops (`final_answer`, `need_user_input`, `blocked`), the permissive standalone `complete(...)` default, strict `require_tool_result` opt-in, action-evidence separation, and the reusable scripted mock-scenario helper used for hardened regression cases.
-- `tests/llm/runtime.test.ts` covers the runtime facade directly with temporary workspaces, including `createRuntime(...)`, `streamComplete(...)`, text/reasoning delta events, control-tool termination, runtime forwarding of loop guardrails, deterministic `search_files` results, idempotent `create_directory`, `path_exists`, read-only built-in defaults, the canonical `ask_user_input` schema, and explicit rejection of the removed `grep` built-in name.
+- `tests/llm/runtime.test.ts` covers the runtime facade directly with temporary workspaces, including `createRuntime(...)`, `streamComplete(...)`, text/reasoning/tool-call/final-answer delta events, control-tool termination, runtime forwarding of loop guardrails, deterministic `search_files` results, idempotent `create_directory`, `path_exists`, read-only built-in defaults, the canonical `ask_user_input` schema, and explicit rejection of the removed `grep` built-in name.
 - `tests/llm/runtime.test.ts` and `tests/llm/mcp-runtime.test.ts` also cover cleanup behavior, including the rule that caller-owned registries are not disposed by runtime cleanup.
 - `tests/llm/tool-validation.test.ts` isolates parameter-shape correction and validation failures so malformed tool arguments surface durable artifacts instead of silent coercion.
 - `tests/llm/showcase.test.ts` keeps README-style flows aligned with the preferred public names, so documentation examples and the published surface drift together instead of independently.

@@ -20,13 +20,14 @@ Facts from source:
 - `RuntimeCompleteResult` normalizes runtime-facade completion outcomes into `completed`, `tool_calls`, `failed`, or `max_iterations`.
 - `tool_calls` is the generic host-handled branch. It is used when runtime completion should surface model tool calls to the host instead of executing or waiting internally.
 - `PendingHumanInput` stores the original tool call id, tool name, and structured request payload so the host can present a human question and resume later when that pattern is useful.
-- `RuntimeStreamCompleteEvent` gives `streamComplete(...)` a stable event stream with `model_start`, `assistant_message`, `text_delta`, `reasoning_delta`, `tool_start`, `tool_result`, `tool_error`, `tool_calls`, `completed`, `failed`, and `raw` events.
+- `RuntimeStreamCompleteEvent` gives `streamComplete(...)` a stable event stream with `model_start`, `assistant_message`, `text_delta`, `reasoning_delta`, `tool_call_delta`, `final_answer_delta`, `tool_start`, `tool_result`, `tool_error`, `tool_calls`, `completed`, `failed`, and `raw` events.
+- `tool_call_delta` exposes raw streamed function-argument chunks with optional tool-call id and tool name. `final_answer_delta` is the displayable fast path for the runtime control tool whose final answer text lives inside JSON arguments as `answer`.
 - `src/runtime-complete-contract.ts` still defines `createHumanInputToolResult(...)` and `createAskUserInputResult(...)` helpers internally, but the root package entrypoint no longer exports them. Root consumers can resume by appending a normal `tool` message with the pending tool call id and serialized answer.
 
 Why this matters:
 - The runtime facade can keep a stable host-facing contract even though the underlying completion-loop implementation has been hardened and refactored.
 - Hosts that need pause-and-resume human input can use the ordinary chat/tool message shape instead of a second resume protocol.
 - The runtime no longer exposes a special `waiting_for_human` status or event. Human waiting, timeout, cancellation, and UI rendering are host concerns.
-- Streaming harnesses can branch on event type instead of scraping mixed logs.
+- Streaming harnesses can branch on event type instead of scraping mixed logs. Hosts that want immediate user-visible output should render both `text_delta` and `final_answer_delta`; hosts that need full control-tool reconstruction can consume raw `tool_call_delta`.
 
 Read this with [[src-runtime]] for the facade that emits these results, [[host-owned-ask-user-input]] for the ownership boundary, and [[approval-and-synthetic-tool-call-messages]] for pending artifacts versus loop-generated synthetic tool calls.
