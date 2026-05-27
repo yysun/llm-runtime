@@ -15,6 +15,8 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-27: Removed `complete(...)` `rejectedTextRetryLimit` default of 2 in favor of `Number.MAX_SAFE_INTEGER` so narration responses keep looping until the model calls a control tool or `maxIterations`/`maxWallTimeMs` fire.
+ * - 2026-05-27: Defaulted `complete(...)` to `agentControlMode: true` so free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop; callers must call `final_answer`, `need_user_input`, or `blocked` to stop. Opt out with `agentControlMode: false`.
  * - 2026-05-27: Passed package-managed tool executors from the generic loop when `modelRequest` is provided.
  * - 2026-05-27: Added an explicit empty-text retry instruction so provider stop-without-content responses continue with tools instead of failing silently.
  * - 2026-05-15: Defaulted `complete(...)` to permissive text-response mode so general chat hosts accept conversational responses; strict callers opt in via `defaultTextResponseMode: 'require_tool_result'`. The post-interaction structural rejection still fires regardless of mode.
@@ -1800,7 +1802,8 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         observedActionEvidence,
       })
         ? 0
-        : (options.rejectedTextRetryLimit ?? (requiresActionEvidence ? 2 : 0));
+        : (options.rejectedTextRetryLimit
+          ?? (agentControlMode ? Number.MAX_SAFE_INTEGER : (requiresActionEvidence ? 2 : 0)));
 
       if (rejectedTextRetryCount < rejectedTextRetryLimit && next?.next?.control !== 'stop') {
         const retryCountBefore = rejectedTextRetryCount;
@@ -1948,19 +1951,13 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
   const callerClassifyTextResponse = options.classifyTextResponse;
   const callerRequiresActionEvidence = options.requiresActionEvidence;
   const callerOnToolCallsResponse = options.onToolCallsResponse;
-  const hasAgentControlHandlers = Boolean(
-    options.onFinalAnswerToolCall
-    || options.onNeedUserInputToolCall
-    || options.onBlockedToolCall,
-  );
-  const agentControlMode = options.agentControlMode ?? hasAgentControlHandlers;
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
   const packageModelRequest = options.modelRequest
     ? withDefaultCompleteBuiltIns(options.modelRequest)
     : undefined;
-  const modelRequest = packageModelRequest && agentControlMode
+  const modelRequest = packageModelRequest
     ? withAgentControlTools(packageModelRequest)
-    : packageModelRequest;
+    : undefined;
   const configuredToolDefinitions = createConfiguredToolDefinitionMap(modelRequest);
   const classificationObservations = new Map<number, {
     observedInteractionProgress: boolean;
@@ -1983,7 +1980,7 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
     ...options,
     emptyTextRetryLimit: options.emptyTextRetryLimit ?? 0,
     modelRequest,
-    agentControlMode,
+    agentControlMode: true,
     buildMessages: async (params) => {
       const messages = mergeCompletionLoopSystemPrompt(await callerBuildMessages(params));
       return messages;
@@ -2014,7 +2011,7 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
       return await callerRequiresActionEvidence?.(params) ?? packageRequiresActionEvidence;
     },
     defaultTextResponseMode,
-    rejectedTextRetryLimit: options.rejectedTextRetryLimit ?? 2,
+    rejectedTextRetryLimit: options.rejectedTextRetryLimit,
   });
 
   for (const toolCallSummary of result.toolCalls) {

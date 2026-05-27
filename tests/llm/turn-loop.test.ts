@@ -31,11 +31,8 @@ vi.mock('../../src/runtime.js', () => ({
 import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
-  DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
   DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
   DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
-  DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
-  DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
 } from '../../src/completion-loop.js';
 import { complete } from '../../src/index.js';
@@ -111,114 +108,6 @@ describe('llm-runtime completion loop', () => {
       expect.objectContaining({ iteration: 1, branch: 'text_response_stop' }),
     ]);
     expect(result.state.finalText).toBe('echo:hello');
-  });
-
-  it('complete preserves permissive completion after an observed tool round', async () => {
-    const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 1,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe('完成了');
-  });
-
-  it('complete retries length-stopped assistant text before accepting permissive text', async () => {
-    const responses = [
-      text('Please wait while I inspect the file.', { stopKind: 'length', providerStopReason: 'length' }),
-      toolCall('read_file', { filePath: 'notes.txt' }),
-      text('The file contains contents.'),
-    ];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state, transientInstruction }) => (
-        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
-      ),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe('The file contains contents.');
-    expect(result.classifications).toEqual([
-      expect.objectContaining({ classification: 'non_progressing' }),
-      expect.objectContaining({ classification: 'verified_final_response' }),
-    ]);
-    expect(result.retries).toEqual([
-      expect.objectContaining({ kind: 'rejected_text', decision: 'retry' }),
-    ]);
-  });
-
-  it('complete accepts final text after current-run tool progress even when history is compacted', async () => {
-    const responses = [toolCall('read_file', { filePath: 'notes.txt' }), text('完成了')];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'hello' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      rejectedTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            { role: 'user', content: `Compacted summary of ${response.tool_calls?.[0]?.function.name} result.` } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.classifications).toEqual([
-      expect.objectContaining({ classification: 'verified_final_response', requiresActionEvidence: false }),
-    ]);
-    expect(result.state.finalText).toBe('完成了');
   });
 
   it('complete ignores pre-existing tool results when enforcing default evidence', async () => {
@@ -382,7 +271,7 @@ describe('llm-runtime completion loop', () => {
   });
 
   it('defaults complete() package-managed built-ins to read-only tools plus ask_user_input', async () => {
-    mockGenerate.mockResolvedValueOnce(text('done'));
+    mockGenerate.mockResolvedValueOnce(toolCall('final_answer', { answer: 'done' }, 'fa-builtin-defaults'));
 
     await complete({
       initialState: {
@@ -392,6 +281,7 @@ describe('llm-runtime completion loop', () => {
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
       onToolCallsResponse: async ({ state }) => ({ state }),
+      onFinalAnswerToolCall: async ({ state }) => ({ state }),
     });
 
     expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
@@ -450,17 +340,19 @@ describe('llm-runtime completion loop', () => {
       emptyTextRetryLimit: 0,
       callModel: vi.fn(async ({ messages }) => {
         seenMessages.push(messages);
-        return text('done');
+        return toolCall('final_answer', { answer: 'done' }, 'fa-prompt');
       }),
       buildMessages: async ({ state }) => state.messages,
-      classifyTextResponse: () => 'verified_final_response',
       onTextResponse: async ({ state, responseText }) => ({
         state: { ...state, finalText: responseText },
       }),
       onToolCallsResponse: async ({ state }) => ({ state }),
+      onFinalAnswerToolCall: async ({ state, controlOutput }) => ({
+        state: { ...state, finalText: controlOutput.kind === 'final_answer' ? controlOutput.answer : '' },
+      }),
     });
 
-    expect(result.reason).toBe('text_response');
+    expect(result.reason).toBe('final_answer');
     expect(seenMessages[0]?.[0]).toEqual({
       role: 'system',
       content: expect.stringContaining(DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT),
@@ -502,7 +394,7 @@ describe('llm-runtime completion loop', () => {
       expect.objectContaining({
         kind: 'rejected_text',
         decision: 'stop',
-        transientInstruction: DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
+        transientInstruction: DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
       }),
     ]);
     expect(result.state.rejected).toEqual({
@@ -531,13 +423,13 @@ describe('llm-runtime completion loop', () => {
         return text('I searched Contacts by name for Jazz Gill and found no exact match.');
       },
       ({ messages }) => {
-        expect(String(messages.at(-1)?.content ?? '')).toContain(DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION);
+        expect(String(messages.at(-1)?.content ?? '')).toContain(DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION);
         return toolCall('search_records', {
           query: 'Jazz Gill',
           entityType: 'contact',
         }, 'jazz-search-1');
       },
-      text('No matching contact record was found for Jazz Gill.'),
+      toolCall('final_answer', { answer: 'No matching contact record was found for Jazz Gill.' }, 'jazz-final-1'),
     ]);
     mockGenerate.mockImplementation(async (request: { messages: LLMChatMessage[] }) => await scenario.callModel(request));
 
@@ -547,7 +439,6 @@ describe('llm-runtime completion loop', () => {
         finalText: '',
         rejected: null as null | { classification: string; responseText: string },
       },
-      agentControlMode: false,
       modelRequest: {
         provider: 'openai',
         model: 'gpt-5',
@@ -612,18 +503,24 @@ describe('llm-runtime completion loop', () => {
           finalText: responseText,
         },
       }),
+      onFinalAnswerToolCall: async ({ state, controlOutput, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          finalText: controlOutput.kind === 'final_answer' ? controlOutput.answer : '',
+        },
+      }),
     });
 
     expect(mockGenerate).toHaveBeenCalledTimes(4);
     expect(String(scenario.seenMessages[0]?.[0]?.content ?? '')).toContain('Do not ask the user to disambiguate before safe discovery.');
-    expect(result.reason).toBe('text_response');
-    expect(result.toolCalls).toEqual([
+    expect(result.reason).toBe('final_answer');
+    expect(result.toolCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ toolName: 'ask_user_input', countsAsActionEvidence: false }),
       expect.objectContaining({ toolName: 'search_records', evidenceKind: 'read', countsAsActionEvidence: true }),
-    ]);
+    ]));
     expect(result.classifications).toEqual([
       expect.objectContaining({ classification: 'non_progressing' }),
-      expect.objectContaining({ classification: 'verified_final_response' }),
     ]);
     expect(result.state.finalText).toBe('No matching contact record was found for Jazz Gill.');
     expect(result.state.rejected).toEqual({
@@ -895,24 +792,24 @@ describe('llm-runtime completion loop', () => {
     }));
   });
 
-  it('runtime rejects post-interaction "I will proceed" narration without action evidence', async () => {
-    const responses = [
-      toolCall('ask_user_input', {
-        questions: [{
-          header: 'Search Scope',
-          id: 'scope',
-          question: 'Should I search Jazz Gill as a contact, an account, or both?',
-          options: [
-            { id: 'contact', label: 'Contact' },
-            { id: 'account', label: 'Account' },
-            { id: 'both', label: 'Both' },
-          ],
-        }],
-      }, 'hitl-scope-1'),
-      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
-      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
-      text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now."),
-    ];
+  it('keeps retrying post-interaction "I will proceed" narration without action evidence until maxIterations', async () => {
+    const callModel = vi.fn(async () => {
+      if (callModel.mock.calls.length === 1) {
+        return toolCall('ask_user_input', {
+          questions: [{
+            header: 'Search Scope',
+            id: 'scope',
+            question: 'Should I search Jazz Gill as a contact, an account, or both?',
+            options: [
+              { id: 'contact', label: 'Contact' },
+              { id: 'account', label: 'Account' },
+              { id: 'both', label: 'Both' },
+            ],
+          }],
+        }, 'hitl-scope-1');
+      }
+      return text("To search for Jazz Gill as a contact, I need to look it up in the CRM. Before I proceed, I will: search contacts by name. I'll proceed with the contact search now.");
+    });
 
     const result = await complete({
       initialState: {
@@ -920,7 +817,8 @@ describe('llm-runtime completion loop', () => {
         finalText: '',
       },
       emptyTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      maxIterations: 4,
+      callModel,
       buildMessages: async ({ state }) => state.messages,
       requiresActionEvidence: () => false,
       onToolCallsResponse: async ({ state, response }) => ({
@@ -944,76 +842,9 @@ describe('llm-runtime completion loop', () => {
       }),
     });
 
-    expect(result.reason).toBe('rejected_text_response');
+    expect(result.reason).toBe('max_iterations_exceeded');
     expect(result.classifications.every((entry) => entry.classification === 'non_progressing')).toBe(true);
     expect(result.state.finalText).toBe('');
-  });
-
-  it('complete does not enable agent control mode when no control handler is wired', async () => {
-    const responses = [
-      toolCall('lookup_record', { id: '42' }, 'lookup-bound-1'),
-      text('Found record 42.'),
-    ];
-    mockGenerate.mockImplementation(async () => responses.shift() ?? text('unexpected'));
-    mockExecuteToolCall.mockResolvedValueOnce(JSON.stringify({ ok: true, id: '42' }));
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'Lookup record 42.' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      modelRequest: {
-        provider: 'openai',
-        model: 'gpt-5',
-        builtIns: false,
-        extraTools: [{
-          name: 'lookup_record',
-          description: 'Lookup a record.',
-          evidenceKind: 'read',
-          parameters: {
-            type: 'object',
-            properties: { id: { type: 'string' } },
-            required: ['id'],
-            additionalProperties: false,
-          },
-        }],
-      },
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response, toolExecutor }) => {
-        const toolResult = await toolExecutor?.executeToolCall(response.tool_calls?.[0]!);
-        return {
-          state: {
-            ...state,
-            messages: [
-              ...state.messages,
-              response.assistantMessage,
-              {
-                role: 'tool',
-                tool_call_id: response.tool_calls?.[0]?.id,
-                content: String(toolResult),
-              } satisfies LLMChatMessage,
-            ],
-          },
-          next: { control: 'continue' },
-        };
-      },
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe('Found record 42.');
-    expect(mockGenerate).toHaveBeenCalledWith(expect.not.objectContaining({
-      extraTools: expect.arrayContaining([expect.objectContaining({ name: 'final_answer' })]),
-    }));
-    for (const call of mockGenerate.mock.calls) {
-      const passedExtraTools = (call[0]?.extraTools ?? []) as Array<{ name: string }>;
-      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('final_answer');
-      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('need_user_input');
-      expect(passedExtraTools.map((tool) => tool.name)).not.toContain('blocked');
-    }
   });
 
   it('does not treat human-input tools as action evidence', async () => {
@@ -1080,225 +911,6 @@ describe('llm-runtime completion loop', () => {
       classification: 'non_progressing',
       responseText: 'Great, I will now generate the file.',
     });
-  });
-
-  it('does not retry plain text while an interaction request is still unanswered', async () => {
-    const callModel = vi.fn(async () => {
-      return callModel.mock.calls.length === 1
-        ? toolCall('ask_user_input', {
-          questions: [{
-            header: 'Entity Type',
-            id: 'entity-type',
-            question: 'Which type?',
-            options: [{ id: 'contact', label: 'Contact' }],
-          }],
-        }, 'hitl-pending-1')
-        : text('What type of record are you looking for?');
-    });
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'Find Jazz Gill.' } satisfies LLMChatMessage] as LLMChatMessage[],
-        rejected: null as null | { classification: string; responseText: string },
-      },
-      emptyTextRetryLimit: 0,
-      defaultTextResponseMode: 'require_tool_result',
-      callModel,
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            {
-              role: 'tool',
-              tool_call_id: response.tool_calls?.[0]?.id,
-              content: JSON.stringify({ pending: true }),
-            } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onRejectedTextResponse: async ({ state, classification, responseText }) => ({
-        state: { ...state, rejected: { classification, responseText } },
-      }),
-      onTextResponse: async ({ state }) => ({ state }),
-    });
-
-    expect(callModel).toHaveBeenCalledTimes(2);
-    expect(result.reason).toBe('rejected_text_response');
-    expect(result.retries).toEqual([
-      expect.objectContaining({
-        kind: 'rejected_text',
-        decision: 'stop',
-        retryLimit: 0,
-        transientInstruction: DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
-      }),
-    ]);
-  });
-
-  it('retries with a post-interaction instruction and then continues with a task tool', async () => {
-    const responses = [
-      toolCall('ask_user_input', {
-        questions: [{
-          header: 'Entity Type',
-          id: 'entity-type',
-          question: 'Which type?',
-          options: [{ id: 'contact', label: 'Contact' }],
-        }],
-      }, 'hitl-followup-1'),
-      text('I searched Contacts and did not find Jazz Gill.'),
-      toolCall('lookup_record', { name: 'Jazz Gill', entityType: 'contact' }, 'lookup-continue-1'),
-      text('No matching contact record was found for Jazz Gill.'),
-    ];
-    const callModel = vi.fn(async ({ messages }: { messages: LLMChatMessage[] }) => {
-      const nextResponse = responses.shift() ?? text('unexpected');
-
-      if (callModel.mock.calls.length === 3) {
-        expect(messages.at(-1)).toEqual(expect.objectContaining({ role: 'system' }));
-        expect(messages.at(-1)?.content).toContain(DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION);
-      }
-
-      return nextResponse;
-    });
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'Find Jazz Gill.' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      callModel,
-      buildMessages: async ({ state, transientInstruction }) => (
-        transientInstruction
-          ? [...state.messages, { role: 'system', content: transientInstruction } satisfies LLMChatMessage]
-          : state.messages
-      ),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: response.tool_calls?.[0]?.function.name === 'ask_user_input'
-            ? [
-              ...state.messages,
-              response.assistantMessage,
-              {
-                role: 'tool',
-                tool_call_id: response.tool_calls?.[0]?.id,
-                content: JSON.stringify({ pending: true }),
-              } satisfies LLMChatMessage,
-              { role: 'user', content: 'contact' } satisfies LLMChatMessage,
-            ]
-            : [
-              ...state.messages,
-              response.assistantMessage,
-              {
-                role: 'tool',
-                tool_call_id: response.tool_calls?.[0]?.id,
-                content: JSON.stringify({ ok: true, matches: [] }),
-              } satisfies LLMChatMessage,
-            ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.retries).toEqual([
-      expect.objectContaining({
-        kind: 'rejected_text',
-        decision: 'retry',
-        transientInstruction: DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
-      }),
-    ]);
-    expect(result.toolCalls).toEqual([
-      expect.objectContaining({ toolName: 'ask_user_input', countsAsActionEvidence: false }),
-      expect.objectContaining({ toolName: 'lookup_record', countsAsActionEvidence: true }),
-    ]);
-    expect(result.state.finalText).toBe('No matching contact record was found for Jazz Gill.');
-  });
-
-  it('accepts final text after human input and later action evidence', async () => {
-    const responses = [
-      toolCall('ask_user_input', {
-        questions: [{
-          header: 'Format',
-          id: 'format',
-          question: 'Which format?',
-          options: [{ id: 'pdf', label: 'PDF' }],
-        }],
-      }, 'hitl-1'),
-      toolCall('write_file', {
-        filePath: 'output/report.md',
-        content: '# Report',
-      }, 'write-1'),
-      text('Done. The report has been generated.'),
-    ];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'Generate a report.' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: response.tool_calls?.[0]?.function.name === 'ask_user_input'
-            ? [
-              ...state.messages,
-              response.assistantMessage,
-              {
-                role: 'tool',
-                tool_call_id: response.tool_calls?.[0]?.id,
-                content: JSON.stringify({ pending: true }),
-              } satisfies LLMChatMessage,
-              { role: 'user', content: 'Selected: pdf' } satisfies LLMChatMessage,
-            ]
-            : [
-              ...state.messages,
-              response.assistantMessage,
-              {
-                role: 'tool',
-                tool_call_id: response.tool_calls?.[0]?.id,
-                content: JSON.stringify({ ok: true }),
-              } satisfies LLMChatMessage,
-            ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText }) => ({
-        state: { ...state, finalText: responseText },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe('Done. The report has been generated.');
-    expect(result.toolCalls).toEqual([
-      expect.objectContaining({
-        toolName: 'ask_user_input',
-        evidenceKind: 'interaction',
-        countsAsActionEvidence: false,
-      }),
-      expect.objectContaining({
-        toolName: 'write_file',
-        evidenceKind: 'write',
-        countsAsActionEvidence: true,
-      }),
-    ]);
-    expect(result.classifications).toEqual([
-      expect.objectContaining({
-        classification: 'verified_final_response',
-        requiresActionEvidence: false,
-        observedInteractionProgress: true,
-        observedActionEvidence: true,
-      }),
-    ]);
   });
 
   it('bound executors do not let ask_user_input satisfy action evidence', async () => {
@@ -1372,7 +984,7 @@ describe('llm-runtime completion loop', () => {
   it('treats custom executable tools as action evidence by default', async () => {
     const responses = [
       toolCall('lookup_record', { id: '42' }, 'lookup-1'),
-      text('Found record 42.'),
+      toolCall('final_answer', { answer: 'Found record 42.' }, 'lookup-final-1'),
     ];
 
     const result = await complete({
@@ -1401,23 +1013,22 @@ describe('llm-runtime completion loop', () => {
       onTextResponse: async ({ state, responseText }) => ({
         state: { ...state, finalText: responseText },
       }),
+      onFinalAnswerToolCall: async ({ state, controlOutput }) => ({
+        state: {
+          ...state,
+          finalText: controlOutput.kind === 'final_answer' ? controlOutput.answer : '',
+        },
+      }),
     });
 
-    expect(result.reason).toBe('text_response');
-    expect(result.toolCalls).toEqual([
+    expect(result.reason).toBe('final_answer');
+    expect(result.toolCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({
         toolName: 'lookup_record',
         evidenceKind: 'external_action',
         countsAsActionEvidence: true,
       }),
-    ]);
-    expect(result.classifications).toEqual([
-      expect.objectContaining({
-        classification: 'verified_final_response',
-        observedInteractionProgress: false,
-        observedActionEvidence: true,
-      }),
-    ]);
+    ]));
     expect(result.state.finalText).toBe('Found record 42.');
   });
 
@@ -1447,98 +1058,6 @@ describe('llm-runtime completion loop', () => {
       classification: 'non_progressing',
       responseText: '我现在去检查文件。',
     });
-  });
-
-  it('complete continues internally after non-English unresolved text without client-managed follow-up', async () => {
-    const responses = [
-      text('我现在去检查文件。'),
-      toolCall('read_file', { filePath: 'notes.txt' }),
-      text('完成了'),
-    ];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      defaultTextResponseMode: 'require_tool_result',
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state, transientInstruction }) => (
-        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
-      ),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText, response }) => ({
-        state: {
-          ...state,
-          messages: [...state.messages, response.assistantMessage],
-          finalText: responseText,
-        },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.retries).toEqual([
-      expect.objectContaining({ kind: 'rejected_text', decision: 'retry', classification: 'non_progressing' }),
-    ]);
-    expect(result.state.finalText).toBe('完成了');
-  });
-
-  it('complete retries unresolved action text twice in require_tool_result mode before a tool call succeeds', async () => {
-    const responses = [
-      text('我先检查一下文件。'),
-      text('先にファイルを確認します。'),
-      toolCall('read_file', { filePath: 'notes.txt' }),
-      text('completed'),
-    ];
-
-    const result = await complete({
-      initialState: {
-        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      defaultTextResponseMode: 'require_tool_result',
-      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
-      buildMessages: async ({ state, transientInstruction }) => (
-        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
-      ),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' },
-      }),
-      onTextResponse: async ({ state, responseText, response }) => ({
-        state: {
-          ...state,
-          messages: [...state.messages, response.assistantMessage],
-          finalText: responseText,
-        },
-      }),
-    });
-
-    expect(result.reason).toBe('text_response');
-    expect(result.retries).toEqual([
-      expect.objectContaining({ kind: 'rejected_text', decision: 'retry', retryLimit: 2 }),
-      expect.objectContaining({ kind: 'rejected_text', decision: 'retry', retryLimit: 2 }),
-    ]);
-    expect(result.state.finalText).toBe('completed');
   });
 
   it('complete rejects mixed-language unresolved text before any tool result under require_tool_result mode', async () => {

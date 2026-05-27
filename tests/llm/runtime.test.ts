@@ -15,7 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
- * - 2026-05-27: Added runtime `agentControlMode` compatibility coverage for post-tool narration.
+ * - 2026-05-27: Removed runtime `agentControlMode`/`terminationMode` opt-outs; tests rely on the new control-tool termination default.
  * - 2026-05-27: Added streaming delta and control-tool termination coverage.
  * - 2026-05-27: Added runtime completion coverage for empty-text recovery after loading a skill.
  * - 2026-05-27: Added regression coverage for read-only file tools resolving loaded-skill referenced paths from the skill root.
@@ -372,6 +372,15 @@ describe('llm-runtime runtime', () => {
     };
     const seenSystemPrompts: string[] = [];
 
+    const finalAnswerCall = {
+      id: 'final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"TOKEN=project-token"}',
+      },
+    };
+
     mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
       const systemPrompt = String(
         request.messages.find((message: any) => message.role === 'system')?.content ?? '',
@@ -396,11 +405,13 @@ describe('llm-runtime runtime', () => {
       }
 
       return {
-        type: 'text',
-        content: 'TOKEN=project-token',
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
         assistantMessage: {
           role: 'assistant',
-          content: 'TOKEN=project-token',
+          content: '',
+          tool_calls: [finalAnswerCall],
         },
       };
     });
@@ -609,7 +620,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('rejects plain assistant narration that only announces future work', async () => {
+  it('keeps retrying plain assistant narration until maxIterations is reached', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     mockGenerateOpenAIResponse.mockResolvedValue({
@@ -633,11 +644,11 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Inspect the project files.' }],
+      maxIterations: 4,
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.error).toContain('required evidence');
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+    expect(result.status).toBe('max_iterations');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(4);
 
     await runtime.dispose();
   });
@@ -653,6 +664,15 @@ describe('llm-runtime runtime', () => {
         function: {
           name: 'read_file',
           arguments: JSON.stringify({ filePath: 'notes.txt' }),
+        },
+      };
+
+      const finalAnswerCall = {
+        id: 'read-continue-final-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: JSON.stringify({ answer: 'The file contains contents.' }),
         },
       };
 
@@ -678,11 +698,13 @@ describe('llm-runtime runtime', () => {
           providerStopReason: 'length',
         })
         .mockResolvedValueOnce({
-          type: 'text',
-          content: 'The file contains contents.',
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [finalAnswerCall],
           assistantMessage: {
             role: 'assistant',
-            content: 'The file contains contents.',
+            content: '',
+            tool_calls: [finalAnswerCall],
           },
         });
 
@@ -735,6 +757,15 @@ describe('llm-runtime runtime', () => {
       },
     ];
 
+    const finalAnswerCall = {
+      id: 'mixed-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"done"}',
+      },
+    };
+
     mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
       const toolResultIds = request.messages
         .filter((message: any) => message.role === 'tool')
@@ -742,11 +773,13 @@ describe('llm-runtime runtime', () => {
 
       if (toolResultIds.includes('lookup-mixed-1') && toolResultIds.includes('hitl-mixed-1')) {
         return {
-          type: 'text',
-          content: 'done',
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [finalAnswerCall],
           assistantMessage: {
             role: 'assistant',
-            content: 'done',
+            content: '',
+            tool_calls: [finalAnswerCall],
           },
         };
       }
@@ -986,12 +1019,22 @@ describe('llm-runtime runtime', () => {
           };
         }
 
+        const finalAnswerCall = {
+          id: 'agent-world-final-1',
+          type: 'function' as const,
+          function: {
+            name: 'final_answer',
+            arguments: JSON.stringify({ answer: 'Read the init reference.' }),
+          },
+        };
         return {
-          type: 'text',
-          content: 'Read the init reference.',
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [finalAnswerCall],
           assistantMessage: {
             role: 'assistant',
-            content: 'Read the init reference.',
+            content: '',
+            tool_calls: [finalAnswerCall],
           },
         };
       });
@@ -1071,12 +1114,23 @@ describe('llm-runtime runtime', () => {
         };
       }
 
+      const finalAnswerCall = {
+        id: 'lookup-context-final-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: '{"answer":"done"}',
+        },
+      };
+
       return {
-        type: 'text',
-        content: 'done',
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
         assistantMessage: {
           role: 'assistant',
-          content: 'done',
+          content: '',
+          tool_calls: [finalAnswerCall],
         },
       };
     });
@@ -1207,15 +1261,26 @@ describe('llm-runtime runtime', () => {
         };
       }
 
+      const finalAnswerCall = {
+        id: 'stream-final-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: '{"answer":"TOKEN=project-token"}',
+        },
+      };
+
       request.onChunk({ content: 'TOKEN=' });
       request.onChunk({ reasoningContent: 'private reasoning' });
       request.onChunk({ content: 'project-token' });
       return {
-        type: 'text',
-        content: 'TOKEN=project-token',
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
         assistantMessage: {
           role: 'assistant',
-          content: 'TOKEN=project-token',
+          content: '',
+          tool_calls: [finalAnswerCall],
         },
       };
     });
@@ -1280,16 +1345,27 @@ describe('llm-runtime runtime', () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();
 
+    const finalAnswerCall = {
+      id: 'hello-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"hello"}',
+      },
+    };
+
     mockStreamOpenAIResponse.mockImplementation(async (request: any) => {
       request.onChunk({ content: 'hel' });
       request.onChunk({ reasoningContent: 'hidden chain' });
       request.onChunk({ content: 'lo' });
       return {
-        type: 'text',
-        content: 'hello',
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
         assistantMessage: {
           role: 'assistant',
-          content: 'hello',
+          content: '',
+          tool_calls: [finalAnswerCall],
         },
       };
     });
@@ -1331,7 +1407,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('fails runtime.streamComplete on plain assistant narration that only announces future work', async () => {
+  it('keeps streamComplete retrying plain assistant narration until maxIterations is reached', async () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();
 
@@ -1352,36 +1428,25 @@ describe('llm-runtime runtime', () => {
       },
     });
 
-    const eventTypes: string[] = [];
     let finalEvent: RuntimeStreamCompleteEvent | undefined;
 
     for await (const event of runtime.streamComplete({
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Inspect the project files.' }],
+      maxIterations: 4,
     })) {
-      eventTypes.push(event.type);
       finalEvent = event;
     }
 
-    expect(eventTypes).toEqual([
-      'model_start',
-      'assistant_message',
-      'model_start',
-      'assistant_message',
-      'model_start',
-      'assistant_message',
-      'failed',
-    ]);
     expect(finalEvent).toEqual(expect.objectContaining({
       type: 'failed',
       result: expect.objectContaining({
-        status: 'failed',
-        error: expect.stringContaining('required evidence'),
+        status: 'max_iterations',
       }),
     }));
     expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
-    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(4);
 
     await runtime.dispose();
   });
@@ -1447,7 +1512,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      terminationMode: 'control_tools',
       messages: [{ role: 'user', content: 'Find the token.' }],
       extraTools: [{
         name: 'project_lookup',
@@ -1472,7 +1536,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('continues past post-tool future-work narration when agentControlMode is enabled on the runtime facade', async () => {
+  it('continues past post-tool future-work narration until the model calls final_answer', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const inspectToolCall = {
@@ -1549,7 +1613,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      agentControlMode: true,
       messages: [{ role: 'user', content: 'Initialize Agent World.' }],
       extraTools: [{
         name: 'project_lookup',
@@ -1633,13 +1696,27 @@ describe('llm-runtime runtime', () => {
         },
       })
       .mockResolvedValueOnce({
-        type: 'text',
-        content: 'Agent World has been successfully initialized.',
-        stopKind: 'natural_stop',
-        providerStopReason: 'stop',
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [{
+          id: 'init-world-final-1',
+          type: 'function' as const,
+          function: {
+            name: 'final_answer',
+            arguments: JSON.stringify({ answer: 'Agent World has been successfully initialized.' }),
+          },
+        }],
         assistantMessage: {
           role: 'assistant',
-          content: 'Agent World has been successfully initialized.',
+          content: '',
+          tool_calls: [{
+            id: 'init-world-final-1',
+            type: 'function' as const,
+            function: {
+              name: 'final_answer',
+              arguments: JSON.stringify({ answer: 'Agent World has been successfully initialized.' }),
+            },
+          }],
         },
       });
 
@@ -1751,7 +1828,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      agentControlMode: true,
       messages: [{ role: 'user', content: 'Initialize Agent World.' }],
       extraTools: [{
         name: 'write_world_file',
@@ -1807,7 +1883,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      terminationMode: 'control_tools',
       messages: [{ role: 'user', content: 'Finish.' }],
       extraTools: [{
         name: 'project_lookup',
@@ -1860,7 +1935,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      terminationMode: 'control_tools',
       messages: [{ role: 'user', content: 'Find the account.' }],
     });
 
@@ -1905,7 +1979,6 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      terminationMode: 'control_tools',
       messages: [{ role: 'user', content: 'Do restricted work.' }],
     });
 

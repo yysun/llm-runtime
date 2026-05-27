@@ -15,7 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
- * - 2026-05-27: Honored runtime `agentControlMode: true` as a compatibility alias for `terminationMode: 'control_tools'`.
+ * - 2026-05-27: Removed runtime-facade `agentControlMode` / `terminationMode` options; control-tool termination is the only supported behavior. Free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop.
  * - 2026-05-27: Added true text-delta streaming and opt-in control-tool termination for runtime completion.
  * - 2026-05-27: Honored per-call skill roots even when executing through a bound runtime environment.
  * - 2026-05-27: Defaulted runtime completion to one empty-text retry so provider empty stops after tool results can recover.
@@ -606,10 +606,6 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function usesControlToolTermination(request: LLMRuntimeCompleteOptions): boolean {
-  return request.terminationMode === 'control_tools' || request.agentControlMode === true;
-}
-
 const DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION = 'The last response claimed completion before the required write or external action happened. Continue now by calling the necessary tool. If the required tool is unavailable or blocked, use blocked or explain the missing capability.';
 
 async function runRuntimeCompletion(
@@ -647,7 +643,6 @@ async function runRuntimeCompletion(
     emptyTextRetryLimit: request.emptyTextRetryLimit ?? 1,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
-    agentControlMode: usesControlToolTermination(request),
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
     abortSignal: request.context?.abortSignal,
     buildMessages: async ({ state, transientInstruction }) => appendTransientInstruction(state.messages, transientInstruction),
