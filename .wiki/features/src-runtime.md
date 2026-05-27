@@ -8,6 +8,8 @@ source_paths:
   - ".docs/done/2026/05/15/runtime-api-rename.md"
   - ".docs/done/2026/05/15/runtime-hardening-followups.md"
   - ".docs/done/2026/05/15/runtime-safety-hardening.md"
+  - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
+  - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
   - "src/runtime.ts"
   - "src/complete-defaults.ts"
   - "src/index.ts"
@@ -17,7 +19,7 @@ source_paths:
   - "src/llm-config.ts"
   - "tests/llm/runtime-provider.test.ts"
   - "tests/llm/runtime.test.ts"
-updated_at: "2026-05-15"
+updated_at: "2026-05-27"
 ---
 
 `src/runtime.ts` is the main entry point when you want the package to wire providers, tools, and shared runtime state together for you.
@@ -30,10 +32,13 @@ Facts from source:
 - Explicit environments are still passed through unchanged; otherwise the module builds cached provider, MCP, and skill registries keyed by a stable JSON string so repeated per-call use can reuse equivalent runtime dependencies.
 - `resolveTools(...)` merges built-ins and extra/direct tools synchronously; `resolveToolsAsync(...)` adds MCP-discovered tools on top.
 - Request-local `tools` override same-name resolved tools, but built-in name collisions are rejected before merge.
+- `ask_user_input` is the exception to the normal built-in collision rule. Hosts may provide it as an executable direct or extra tool because the host owns the actual user interaction.
 - `generate(...)` and `stream(...)` share the same environment and tool-resolution pipeline, then dispatch into provider-specific helpers from [[provider-adapters]]. OpenAI, Azure, XAI, generic OpenAI-compatible backends, and Ollama all route through the OpenAI-compatible adapter; Anthropic and Google keep their own adapter paths.
 - `runtime.complete(...)` and `runtime.streamComplete(...)` adapt [[src-completion-loop]] into the stable runtime-facade result and event shapes documented in [[src-runtime-complete-contract]]. On the package-managed `modelRequest` path they fill in `modelRequest.environment` with the same runtime unless the caller already supplied one.
 - The runtime facade keeps stricter defaults than the standalone loop helper: when callers do not override it, `runtime.complete(...)` uses `defaultTextResponseMode: 'require_tool_result'` and forwards explicit `maxConsecutiveToolTurns` and `maxWallTimeMs` bounds into the hardened loop.
 - When `builtIns` is omitted for runtime-facade completion, the runtime defaults to the package-owned completion baseline from `src/complete-defaults.ts`: read-only workspace built-ins plus `ask_user_input`.
+- If default-visible `ask_user_input` appears in a runtime completion response and the host did not supply an executable tool for it, the facade returns `status: "tool_calls"` with the assistant message and tool calls. It does not wait for a human, enforce a timeout, or translate the branch into a special human-wait state.
+- If the host supplies executable `ask_user_input`, runtime completion executes it like any other host tool and continues with the returned tool message.
 - Before dispatch, the runtime can inject package-owned tool guidance into the first system message. Caller-owned system content, including any embedded AGENTS.md instructions or caller-defined tool policy, should therefore be assembled into one leading system block before the runtime appends its own guidance.
 - Managed prompt sections are inserted through `src/prompt-contracts.ts`, which strips and replaces the runtime-owned tagged block rather than stacking duplicates across retries or repeated runtime calls.
 - `webSearch` is an explicit per-call option on `generate(...)` and `stream(...)`. `true` normalizes to an empty provider-default config, `false` disables it, and the runtime forwards it only when requested rather than enabling it implicitly for generic OpenAI-compatible backends.
@@ -44,6 +49,6 @@ Facts from source:
 Design boundary:
 - This module owns runtime assembly and provider dispatch.
 - It owns lifecycle cleanup only for runtime-created registries and caches.
-- It does not own message persistence, queueing, transcript policy, or completion-loop state transitions; those remain in callers or in [[src-completion-loop]].
+- It does not own message persistence, queueing, transcript policy, human-input UI, or completion-loop state transitions; those remain in callers or in [[src-completion-loop]].
 
-Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For the preferred iterative API built on top of the runtime facade, see [[src-completion-loop]]. For the runtime-facade completion result and stream event shapes, see [[src-runtime-complete-contract]]. For provider-specific search behavior, see [[web-search-across-providers]]. For the recommended caller-facing layout of system prompt sections, see [[system-prompt-schema]]. For the April 2026 cleanup boundary and public shutdown APIs, see [[turn-loop-safety-and-lifecycle]].
+Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For the preferred iterative API built on top of the runtime facade, see [[src-completion-loop]]. For runtime-facade result and stream event shapes, see [[src-runtime-complete-contract]]. For human-input ownership, see [[host-owned-ask-user-input]]. For provider-specific search behavior, see [[web-search-across-providers]]. For system prompt layout, see [[system-prompt-schema]]. For cleanup boundaries, see [[turn-loop-safety-and-lifecycle]].

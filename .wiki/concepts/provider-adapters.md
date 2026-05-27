@@ -2,6 +2,7 @@
 title: "Provider Adapters"
 type: "concept"
 status: "active"
+language: "default"
 source_paths:
   - "README.md"
   - "src/openai-direct.ts"

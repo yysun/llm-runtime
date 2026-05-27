@@ -2,6 +2,7 @@
 title: "MCP Registry"
 type: "feature"
 status: "active"
+language: "default"
 source_paths:
   - "src/mcp.ts"
   - "tests/llm/mcp-runtime.test.ts"

@@ -2,6 +2,7 @@
 title: "Environment vs Per-Call"
 type: "concept"
 status: "active"
+language: "default"
 source_paths:
   - "README.md"
   - "src/runtime.ts"

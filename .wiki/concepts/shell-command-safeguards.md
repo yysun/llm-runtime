@@ -2,6 +2,7 @@
 title: "Shell Command Safeguards"
 type: "concept"
 status: "active"
+language: "default"
 source_paths:
   - "src/builtins.ts"
   - "src/builtin-executors.ts"

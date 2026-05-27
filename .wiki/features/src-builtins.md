@@ -7,13 +7,17 @@ source_paths:
   - "README.md"
   - ".docs/reqs/2026/04/24/req-human-input-choice-schema.md"
   - ".docs/reqs/2026/05/14/req-builtin-filesystem-tools.md"
+  - ".docs/reqs/2026/05/18/req-file-tool-contract-hardening.md"
+  - ".docs/done/2026/05/18/file-tool-contract-hardening.md"
+  - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
+  - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
   - "src/complete-defaults.ts"
   - "src/builtins.ts"
   - "src/builtin-executors.ts"
   - "src/human-input-contract.ts"
   - "src/tool-validation.ts"
   - "tests/llm/runtime.test.ts"
-updated_at: "2026-05-15"
+updated_at: "2026-05-27"
 ---
 
 The package owns ten reserved built-in tool names: `shell_cmd`, `load_skill`, `ask_user_input`, `web_fetch`, `read_file`, `write_file`, `list_files`, `search_files`, `create_directory`, and `path_exists`.
@@ -23,21 +27,25 @@ In plain terms, these are the tools that ship with `llm-runtime` itself. Callers
 Facts from source:
 - `src/builtins.ts` defines stable descriptions and JSON-schema parameter contracts for every built-in.
 - Selection can be boolean or per-tool; the runtime supports normalization and intersection so a caller can narrow a broader baseline safely.
-- `search_files` is the package-owned file-discovery primitive, while `create_directory` and `path_exists` cover narrow filesystem mutation and existence checks.
+- `search_files` is the package-owned file-discovery primitive, while `create_directory` and `path_exists` cover narrow filesystem mutation and existence checks inside the trusted working directory.
 - `search_files` replaced the older `grep` built-in name. Current unit coverage explicitly rejects `grep` as an unknown built-in selection key.
 - `ask_user_input` is the only public human-input built-in on the current package surface. Its description and JSON schema are shared from `src/human-input-contract.ts` so the catalog and runtime-facade helpers stay aligned.
 - The human-input schema requires `questions[]` with stable question ids and option ids. It supports `single-select`, `multiple-select`, and optional `allowSkip` for explicitly dismissible prompts.
-- Default built-in exposure is now read-only when callers omit `builtIns`, which means `load_skill`, `read_file`, `list_files`, `search_files`, and `path_exists` are exposed by default while write-oriented tools stay opt-in.
-- The package-managed completion helpers use a slightly broader default from `src/complete-defaults.ts`: the same read-only baseline plus `ask_user_input` so the loop can pause for required human decisions without enabling general write tools.
+- Default `resolveTools(...)` exposure is read-only when callers omit `builtIns`, which means `load_skill`, `read_file`, `list_files`, `search_files`, and `path_exists` are exposed by default while write-oriented tools and `ask_user_input` stay opt-in.
+- Package-managed completion uses a broader model-visible default from `src/complete-defaults.ts`: the same read-only baseline plus `ask_user_input`, so the model knows how to request required human decisions without enabling general write tools.
+- Default `ask_user_input` visibility is contract advertisement, not UI ownership. Runtime completion returns a normal `tool_calls` result for host handling unless the host supplied an executable `ask_user_input` tool.
+- `read_file` and `write_file` both require `filePath` in the schema while validation preserves the `path` alias. `read_file` remains paginated through `offset` and `limit`, but the public contract no longer promises a fixed hard maximum line cap.
+- `list_files` and `search_files` exclude dot-prefixed paths unless `includeHidden: true` is passed. They no longer hard-exclude ordinary directories such as `node_modules` or `dist`.
+- `path_exists` is symlink-aware: it reports symlink presence separately from whether the symlink target resolves to a file or directory.
 - Every executable built-in is wrapped with [[src-tool-validation]] before exposure.
-- `src/builtin-executors.ts` keeps execution package-owned: file and shell tools enforce a trusted working directory, `load_skill` reads from the skill registry, and asking a human for input returns a pending artifact instead of calling a host adapter.
+- `src/builtin-executors.ts` keeps execution package-owned for package built-ins: file and shell tools enforce a trusted working directory, `load_skill` reads from the skill registry, and the package `ask_user_input` executor returns a pending artifact rather than owning UI.
 - The `shell_cmd` contract itself is intentionally narrow: `command` is required, undeclared parameters are rejected, and the description says it should only be used when the user explicitly asked for command execution.
 - The `shell_cmd` description now explicitly steers callers toward the structured workspace tools (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`) for routine workspace inspection.
 
 Important constraint:
-- Application tools are additive only. They can disable built-ins, but they cannot redefine reserved built-in names.
+- Application tools are additive only for normal built-ins. `ask_user_input` is the deliberate exception: hosts may provide an executable tool with that name because the product owns the actual human interaction.
 
 Security note:
 - `shell_cmd` has argument validation, scoped working-directory resolution, non-shell spawning, and time-bounded execution, but it is not a sandbox and does not maintain a command allowlist. See [[shell-command-safeguards]].
 
-This page pairs with [[src-runtime]] for tool resolution behavior, with [[src-builtin-executors]] for concrete executor behavior, with [[src-tool-validation]] for the correction and failure path when a model sends malformed arguments, and with [[shell-command-safeguards]] for the concrete `shell_cmd` security posture.
+This page pairs with [[src-runtime]] for tool resolution behavior, [[src-builtin-executors]] for concrete executor behavior, [[src-tool-validation]] for malformed arguments, [[host-owned-ask-user-input]] for the human-input ownership boundary, [[file-tool-contract-hardening]] for recent filesystem contract fixes, and [[shell-command-safeguards]] for the concrete `shell_cmd` security posture.

@@ -2,6 +2,7 @@
 title: "Skill Registry"
 type: "feature"
 status: "active"
+language: "default"
 source_paths:
   - "src/skills.ts"
   - "tests/llm/runtime.test.ts"

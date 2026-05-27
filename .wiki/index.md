@@ -3,56 +3,59 @@ title: "Project Wiki"
 type: "index"
 status: "active"
 language: "default"
-last_commit: "1de81d5a58a10893f61cdb80a530b070801318fc"
-updated_at: "2026-05-15"
+last_commit: "340f35e37d5263e09be8f7f9414e5995c9029374"
+updated_at: "2026-05-27"
 ---
 
-`llm-runtime` is a TypeScript package for building tool-using LLM workflows without forcing your app to own every low-level detail itself.
+## What is this?
 
-In plain terms, it gives you one package that can:
-- talk to model providers such as OpenAI, Anthropic, Google, Azure, and Ollama
-- expose built-in tools for file reads, search, shell commands, and human input
-- connect extra tools through Model Context Protocol (MCP) servers and local skill files
-- run a bounded loop that keeps working until there is a real answer, a real blocker, or a real need for user input
+`llm-runtime` is a TypeScript package for application-owned LLM workflows. It wraps provider invocation, tool orchestration, MCP discovery, and skill loading behind one package boundary without taking over the host app's state, persistence, UI, or product policy.
 
-If you are new to the codebase, start with the pages below in this order:
+## Get started
 
-1. [[environment-vs-per-call]] for the main ownership rule: what the package owns versus what your app still owns.
-2. [[src-runtime]] for the main public API surface.
-3. [[src-completion-loop]] for the "keep working until done" loop.
-4. [[src-builtins]] for the built-in tools and their safety boundaries.
-5. [[provider-adapters]] for provider-specific differences.
+Run `npm test` for the unit suite and `npm run check` for TypeScript. The package targets Node.js 18+ and publishes a single root entrypoint.
 
-Core pages:
-- [[environment-vs-per-call]] explains the package's main boundary: which work belongs to the runtime and which work still belongs to the host app.
-- [[src-runtime]] explains how one call becomes a fully wired runtime with providers, tools, MCP servers, and skills.
-- [[src-completion-loop]] explains the preferred agent-style loop and its default safety rules.
-- [[src-runtime-complete-contract]] explains the public `complete(...)` / `streamComplete(...)` result shapes and how to resume after asking a human for input.
-- [[public-types]] summarizes the main exported types without making you read every source file.
-- [[system-prompt-schema]] explains how to build one stable system message that works across providers.
-- [[web-search-across-providers]] explains how optional web search works across different providers.
+Expected success is a passing Vitest suite under `tests/llm` and a clean `tsc --noEmit`. Start with `README.md`, then read [[environment-vs-per-call]], [[src-runtime]], [[src-completion-loop]], [[src-builtins]], and [[public-types]].
 
-Execution surfaces:
-- [[src-builtins]] documents the built-in tool catalog and where the package draws the line between read-only inspection and side effects.
-- [[src-builtin-executors]] shows what the built-in tools actually do at runtime, including the pending artifact returned when a human answer is required.
-- [[src-mcp]] explains how MCP server config turns into callable tools and how those clients are cached.
-- [[src-prompt-contracts]] explains the package-managed prompt blocks that the runtime adds to the first system message.
-- [[src-provider-tool-names]] explains how tool names are rewritten safely for each provider and then mapped back.
-- [[src-skills]] explains how skill directories are discovered and loaded.
-- [[src-turn-loop]] explains the older compatibility entrypoint that now forwards to the newer completion-loop surface.
-- [[src-tool-validation]] explains how malformed tool arguments are corrected or rejected in a structured way.
-- [[provider-adapters]] compares the provider-specific request and response conversions.
+A safe first change is a focused built-in tool contract test in `tests/llm/runtime.test.ts`. A tempting dangerous change is making runtime completion own host concerns such as prompt UI, transcript persistence, human-input waiting, or broad shell policy.
 
-Operational safeguards:
-- [[shell-command-safeguards]] documents the real protections and the real limits of the built-in `shell_cmd` executor.
+## Why does it exist?
 
-Quality and recent changes:
-- [[testing-and-showcases]] summarizes how the package is tested, from unit tests to real-provider showcase runs.
-- [[provider-adapters]] now covers provider-native web search, Gemini schema cleanup, and OpenAI-compatible request mapping across Azure, XAI, Ollama, and generic backends.
-- [[action-execution-hardening]] captures the April 2026 fix that stopped narration-only false success in tool-capable turns.
-- [[language-agnostic-continuation]] explains, in plain English, how the runtime checks whether work actually happened instead of trusting confident-sounding progress text.
-- [[turn-loop-safety-and-lifecycle]] captures the April 2026 loop hardening pass: hard limits, trace data, synthetic tool-call marking, and public cleanup APIs.
-- [[approval-and-synthetic-tool-call-messages]] explains the difference between a host-mediated human-input artifact and a runtime-generated synthetic tool-call message.
-- [[src-completion-loop]] and [[src-runtime]] also cover the May 2026 public rename to `createRuntime(...)`, `complete(...)`, `runCompletionLoop(...)`, and `disposeRuntimeCaches()` while preserving deprecated compatibility aliases.
+Harnesses need stable per-call APIs without duplicating provider-specific request shaping, tool schema wiring, MCP setup, skill loading, and loop hardening. The package centralizes those mechanics while keeping app-specific decisions in the host.
 
-Coverage note: this wiki reflects the current May 2026 package shape, including the safer read-only built-in defaults, the single `ask_user_input` contract for human questions, the newer completion-loop and runtime-facade helpers, the shared prompt and provider-name helper modules, provider stop metadata, the legacy compatibility path in `src/turn-loop.ts`, and the Azure/Gemini presentation-style runners. Supporting docs under `docs/` and `.docs/` are included where they help explain behavior, but they are summarized rather than copied verbatim.
+The core ownership rule is [[environment-vs-per-call]]: stable dependencies can live in the runtime, while request-specific choices stay per call.
+
+## What happens when I run it?
+
+`generate(...)` resolves provider config, built-ins, extra tools, MCP tools, and skills, injects managed prompt guidance when needed, and dispatches to the selected provider adapter. `complete(...)`, `runCompletionLoop(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add a bounded model/tool loop with retry, stop, trace, and action-evidence handling. See [[src-runtime]] and [[src-completion-loop]].
+
+If the model calls `ask_user_input`, package-managed completion advertises the contract by default, but default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
+
+## Where is data saved?
+
+The package itself does not own durable storage. It may cache provider stores, MCP registries, and skill registries for convenience-path calls, and explicit runtimes own cleanup for runtime-created MCP registries. The host owns transcripts, workspaces, human answers, temp files, product records, and caller-injected registries.
+
+## What are the important moving parts?
+
+- [[src-runtime]] is the main API facade.
+- [[src-completion-loop]] is the bounded iterative loop.
+- [[src-builtins]] and [[src-builtin-executors]] define and execute reserved package tools.
+- [[src-tool-validation]] turns malformed tool arguments into structured artifacts.
+- [[src-mcp]], [[src-skills]], and [[provider-adapters]] wire external capability surfaces.
+- [[system-prompt-schema]] and [[src-prompt-contracts]] explain managed system-message injection.
+
+## What should I avoid breaking?
+
+- Do not blur package-owned orchestration with host-owned UI, persistence, or policy.
+- Do not make `ask_user_input` a runtime wait state again; keep it model-visible and host-handled by default.
+- Do not weaken the trusted working-directory boundary for structured file tools.
+- Do not treat human-input artifacts as action evidence for task completion.
+- Do not make provider-specific tool names leak into the public tool-call surface.
+
+Risk pages: [[shell-command-safeguards]], [[turn-loop-safety-and-lifecycle]], [[approval-and-synthetic-tool-call-messages]], [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
+
+## Where do I look first?
+
+For a public API question, start at [[public-types]] and [[src-runtime]]. For loop behavior, start at [[src-completion-loop]]. For tool behavior, start at [[src-builtins]], [[src-builtin-executors]], and [[src-tool-validation]]. For recent contract changes, read [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
+
+Coverage note: this wiki reflects the current May 2026 package shape at commit `340f35e37d5263e09be8f7f9414e5995c9029374`, including host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, safer read-only defaults, runtime-facade completion helpers, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.

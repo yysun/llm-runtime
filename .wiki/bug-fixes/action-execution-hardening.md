@@ -2,6 +2,7 @@
 title: "Action Execution Hardening"
 type: "bug-fix"
 status: "active"
+language: "default"
 source_paths:
   - ".docs/req/2026/04/12/req-llm-action-execution-hardening.md"
   - ".docs/done/2026/04/12/llm-action-execution-hardening.md"

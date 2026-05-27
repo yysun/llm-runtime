@@ -2,6 +2,7 @@
 title: "Web Search Across Providers"
 type: "concept"
 status: "active"
+language: "default"
 source_paths:
   - "README.md"
   - ".docs/req/2026/04/20/req-web-serch-option.md"
