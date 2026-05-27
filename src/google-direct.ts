@@ -395,7 +395,7 @@ function convertMessagesToGoogle(messages: LLMChatMessage[]): { messages: any[];
       }
 
       if (parts.length === 0) {
-        parts.push({ text: '[Tool call history omitted for Google replay compatibility]' });
+        continue;
       }
 
       googleMessages.push({

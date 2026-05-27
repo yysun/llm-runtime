@@ -72,6 +72,67 @@ describe('llm-runtime google-direct', () => {
     expect(response.providerStopReason).toBe('STOP');
   });
 
+  it('omits contentless assistant tool-call turns from Gemini replay history', async () => {
+    let capturedRequest: Record<string, any> | undefined;
+
+    const fakeModel = {
+      generateContent: async (request: Record<string, any>) => {
+        capturedRequest = request;
+        return {
+          response: {
+            text: () => 'done',
+            candidates: [{ finishReason: 'STOP' }],
+          },
+        };
+      },
+    };
+
+    const fakeClient = {
+      getGenerativeModel: () => fakeModel,
+    } as any;
+
+    await generateGoogleResponse({
+      client: fakeClient,
+      model: 'gemini-2.5-flash',
+      messages: [
+        { role: 'user', content: 'Look up the value.' },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: 'lookup-1',
+            type: 'function',
+            function: { name: 'lookup', arguments: '{"query":"value"}' },
+          }],
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'lookup-1',
+          content: '{"value":"42"}',
+        } as any,
+      ],
+      tools: {
+        lookup: {
+          name: 'lookup',
+          description: 'Look up a value',
+          parameters: { type: 'object', properties: { query: { type: 'string' } } },
+        },
+      },
+    });
+
+    expect(JSON.stringify(capturedRequest)).not.toContain('Tool call history omitted');
+    expect(capturedRequest?.contents).toEqual([
+      {
+        role: 'user',
+        parts: [{ text: 'Look up the value.' }],
+      },
+      {
+        role: 'user',
+        parts: [{ text: '[Tool result]\n{"value":"42"}' }],
+      },
+    ]);
+  });
+
   it('adds Gemini Google Search grounding when web search is enabled', async () => {
     let capturedOptions: Record<string, unknown> | undefined;
 
