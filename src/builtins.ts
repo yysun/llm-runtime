@@ -15,6 +15,7 @@
  * - `ask_user_input` is the public HITL built-in.
  *
  * Recent changes:
+ * - 2026-05-27: Clarified read-only file tool descriptions for loaded-skill referenced paths.
  * - 2026-05-18: Aligned file-tool schema requirements with executor behavior and removed `read_file` wording that implied a fixed hard cap.
  * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
  * - 2026-05-15: Removed deprecated HITL alias tools from the public built-in surface.
@@ -161,7 +162,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   read_file: {
     description:
-      'Read file contents with line pagination. Relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
+      'Read file contents with line pagination. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
     parameters: {
       type: 'object',
       properties: {
@@ -216,7 +217,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   list_files: {
     description:
-      'List file and directory names for quick workspace exploration. Prefer this over `shell_cmd` for routine directory listing inside the trusted working-directory scope.',
+      'List file and directory names for quick exploration. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {
@@ -251,7 +252,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   search_files: {
     description:
-      'Search for files by glob-like pattern inside the trusted working-directory scope. Prefer this over `shell_cmd` for routine file discovery.',
+      'Search for files by glob-like pattern. Optional root paths referenced by loaded skill instructions resolve from that skill root; other roots resolve inside the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {
@@ -293,7 +294,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   path_exists: {
     description:
-      'Check whether a file or directory path exists inside the trusted working-directory scope. Prefer this over `shell_cmd` for routine file or directory existence checks.',
+      'Check whether a file or directory path exists. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve inside the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {

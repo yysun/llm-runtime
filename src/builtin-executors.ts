@@ -15,6 +15,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-27: Added loaded-skill provenance for read-only file tools while preserving workspace-root writes and creation.
  * - 2026-05-18: Removed the fixed `read_file` hard cap, kept reads workspace-scoped, made hidden entry discovery opt-in, and made `path_exists` symlink-aware.
  * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
  * - 2026-05-15: Kept a single public HITL executor at `ask_user_input`.
@@ -44,6 +45,11 @@ type BuiltInExecutor = (
 
 type BuiltInExecutorOptions = {
   skillRegistry: SkillRegistry;
+};
+
+type LoadedSkillPathContext = {
+  rootPath: string;
+  referencePaths: Set<string>;
 };
 
 const DEFAULT_READ_PAGE_SIZE = 200;
@@ -148,6 +154,256 @@ function resolveScopedPath(inputPath: string, trustedWorkingDirectory: string): 
   }
 
   return resolvedPath;
+}
+
+function extractSkillRootTags(text: string): string[] {
+  const roots: string[] = [];
+  const skillRootPattern = /<skill_root>\s*([^<]+?)\s*<\/skill_root>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = skillRootPattern.exec(text)) != null) {
+    const rootPath = match[1]?.trim();
+    if (rootPath) {
+      roots.push(rootPath);
+    }
+  }
+
+  return roots;
+}
+
+function extractSkillContextBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  const skillContextPattern = /<skill_context\b[^>]*>([\s\S]*?)<\/skill_context>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = skillContextPattern.exec(text)) != null) {
+    const block = match[1]?.trim();
+    if (block) {
+      blocks.push(block);
+    }
+  }
+
+  return blocks;
+}
+
+function extractSkillInstructions(text: string): string {
+  const instructionsMatch = text.match(/<instructions>\s*([\s\S]*?)\s*<\/instructions>/);
+  return instructionsMatch?.[1] ?? text;
+}
+
+function stripPathToken(rawToken: string): string {
+  return rawToken
+    .trim()
+    .replace(/^[`"'<([{]+/, '')
+    .replace(/[`"'>)\]}]+$/, '')
+    .replace(/[.,;:!?]+$/, '');
+}
+
+function normalizeSkillReferencePath(rawPath: string): string | undefined {
+  let candidate = stripPathToken(rawPath);
+  if (!candidate || /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(candidate) || candidate.startsWith('#')) {
+    return undefined;
+  }
+
+  const hashIndex = candidate.indexOf('#');
+  if (hashIndex >= 0) {
+    candidate = candidate.slice(0, hashIndex);
+  }
+
+  const queryIndex = candidate.indexOf('?');
+  if (queryIndex >= 0) {
+    candidate = candidate.slice(0, queryIndex);
+  }
+
+  candidate = candidate.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  if (!candidate || candidate.startsWith('/') || candidate.startsWith('~')) {
+    return undefined;
+  }
+
+  const hadTrailingSlash = candidate.endsWith('/');
+  const normalizedPath = normalizePath(path.posix.normalize(candidate));
+  if (!normalizedPath || normalizedPath === '.' || normalizedPath === '..' || normalizedPath.startsWith('../')) {
+    return undefined;
+  }
+
+  const looksPathLike = normalizedPath.includes('/')
+    || /\.[A-Za-z0-9]{1,12}$/.test(normalizedPath)
+    || hadTrailingSlash;
+  return looksPathLike ? normalizedPath.replace(/\/+$/, '') : undefined;
+}
+
+function normalizeRequestedRelativePath(rawPath: string): string | undefined {
+  let candidate = stripPathToken(rawPath);
+  if (!candidate || path.isAbsolute(candidate) || /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(candidate)) {
+    return undefined;
+  }
+
+  candidate = candidate.replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const normalizedPath = normalizePath(path.posix.normalize(candidate));
+  if (!normalizedPath || normalizedPath === '.' || normalizedPath === '..' || normalizedPath.startsWith('../')) {
+    return undefined;
+  }
+
+  return normalizedPath.replace(/\/+$/, '');
+}
+
+function extractSkillReferencePaths(instructions: string): Set<string> {
+  const references = new Set<string>();
+  const rememberPath = (rawPath: string) => {
+    const normalizedPath = normalizeSkillReferencePath(rawPath);
+    if (normalizedPath) {
+      references.add(normalizedPath);
+    }
+  };
+
+  const markdownLinkPattern = /!?\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+  let linkMatch: RegExpExecArray | null;
+  while ((linkMatch = markdownLinkPattern.exec(instructions)) != null) {
+    rememberPath(linkMatch[1] ?? '');
+  }
+
+  const codeSpanPattern = /`([^`\n]+)`/g;
+  let codeMatch: RegExpExecArray | null;
+  while ((codeMatch = codeSpanPattern.exec(instructions)) != null) {
+    rememberPath(codeMatch[1] ?? '');
+  }
+
+  for (const token of instructions.split(/\s+/)) {
+    rememberPath(token);
+  }
+
+  return references;
+}
+
+function getLoadSkillToolCallIds(context?: LLMToolExecutionContext): Set<string> {
+  const toolCallIds = new Set<string>();
+
+  for (const message of context?.messages ?? []) {
+    if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) {
+      continue;
+    }
+
+    for (const toolCall of message.tool_calls) {
+      const id = (toolCall as { id?: unknown }).id;
+      const functionName = (toolCall as { function?: { name?: unknown } }).function?.name;
+      if (typeof id === 'string' && id && functionName === 'load_skill') {
+        toolCallIds.add(id);
+      }
+    }
+  }
+
+  return toolCallIds;
+}
+
+function isTrustedLoadSkillToolMessage(
+  message: Record<string, unknown>,
+  loadSkillToolCallIds: Set<string>,
+): boolean {
+  return message.role === 'tool'
+    && typeof message.tool_call_id === 'string'
+    && loadSkillToolCallIds.has(message.tool_call_id);
+}
+
+function getLoadedSkillPathContexts(context?: LLMToolExecutionContext): LoadedSkillPathContext[] {
+  const contexts = new Map<string, LoadedSkillPathContext>();
+  const loadSkillToolCallIds = getLoadSkillToolCallIds(context);
+
+  const rememberContext = (rootPath: string, instructions: string) => {
+    const resolvedRoot = path.resolve(rootPath.trim());
+    contexts.delete(resolvedRoot);
+    contexts.set(resolvedRoot, {
+      rootPath: resolvedRoot,
+      referencePaths: extractSkillReferencePaths(instructions),
+    });
+  };
+
+  for (const message of context?.messages ?? []) {
+    if (!isTrustedLoadSkillToolMessage(message, loadSkillToolCallIds)) {
+      continue;
+    }
+
+    const content = message.content;
+    if (typeof content !== 'string' || !content.includes('<skill_root>')) {
+      continue;
+    }
+
+    const blocks = extractSkillContextBlocks(content);
+    if (blocks.length > 0) {
+      for (const block of blocks) {
+        const skillRoot = extractSkillRootTags(block)[0];
+        if (skillRoot) {
+          rememberContext(skillRoot, extractSkillInstructions(block));
+        }
+      }
+      continue;
+    }
+
+    for (const skillRoot of extractSkillRootTags(content)) {
+      rememberContext(skillRoot, extractSkillInstructions(content));
+    }
+  }
+
+  return [...contexts.values()].reverse();
+}
+
+function skillReferenceMatchesRequest(referencePath: string, requestedPath: string): boolean {
+  return referencePath === requestedPath
+    || referencePath.startsWith(`${requestedPath}/`)
+    || requestedPath.startsWith(`${referencePath}/`);
+}
+
+function getLoadedSkillRoots(context?: LLMToolExecutionContext): string[] {
+  return getLoadedSkillPathContexts(context).map((skillContext) => skillContext.rootPath);
+}
+
+function resolveSkillReferencedPath(inputPath: string, context?: LLMToolExecutionContext): string | undefined {
+  const requestedReferencePath = normalizeRequestedRelativePath(inputPath);
+  if (!requestedReferencePath) {
+    return undefined;
+  }
+
+  for (const skillContext of getLoadedSkillPathContexts(context)) {
+    const matchesReference = [...skillContext.referencePaths]
+      .some((referencePath) => skillReferenceMatchesRequest(referencePath, requestedReferencePath));
+    if (!matchesReference) {
+      continue;
+    }
+
+    const resolvedPath = path.resolve(skillContext.rootPath, inputPath);
+    if (isPathWithinRoot(resolvedPath, skillContext.rootPath)) {
+      return resolvedPath;
+    }
+  }
+
+  return undefined;
+}
+
+async function resolveReadableScopedPath(
+  inputPath: string,
+  trustedWorkingDirectory: string,
+  context?: LLMToolExecutionContext,
+): Promise<string> {
+  if (!inputPath || typeof inputPath !== 'string') {
+    throw new Error('Missing required path parameter');
+  }
+
+  if (path.isAbsolute(inputPath)) {
+    const resolvedPath = path.resolve(inputPath);
+    const allowedRoots = [trustedWorkingDirectory, ...getLoadedSkillRoots(context)];
+    if (!allowedRoots.some((rootPath) => isPathWithinRoot(resolvedPath, rootPath))) {
+      throw new Error('Readable path scope mismatch: requested path is outside trusted working directory and loaded skill roots');
+    }
+
+    return resolvedPath;
+  }
+
+  const workspacePath = resolveScopedPath(inputPath, trustedWorkingDirectory);
+  const trimmedPath = inputPath.trim();
+  if (trimmedPath === '.' || trimmedPath === './') {
+    return workspacePath;
+  }
+
+  return resolveSkillReferencedPath(inputPath, context) ?? workspacePath;
 }
 
 function escapeRegExp(text: string): string {
@@ -279,7 +535,7 @@ async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Re
       return 'Error: read_file failed - filePath is required';
     }
 
-    const resolvedPath = resolveScopedPath(requestedFilePath, trustedWorkingDirectory);
+    const resolvedPath = await resolveReadableScopedPath(requestedFilePath, trustedWorkingDirectory, context);
     const rawContent = await fs.readFile(resolvedPath, 'utf8');
     const lines = splitFileLines(toUtf8String(rawContent));
     const offset = clamp(Number(args.offset ?? 1), 1, Number.MAX_SAFE_INTEGER);
@@ -344,7 +600,7 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
   try {
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedPath = String(args.path ?? '.');
-    const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
+    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context);
     const recursive = Boolean(args.recursive ?? false);
     const includeHidden = Boolean(args.includeHidden ?? false);
     const maxDepth = clamp(Number(args.maxDepth ?? (recursive ? DEFAULT_LIST_MAX_DEPTH : 1)), 1, DEFAULT_LIST_MAX_DEPTH);
@@ -397,7 +653,7 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
 
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const searchRoot = args.path
-      ? resolveScopedPath(String(args.path), trustedWorkingDirectory)
+      ? await resolveReadableScopedPath(String(args.path), trustedWorkingDirectory, context)
       : trustedWorkingDirectory;
     const includeHidden = Boolean(args.includeHidden ?? false);
     const maxResults = clamp(Number(args.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS), 1, DEFAULT_SEARCH_MAX_RESULTS);
@@ -477,7 +733,7 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
       return 'Error: path_exists failed - path is required';
     }
 
-    const resolvedPath = resolveScopedPath(requestedPath, trustedWorkingDirectory);
+    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context);
     const stats = await fs.lstat(resolvedPath).catch(() => null);
     const isSymbolicLink = stats?.isSymbolicLink() ?? false;
     const targetStats = isSymbolicLink

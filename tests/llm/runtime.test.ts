@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-27: Added regression coverage for read-only file tools resolving loaded-skill referenced paths from the skill root.
  * - 2026-05-18: Added focused contract coverage for file-tool validation, uncapped read pagination, hidden entry discovery, and symlink-aware path checks.
  * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
  * - 2026-05-15: Added `createRuntime(...)` facade coverage.
@@ -1306,6 +1307,190 @@ describe('llm-runtime runtime', () => {
 
         expect(String(result)).toContain('Error: read_file failed');
         expect(String(result)).toContain('ENOENT');
+      } finally {
+        await fs.rm(skillRoot, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('resolves read_file, list_files, and search_files from a loaded skill root under skill context', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const skillRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-skill-'));
+
+      try {
+        const skillPath = path.join(skillRoot, 'sample-skill');
+        await fs.mkdir(path.join(skillPath, 'references'), { recursive: true });
+        await fs.writeFile(
+          path.join(skillPath, 'SKILL.md'),
+          '---\nname: sample-skill\ndescription: Sample skill\n---\n# Sample skill\n\nRead references/guide.md.',
+        );
+        await fs.writeFile(path.join(skillPath, 'references', 'guide.md'), 'skill-owned guide');
+        await fs.mkdir(path.join(skillPath, 'notes'), { recursive: true });
+        await fs.writeFile(path.join(skillPath, 'notes', 'unmentioned.md'), 'skill unmentioned note');
+
+        await fs.mkdir(path.join(workspacePath, 'references'), { recursive: true });
+        await fs.writeFile(path.join(workspacePath, 'references', 'guide.md'), 'workspace guide');
+        await fs.mkdir(path.join(workspacePath, 'notes'), { recursive: true });
+        await fs.writeFile(path.join(workspacePath, 'notes', 'unmentioned.md'), 'workspace unmentioned note');
+
+        const loadSkillResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-load-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'load_skill',
+              arguments: JSON.stringify({ skill_id: 'sample-skill' }),
+            },
+          },
+          builtIns: {
+            load_skill: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+          },
+        });
+        const loadedSkillMessages = [
+          {
+            role: 'assistant' as const,
+            content: '',
+            tool_calls: [{
+              id: 'tool-load-skill-root-1',
+              type: 'function' as const,
+              function: {
+                name: 'load_skill',
+                arguments: JSON.stringify({ skill_id: 'sample-skill' }),
+              },
+            }],
+          },
+          {
+            role: 'tool' as const,
+            tool_call_id: 'tool-load-skill-root-1',
+            content: String(loadSkillResult),
+          },
+        ];
+
+        const readResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'references/guide.md' }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedReadResult = JSON.parse(String(readResult));
+
+        expect(parsedReadResult.filePath).toBe(path.join(skillPath, 'references', 'guide.md'));
+        expect(parsedReadResult.content).toBe('skill-owned guide');
+
+        const workspaceFallbackReadResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-workspace-fallback-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'notes/unmentioned.md' }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedWorkspaceFallbackReadResult = JSON.parse(String(workspaceFallbackReadResult));
+
+        expect(parsedWorkspaceFallbackReadResult.filePath).toBe(path.join(workspacePath, 'notes', 'unmentioned.md'));
+        expect(parsedWorkspaceFallbackReadResult.content).toBe('workspace unmentioned note');
+
+        const listResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-list-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'list_files',
+              arguments: JSON.stringify({ path: 'references' }),
+            },
+          },
+          builtIns: {
+            list_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedListResult = JSON.parse(String(listResult));
+
+        expect(parsedListResult).toEqual(expect.objectContaining({
+          path: path.join(skillPath, 'references'),
+          entries: ['guide.md'],
+        }));
+
+        const searchResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-search-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'search_files',
+              arguments: JSON.stringify({
+                path: 'references',
+                pattern: '*.md',
+              }),
+            },
+          },
+          builtIns: {
+            search_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedSearchResult = JSON.parse(String(searchResult));
+
+        expect(parsedSearchResult).toEqual(expect.objectContaining({
+          path: path.join(skillPath, 'references'),
+          entries: ['guide.md'],
+        }));
+
+        const createResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-create-workspace-root-1',
+            type: 'function',
+            function: {
+              name: 'create_directory',
+              arguments: JSON.stringify({ path: 'references/generated' }),
+            },
+          },
+          builtIns: {
+            create_directory: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedCreateResult = JSON.parse(String(createResult));
+
+        expect(parsedCreateResult.path).toBe(path.join(workspacePath, 'references', 'generated'));
+        await expect(fs.access(path.join(skillPath, 'references', 'generated'))).rejects.toThrow();
       } finally {
         await fs.rm(skillRoot, { recursive: true, force: true });
       }
