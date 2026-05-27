@@ -215,6 +215,11 @@ describe('llm-runtime google-direct', () => {
           yield {
             text: () => 'google-streamed',
             candidates: [{ finishReason: 'STOP' }],
+            usageMetadata: {
+              promptTokenCount: 11,
+              candidatesTokenCount: 4,
+              totalTokenCount: 15,
+            },
           };
         }()),
       }),
@@ -266,6 +271,11 @@ describe('llm-runtime google-direct', () => {
     ]);
     expect(response.stopKind).toBe('natural_stop');
     expect(response.providerStopReason).toBe('STOP');
+    expect(response.usage).toEqual({
+      inputTokens: 11,
+      outputTokens: 4,
+      totalTokens: 15,
+    });
   });
 
   it('does not emit warning chunks when Gemini streaming aborts before start', async () => {

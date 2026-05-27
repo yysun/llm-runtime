@@ -14,6 +14,7 @@
  * - Historical tool results are converted into Anthropic `tool_result` blocks.
  *
  * Recent changes:
+ * - 2026-05-27: Preserved streamed token usage from Anthropic message stream events.
  * - 2026-05-15: Added provider-facing tool-name translation with reverse mapping for Anthropic tool calls.
  * - 2026-03-27: Initial package-owned Anthropic provider implementation.
  */
@@ -194,6 +195,23 @@ function normalizeAnthropicStopKind(stopReason: string | null | undefined): LLMS
   }
 }
 
+function mapAnthropicUsage(
+  usage: { input_tokens?: number | null; output_tokens?: number | null } | null | undefined,
+): LLMResponse['usage'] {
+  if (
+    !usage
+    || typeof usage.input_tokens !== 'number'
+    || typeof usage.output_tokens !== 'number'
+  ) {
+    return undefined;
+  }
+
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+  };
+}
+
 export async function streamAnthropicResponse(request: AnthropicProviderStreamRequest): Promise<LLMResponse> {
   const toolNameTranslator = createProviderToolNameTranslator(request.tools, {
     reservedProviderNames: request.webSearch ? ['web_search'] : [],
@@ -216,6 +234,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
 
   let fullResponse = '';
   let stopReason: string | null | undefined;
+  const usage: { input_tokens?: number | null; output_tokens?: number | null } = {};
   const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
 
   try {
@@ -228,7 +247,13 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
         ?? (chunk as { message?: { stop_reason?: string | null } }).message?.stop_reason
         ?? stopReason;
 
-      if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
+      if (chunk.type === 'message_start') {
+        usage.input_tokens = chunk.message.usage.input_tokens;
+        usage.output_tokens = chunk.message.usage.output_tokens;
+      } else if (chunk.type === 'message_delta' && chunk.usage) {
+        usage.output_tokens = chunk.usage.output_tokens;
+        usage.input_tokens = chunk.usage.input_tokens ?? usage.input_tokens;
+      } else if (chunk.type === 'content_block_delta' && chunk.delta.type === 'text_delta') {
         fullResponse += chunk.delta.text;
         request.onChunk({ content: chunk.delta.text });
       } else if (chunk.type === 'content_block_start' && isAnthropicClientToolUseBlock(chunk.content_block)) {
@@ -252,6 +277,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
         },
         stopKind: normalizeAnthropicStopKind(stopReason),
         providerStopReason: stopReason ?? undefined,
+        usage: mapAnthropicUsage(usage),
       };
     }
 
@@ -264,6 +290,7 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
       },
       stopKind: normalizeAnthropicStopKind(stopReason),
       providerStopReason: stopReason ?? undefined,
+      usage: mapAnthropicUsage(usage),
     };
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
@@ -325,12 +352,7 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
       },
       stopKind: normalizeAnthropicStopKind(stopReason),
       providerStopReason: stopReason ?? undefined,
-      usage: response.usage
-        ? {
-          inputTokens: response.usage.input_tokens,
-          outputTokens: response.usage.output_tokens,
-        }
-        : undefined,
+      usage: mapAnthropicUsage(response.usage),
     };
   }
 
@@ -343,11 +365,6 @@ export async function generateAnthropicResponse(request: AnthropicProviderReques
     },
     stopKind: normalizeAnthropicStopKind(stopReason),
     providerStopReason: stopReason ?? undefined,
-    usage: response.usage
-      ? {
-        inputTokens: response.usage.input_tokens,
-        outputTokens: response.usage.output_tokens,
-      }
-      : undefined,
+    usage: mapAnthropicUsage(response.usage),
   };
 }

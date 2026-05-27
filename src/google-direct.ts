@@ -14,6 +14,7 @@
  * - Reasoning effort maps to Gemini `thinkingConfig` budgets when explicitly provided.
  *
  * Recent changes:
+ * - 2026-05-27: Preserved Gemini token usage metadata on streamed and buffered responses.
  * - 2026-05-15: Added provider-facing tool-name translation with reverse mapping for Gemini function calls.
  * - 2026-03-27: Initial package-owned Google provider implementation.
  */
@@ -71,6 +72,28 @@ function normalizeReasoningEffort(value: ReasoningEffort | undefined): 'default'
     return value;
   }
   return 'default';
+}
+
+function mapGoogleUsageMetadata(
+  usageMetadata: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+  } | null | undefined,
+): LLMResponse['usage'] {
+  if (
+    !usageMetadata
+    || typeof usageMetadata.promptTokenCount !== 'number'
+    || typeof usageMetadata.candidatesTokenCount !== 'number'
+  ) {
+    return undefined;
+  }
+
+  return {
+    inputTokens: usageMetadata.promptTokenCount,
+    outputTokens: usageMetadata.candidatesTokenCount,
+    ...(typeof usageMetadata.totalTokenCount === 'number' ? { totalTokens: usageMetadata.totalTokenCount } : {}),
+  };
 }
 
 function buildGoogleThinkingConfig(reasoningEffort: ReasoningEffort | undefined): { includeThoughts: true; thinkingBudget: number } | undefined {
@@ -513,6 +536,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
 
   let fullResponse = '';
   let finishReason: string | null | undefined;
+  let usage: LLMResponse['usage'];
   const functionCalls: any[] = [];
 
   try {
@@ -531,6 +555,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
       }
 
       finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
+      usage = mapGoogleUsageMetadata(chunk.usageMetadata) ?? usage;
 
       const parts = Array.isArray(chunk.candidates?.[0]?.content?.parts)
         ? chunk.candidates[0].content.parts
@@ -587,6 +612,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
           ? 'tool_call'
           : normalizeGoogleStopKind(finishReason),
         providerStopReason: finishReason ?? undefined,
+        usage,
       }, resolvedGoogleTools.warnings);
     }
 
@@ -599,6 +625,7 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
       },
       stopKind: normalizeGoogleStopKind(finishReason),
       providerStopReason: finishReason ?? undefined,
+      usage,
     }, resolvedGoogleTools.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
@@ -639,6 +666,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
   const response = result.response;
   const content = response.text() || '';
   const finishReason = response.candidates?.[0]?.finishReason;
+  const usage = mapGoogleUsageMetadata(response.usageMetadata);
   const functionCalls: any[] = [];
 
   if (response.candidates?.[0]?.content?.parts) {
@@ -674,6 +702,7 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
         ? 'tool_call'
         : normalizeGoogleStopKind(finishReason),
       providerStopReason: finishReason ?? undefined,
+      usage,
     }, resolvedGoogleTools.warnings);
   }
 
@@ -686,5 +715,6 @@ export async function generateGoogleResponse(request: GoogleProviderRequest): Pr
     },
     stopKind: normalizeGoogleStopKind(finishReason),
     providerStopReason: finishReason ?? undefined,
+    usage,
   }, resolvedGoogleTools.warnings);
 }

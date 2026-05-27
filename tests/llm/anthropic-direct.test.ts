@@ -251,6 +251,15 @@ describe('llm-runtime anthropic-direct', () => {
         messages: {
           create: async function* () {
             yield {
+              type: 'message_start',
+              message: {
+                usage: {
+                  input_tokens: 12,
+                  output_tokens: 0,
+                },
+              },
+            };
+            yield {
               type: 'content_block_start',
               content_block: {
                 id: 'server-web-search-1',
@@ -278,6 +287,10 @@ describe('llm-runtime anthropic-direct', () => {
               type: 'message_delta',
               delta: {
                 stop_reason: 'end_turn',
+              },
+              usage: {
+                input_tokens: null,
+                output_tokens: 6,
               },
             };
             yield {
@@ -312,6 +325,10 @@ describe('llm-runtime anthropic-direct', () => {
       assistantMessage: {
         role: 'assistant',
         content: 'TypeScript 5.9 is available.',
+      },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 6,
       },
     }));
     expect(response).not.toHaveProperty('tool_calls');

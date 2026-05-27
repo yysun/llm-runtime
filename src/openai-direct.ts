@@ -15,6 +15,7 @@
  * - Tool-call ids are normalized to OpenAI's 40-character limit.
  *
  * Recent changes:
+ * - 2026-05-27: Preserved streamed token usage when providers emit a terminal usage chunk.
  * - 2026-05-15: Added additive normalized stop metadata from OpenAI-compatible `finish_reason` values.
  * - 2026-05-15: Switched to the shared provider-facing tool-name translator with reverse mapping for OpenAI-compatible tool calls.
  * - 2026-03-27: Initial package-owned OpenAI-compatible provider implementation.
@@ -79,6 +80,20 @@ function normalizeReasoningEffort(value: ReasoningEffort | undefined): 'default'
 function getChatCompletionsReasoningEffort(reasoningEffort: ReasoningEffort | undefined): OpenAIReasoningEffort | undefined {
   const effort = normalizeReasoningEffort(reasoningEffort);
   return effort === 'default' ? undefined : effort;
+}
+
+function mapOpenAIUsage(usage: OpenAI.Completions.CompletionUsage | null | undefined): LLMResponse['usage'] {
+  return usage
+    ? {
+      inputTokens: usage.prompt_tokens,
+      outputTokens: usage.completion_tokens,
+      totalTokens: usage.total_tokens,
+    }
+    : undefined;
+}
+
+function shouldRequestStreamUsage(provider: OpenAIClientProvider): boolean {
+  return provider === 'openai' || provider === 'xai';
 }
 
 function extractReasoningText(value: unknown): string {
@@ -523,6 +538,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
     ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     ...(openaiTools ? { tools: openaiTools } : {}),
     ...(resolvedWebSearch.webSearchOptions ? { web_search_options: resolvedWebSearch.webSearchOptions } : {}),
+    ...(shouldRequestStreamUsage(request.provider) ? { stream_options: { include_usage: true } } : {}),
   };
 
   const stream = await request.client.chat.completions.create(
@@ -532,6 +548,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
 
   let fullResponse = '';
   let finishReason: string | null | undefined;
+  let usage: LLMResponse['usage'];
   const functionCalls: Array<{
     id?: string;
     type: 'function';
@@ -543,6 +560,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
       if (request.abortSignal?.aborted) {
         throw new DOMException('OpenAI stream aborted', 'AbortError');
       }
+      usage = mapOpenAIUsage(chunk.usage) ?? usage;
       finishReason = chunk.choices[0]?.finish_reason ?? finishReason;
       const delta = chunk.choices[0]?.delta;
 
@@ -621,6 +639,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
         },
         stopKind: normalizeOpenAIStopKind(finishReason),
         providerStopReason: finishReason ?? undefined,
+        usage,
       }, resolvedWebSearch.warnings);
     }
 
@@ -633,6 +652,7 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
       },
       stopKind: normalizeOpenAIStopKind(finishReason),
       providerStopReason: finishReason ?? undefined,
+      usage,
     }, resolvedWebSearch.warnings);
   } catch (error) {
     if (request.abortSignal?.aborted || isAbortLikeError(error)) {
@@ -706,13 +726,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
       },
       stopKind: normalizeOpenAIStopKind(finishReason),
       providerStopReason: finishReason ?? undefined,
-      usage: response.usage
-        ? {
-          inputTokens: response.usage.prompt_tokens,
-          outputTokens: response.usage.completion_tokens,
-          totalTokens: response.usage.total_tokens,
-        }
-        : undefined,
+      usage: mapOpenAIUsage(response.usage),
     }, resolvedWebSearch.warnings);
   }
 
@@ -725,13 +739,7 @@ export async function generateOpenAIResponse(request: OpenAIProviderRequest): Pr
     },
     stopKind: normalizeOpenAIStopKind(finishReason),
     providerStopReason: finishReason ?? undefined,
-    usage: response.usage
-      ? {
-        inputTokens: response.usage.prompt_tokens,
-        outputTokens: response.usage.completion_tokens,
-        totalTokens: response.usage.total_tokens,
-      }
-      : undefined,
+    usage: mapOpenAIUsage(response.usage),
   }, resolvedWebSearch.warnings);
 }
 

@@ -360,12 +360,24 @@ describe('llm-runtime openai-direct', () => {
           },
         ],
       };
+      yield {
+        choices: [],
+        usage: {
+          prompt_tokens: 12,
+          completion_tokens: 7,
+          total_tokens: 19,
+        },
+      };
     }
 
+    let capturedRequest: Record<string, unknown> | undefined;
     const fakeClient = {
       chat: {
         completions: {
-          create: async () => createStream(),
+          create: async (request: Record<string, unknown>) => {
+            capturedRequest = request;
+            return createStream();
+          },
         },
       },
     } as any;
@@ -393,6 +405,11 @@ describe('llm-runtime openai-direct', () => {
       },
     });
 
+    expect(capturedRequest).toEqual(expect.objectContaining({
+      stream_options: {
+        include_usage: true,
+      },
+    }));
     expect(chunks).toEqual([
       { reasoningContent: 'think-1' },
       { content: 'hello ' },
@@ -425,6 +442,11 @@ describe('llm-runtime openai-direct', () => {
             },
           },
         ],
+      },
+      usage: {
+        inputTokens: 12,
+        outputTokens: 7,
+        totalTokens: 19,
       },
     });
   });
