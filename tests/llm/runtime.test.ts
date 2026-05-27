@@ -1932,6 +1932,72 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('accepts final text after a mutating tool result exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const writeToolCall = {
+      id: 'write-world-before-text-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_world_file',
+        arguments: '{"path":".agent-world/world.json"}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: '.agent-world/world.json' }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: 'Agent World initialized with the Broadcast pattern in `.agent-world/world.json`.',
+        stopKind: 'natural_stop',
+        providerStopReason: 'STOP',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Agent World initialized with the Broadcast pattern in `.agent-world/world.json`.',
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      extraTools: [{
+        name: 'write_world_file',
+        description: 'Write world files.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'Agent World initialized with the Broadcast pattern in `.agent-world/world.json`.',
+    });
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
   it('maps final_answer control tool calls without executing them as normal tools', async () => {
     mockGenerateOpenAIResponse.mockReset();
 

@@ -686,11 +686,14 @@ async function runRuntimeCompletion(
       },
     }),
     classifyTextResponse: ({ messages }) => {
-      if (mutatingToolRequired && !hasMutatingToolResult(messages, requestToolDefinitions)) {
-        return {
-          classification: 'non_progressing',
-          transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
-        };
+      if (mutatingToolRequired) {
+        if (!hasMutatingToolResult(messages, requestToolDefinitions)) {
+          return {
+            classification: 'non_progressing',
+            transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
+          };
+        }
+        return 'verified_final_response';
       }
     },
     onFinalAnswerToolCall: async ({ state, response, controlOutput }) => {
