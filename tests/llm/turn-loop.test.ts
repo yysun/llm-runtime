@@ -2,6 +2,7 @@
  * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
  * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
  * Recent changes:
+ * - 2026-05-27: Added generic-loop package-managed tool executor contract coverage.
  * - 2026-05-15: Added a reusable scripted mock LLM scenario helper and a Jazz Gill package-managed flow regression.
  * - 2026-05-15: Added action-evidence separation regressions for HITL tools, bound executors, custom tools, and trace metadata.
  * - 2026-05-15: Added regressions for run-scoped evidence, malformed control-tool retries, and merged loop-contract prompt injection.
@@ -279,6 +280,105 @@ describe('llm-runtime completion loop', () => {
 
     expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({ provider: 'openai', model: 'gpt-5' }));
     expect(result.state.seenTexts).toEqual(['done']);
+  });
+
+  it('passes a package-managed tool executor to the generic loop when modelRequest is provided', async () => {
+    mockGenerate
+      .mockResolvedValueOnce(toolCall('project_lookup', { id: '42' }, 'generic-tool-1'))
+      .mockResolvedValueOnce(text('lookup complete'));
+    mockExecuteToolCall.mockResolvedValueOnce('lookup result');
+    const seenExecutors: unknown[] = [];
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'lookup project' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      modelRequest: {
+        provider: 'openai',
+        model: 'gpt-5',
+        builtIns: false,
+        extraTools: [{
+          name: 'project_lookup',
+          description: 'Lookup a project.',
+          evidenceKind: 'read',
+          parameters: {
+            type: 'object',
+            properties: { id: { type: 'string' } },
+            required: ['id'],
+            additionalProperties: false,
+          },
+        }],
+      },
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, response, toolExecutor }) => {
+        seenExecutors.push(toolExecutor);
+        const toolResult = await toolExecutor?.executeToolCall(
+          response.tool_calls?.[0]!,
+          { workingDirectory: '/tmp/project' },
+          { errorMode: 'return-artifact' },
+        );
+
+        return {
+          state: {
+            ...state,
+            messages: [
+              ...state.messages,
+              response.assistantMessage,
+              {
+                role: 'tool',
+                tool_call_id: response.tool_calls?.[0]?.id,
+                content: String(toolResult),
+              } satisfies LLMChatMessage,
+            ],
+          },
+          next: { control: 'continue' },
+        };
+      },
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('lookup complete');
+    expect(seenExecutors[0]).toEqual(expect.objectContaining({
+      executeToolCall: expect.any(Function),
+      executeToolCalls: expect.any(Function),
+    }));
+    expect(mockExecuteToolCall).toHaveBeenCalledWith(expect.objectContaining({
+      builtIns: false,
+      extraTools: [expect.objectContaining({ name: 'project_lookup' })],
+      context: { workingDirectory: '/tmp/project' },
+      errorMode: 'return-artifact',
+      toolCall: expect.objectContaining({
+        id: 'generic-tool-1',
+        function: expect.objectContaining({ name: 'project_lookup' }),
+      }),
+    }));
+  });
+
+  it('does not pass a tool executor to the generic loop without modelRequest', async () => {
+    const seenExecutors: unknown[] = [];
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'lookup project' } satisfies LLMChatMessage] as LLMChatMessage[],
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => toolCall('project_lookup', { id: '42' }, 'custom-tool-1')),
+      buildMessages: async ({ state }) => state.messages,
+      onToolCallsResponse: async ({ state, toolExecutor }) => {
+        seenExecutors.push(toolExecutor);
+        return { state };
+      },
+      onTextResponse: async ({ state }) => ({ state }),
+    });
+
+    expect(result.reason).toBe('tool_calls_response');
+    expect(seenExecutors).toEqual([undefined]);
+    expect(mockExecuteToolCall).not.toHaveBeenCalled();
   });
 
   it('defaults complete() package-managed built-ins to read-only tools plus ask_user_input', async () => {

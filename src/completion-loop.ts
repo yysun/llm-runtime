@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-27: Passed package-managed tool executors from the generic loop when `modelRequest` is provided.
  * - 2026-05-27: Added an explicit empty-text retry instruction so provider stop-without-content responses continue with tools instead of failing silently.
  * - 2026-05-15: Defaulted `complete(...)` to permissive text-response mode so general chat hosts accept conversational responses; strict callers opt in via `defaultTextResponseMode: 'require_tool_result'`. The post-interaction structural rejection still fires regardless of mode.
  * - 2026-05-15: Replaced English-language narration and unsupported-evidence-claim regex heuristics with language-agnostic structural classification, and made post-interaction-answer text without action evidence unconditionally non-progressing regardless of the host's `requiresActionEvidence` opinion.
@@ -1066,6 +1067,18 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
   let syntheticToolCallSequence = 0;
   let observedInteractionProgress = false;
   let observedActionEvidence = false;
+  const configuredToolDefinitions = createConfiguredToolDefinitionMap(options.modelRequest);
+  const toolExecutor = createCompletionToolExecutor(options.modelRequest, (observedToolCalls) => {
+    for (const toolCall of observedToolCalls) {
+      const evidenceKind = classifyToolEvidence(toolCall.function.name, configuredToolDefinitions);
+      if (evidenceKind === 'interaction') {
+        observedInteractionProgress = true;
+      }
+      if (isActionEvidenceKind(evidenceKind)) {
+        observedActionEvidence = true;
+      }
+    }
+  });
   const startedAt = Date.now();
   const steps: TurnLoopStepSummary[] = [];
   const toolCalls: TurnLoopToolCallSummary[] = [];
@@ -1644,6 +1657,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         response,
         messages,
         iteration,
+        toolExecutor,
       });
       state = next?.state ?? state;
       if (next?.next?.control === 'continue') {
@@ -1965,8 +1979,6 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
       }
     }
   };
-  const toolExecutor = createCompletionToolExecutor(modelRequest, observeToolEvidence);
-
   const result = await runCompletionLoop({
     ...options,
     emptyTextRetryLimit: options.emptyTextRetryLimit ?? 0,
@@ -1979,7 +1991,7 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
     onToolCallsResponse: async (params) => {
       const next = await callerOnToolCallsResponse({
         ...params,
-        toolExecutor,
+        toolExecutor: params.toolExecutor,
       });
       if (next?.next?.control === 'continue') {
         observeToolEvidence(params.response.tool_calls ?? []);

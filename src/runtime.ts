@@ -15,6 +15,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-27: Honored runtime `agentControlMode: true` as a compatibility alias for `terminationMode: 'control_tools'`.
+ * - 2026-05-27: Added true text-delta streaming and opt-in control-tool termination for runtime completion.
  * - 2026-05-27: Honored per-call skill roots even when executing through a bound runtime environment.
  * - 2026-05-27: Defaulted runtime completion to one empty-text retry so provider empty stops after tool results can recover.
  * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` methods to the hardened completion loop while preserving the existing runtime result and event contracts.
@@ -30,8 +32,12 @@ import {
   HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
   createBuiltInToolDefinitions,
+  normalizeBuiltInToolSelection,
 } from './builtins.js';
-import { complete as runCompletionLoopComplete } from './completion-loop.js';
+import {
+  complete as runCompletionLoopComplete,
+  type RunCompletionLoopResult,
+} from './completion-loop.js';
 import {
   createAnthropicClient,
   generateAnthropicResponse,
@@ -108,6 +114,11 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'path_exists',
   'create_directory',
 ] as const;
+const MUTATING_BUILT_IN_TOOL_NAMES = new Set<string>([
+  'write_file',
+  'create_directory',
+  'shell_cmd',
+]);
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
   toolPermission: ToolPermission;
@@ -299,11 +310,102 @@ function isToolExecutionFailureArtifact(value: unknown): value is LLMToolExecuti
   );
 }
 
+function isMutatingEvidenceKind(evidenceKind: LLMToolDefinition['evidenceKind']): boolean {
+  return evidenceKind === 'write'
+    || evidenceKind === 'external_action'
+    || evidenceKind === 'artifact';
+}
+
+function createRequestToolDefinitionMap(
+  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools'>,
+): ReadonlyMap<string, LLMToolDefinition> {
+  const definitions = new Map<string, LLMToolDefinition>();
+
+  for (const tool of request.extraTools ?? []) {
+    definitions.set(tool.name, tool);
+  }
+
+  for (const [toolName, tool] of Object.entries(request.tools ?? {})) {
+    definitions.set(toolName, tool);
+  }
+
+  return definitions;
+}
+
+function isMutatingToolName(
+  toolName: string,
+  requestToolDefinitions: ReadonlyMap<string, LLMToolDefinition>,
+): boolean {
+  if (MUTATING_BUILT_IN_TOOL_NAMES.has(toolName)) {
+    return true;
+  }
+
+  const definition = requestToolDefinitions.get(toolName);
+  if (!definition) {
+    return false;
+  }
+
+  return isMutatingEvidenceKind(definition.evidenceKind);
+}
+
+function requestExposesMutatingTools(request: LLMRuntimeCompleteOptions): boolean {
+  const builtIns = normalizeBuiltInToolSelection(getCompleteBuiltIns(request.builtIns));
+  if ([...MUTATING_BUILT_IN_TOOL_NAMES].some((toolName) => builtIns[toolName as keyof typeof builtIns])) {
+    return true;
+  }
+
+  for (const tool of request.extraTools ?? []) {
+    if (isMutatingEvidenceKind(tool.evidenceKind)) {
+      return true;
+    }
+  }
+
+  for (const tool of Object.values(request.tools ?? {})) {
+    if (isMutatingEvidenceKind(tool.evidenceKind)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasMutatingToolResult(
+  messages: LLMChatMessage[],
+  requestToolDefinitions: ReadonlyMap<string, LLMToolDefinition>,
+): boolean {
+  const toolCallNamesById = new Map<string, string>();
+
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const toolCall of message.tool_calls ?? []) {
+        toolCallNamesById.set(toolCall.id, toolCall.function.name);
+      }
+      continue;
+    }
+
+    if (message.role !== 'tool' || !message.tool_call_id) {
+      continue;
+    }
+
+    const toolName = toolCallNamesById.get(message.tool_call_id);
+    if (toolName && isMutatingToolName(toolName, requestToolDefinitions)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function buildRuntimeCompletionModelRequest(
   environment: LLMEnvironment,
   request: LLMRuntimeCompleteOptions,
+  options: {
+    streamModel?: boolean;
+    onChunk?: (chunk: LLMStreamChunk) => void;
+  } = {},
 ) {
   return {
+    ...(options.streamModel ? { mode: 'stream' as const } : {}),
     provider: request.provider,
     model: request.model,
     temperature: request.temperature,
@@ -318,6 +420,7 @@ function buildRuntimeCompletionModelRequest(
     tools: request.tools,
     environment,
     context: request.context,
+    ...(options.onChunk ? { onChunk: options.onChunk } : {}),
   };
 }
 
@@ -365,19 +468,7 @@ function createRepeatedToolCallDiagnosticOutput(result: {
   return `I could not complete the request because the model kept repeating the same tool call instead of using the previous tool result. Repeated tool: ${toolList}. Stopped after ${repeatCount}; ${limit}.`;
 }
 
-function adaptRuntimeCompleteResult(result: {
-  state: RuntimeCompletionState;
-  reason: string;
-  response: LLMResponse | null;
-  stop: {
-    maxIterations: number;
-    repeatedToolCall?: {
-      consecutiveSameBatchCount: number;
-      maxConsecutiveSameBatches: number;
-      toolNames: string[];
-    };
-  };
-}): LLMRuntimeCompleteResult {
+function adaptRuntimeCompleteResult(result: RunCompletionLoopResult<RuntimeCompletionState>): LLMRuntimeCompleteResult {
   if (result.reason === 'tool_calls_response' && result.state.toolCalls?.length) {
     return {
       status: 'tool_calls',
@@ -392,6 +483,34 @@ function adaptRuntimeCompleteResult(result: {
       status: 'completed',
       messages: result.state.messages,
       output: result.state.output,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'final_answer' && result.controlOutput?.kind === 'final_answer') {
+    return {
+      status: 'completed',
+      messages: result.state.messages,
+      output: result.controlOutput.answer,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'needs_user_input' && result.controlOutput?.kind === 'need_user_input') {
+    const toolCall = result.response?.tool_calls?.find((candidate) => candidate.id === result.controlOutput?.toolCallId);
+    return {
+      status: 'tool_calls',
+      messages: result.state.messages,
+      toolCalls: toolCall ? [toolCall] : (result.response?.tool_calls ?? []),
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'blocked' && result.controlOutput?.kind === 'blocked') {
+    return {
+      status: 'failed',
+      messages: result.state.messages,
+      error: result.controlOutput.reason,
       raw: result.state.raw ?? result.response ?? undefined,
     };
   }
@@ -487,26 +606,53 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function usesControlToolTermination(request: LLMRuntimeCompleteOptions): boolean {
+  return request.terminationMode === 'control_tools' || request.agentControlMode === true;
+}
+
+const DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION = 'The last response claimed completion before the required write or external action happened. Continue now by calling the necessary tool. If the required tool is unavailable or blocked, use blocked or explain the missing capability.';
+
 async function runRuntimeCompletion(
   environment: LLMEnvironment,
   request: LLMRuntimeCompleteOptions,
   emitEvent?: (event: LLMRuntimeStreamCompleteEvent) => Promise<void> | void,
+  options: {
+    streamModel?: boolean;
+  } = {},
 ): Promise<LLMRuntimeCompleteResult> {
+  let activeIteration = 0;
+  const mutatingToolRequired = requestExposesMutatingTools(request);
+  const requestToolDefinitions = createRequestToolDefinitionMap(request);
   const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
     initialState: {
       messages: request.messages,
     },
-    modelRequest: buildRuntimeCompletionModelRequest(environment, request),
+    modelRequest: buildRuntimeCompletionModelRequest(environment, request, {
+      streamModel: options.streamModel,
+      onChunk: options.streamModel
+        ? (chunk) => {
+          if (chunk.content) {
+            void emitEvent?.({
+              type: 'text_delta',
+              delta: chunk.content,
+              iteration: activeIteration,
+            });
+          }
+        }
+        : undefined,
+    }),
     maxIterations: request.maxIterations,
     maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
     maxWallTimeMs: request.maxWallTimeMs,
     emptyTextRetryLimit: request.emptyTextRetryLimit ?? 1,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
+    agentControlMode: usesControlToolTermination(request),
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
     abortSignal: request.context?.abortSignal,
     buildMessages: async ({ state, transientInstruction }) => appendTransientInstruction(state.messages, transientInstruction),
     onIterationStart: async ({ iteration }) => {
+      activeIteration = iteration;
       await emitEvent?.({ type: 'model_start', iteration });
     },
     onModelResponse: async ({ iteration, response }) => {
@@ -532,6 +678,68 @@ async function runRuntimeCompletion(
         raw: response,
       },
     }),
+    classifyTextResponse: ({ messages }) => {
+      if (mutatingToolRequired && !hasMutatingToolResult(messages, requestToolDefinitions)) {
+        return {
+          classification: 'non_progressing',
+          transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
+        };
+      }
+    },
+    onFinalAnswerToolCall: async ({ state, response, controlOutput }) => {
+      if (controlOutput.kind !== 'final_answer') {
+        return { state };
+      }
+
+      if (mutatingToolRequired && !hasMutatingToolResult(state.messages, requestToolDefinitions)) {
+        return {
+          state: {
+            ...state,
+            messages: [...state.messages, response.assistantMessage],
+            raw: response,
+          },
+          next: {
+            control: 'continue',
+            transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
+          },
+        };
+      }
+
+      return {
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            { role: 'assistant', content: controlOutput.answer },
+          ],
+          output: controlOutput.answer,
+          raw: response,
+        },
+      };
+    },
+    onNeedUserInputToolCall: async ({ state, response }) => ({
+      state: {
+        ...state,
+        messages: [...state.messages, response.assistantMessage],
+        toolCalls: response.tool_calls ?? [],
+        raw: response,
+      },
+    }),
+    onBlockedToolCall: async ({ state, response, controlOutput }) => {
+      if (controlOutput.kind !== 'blocked') {
+        return { state };
+      }
+
+      return {
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          error: controlOutput.reason,
+          raw: response,
+        },
+      };
+    },
     onToolCallsResponse: async ({ state, response, toolExecutor, iteration }) => {
       const nextMessages = [...state.messages, response.assistantMessage];
       const toolCalls = response.tool_calls ?? [];
@@ -682,7 +890,7 @@ export function createRuntime(options: LLMEnvironmentOptions = {}): LLMRuntime {
       const events = createAsyncEventQueue<LLMRuntimeStreamCompleteEvent>();
       void runRuntimeCompletion(runtime, request, async (event) => {
         events.push(event);
-      }).catch(async (error) => {
+      }, { streamModel: true }).catch(async (error) => {
         events.push({
           type: 'failed',
           result: {

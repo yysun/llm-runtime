@@ -15,6 +15,8 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-27: Added runtime `agentControlMode` compatibility coverage for post-tool narration.
+ * - 2026-05-27: Added streaming delta and control-tool termination coverage.
  * - 2026-05-27: Added runtime completion coverage for empty-text recovery after loading a skill.
  * - 2026-05-27: Added regression coverage for read-only file tools resolving loaded-skill referenced paths from the skill root.
  * - 2026-05-18: Added focused contract coverage for file-tool validation, uncapped read pagination, hidden entry discovery, and symlink-aware path checks.
@@ -34,9 +36,11 @@ import { describe, expect, it, vi } from 'vitest';
 const {
   mockCreateClientForProvider,
   mockGenerateOpenAIResponse,
+  mockStreamOpenAIResponse,
 } = vi.hoisted(() => ({
   mockCreateClientForProvider: vi.fn(() => ({ client: 'openai' })),
   mockGenerateOpenAIResponse: vi.fn(),
+  mockStreamOpenAIResponse: vi.fn(),
 }));
 
 vi.mock('../../src/openai-direct.js', async () => {
@@ -45,6 +49,7 @@ vi.mock('../../src/openai-direct.js', async () => {
     ...(actual as object),
     createClientForProvider: mockCreateClientForProvider,
     generateOpenAIResponse: mockGenerateOpenAIResponse,
+    streamOpenAIResponse: mockStreamOpenAIResponse,
   };
 });
 
@@ -1173,6 +1178,7 @@ describe('llm-runtime runtime', () => {
 
   it('streams agentic lifecycle events through runtime.streamComplete', async () => {
     mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
 
     const lookupToolCall = {
       id: 'lookup-2',
@@ -1183,7 +1189,7 @@ describe('llm-runtime runtime', () => {
       },
     };
 
-    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+    mockStreamOpenAIResponse.mockImplementation(async (request: any) => {
       const hasLookupResult = request.messages.some((message: any) => (
         message.role === 'tool' && message.tool_call_id === 'lookup-2'
       ));
@@ -1201,6 +1207,9 @@ describe('llm-runtime runtime', () => {
         };
       }
 
+      request.onChunk({ content: 'TOKEN=' });
+      request.onChunk({ reasoningContent: 'private reasoning' });
+      request.onChunk({ content: 'project-token' });
       return {
         type: 'text',
         content: 'TOKEN=project-token',
@@ -1220,6 +1229,7 @@ describe('llm-runtime runtime', () => {
     });
 
     const eventTypes: string[] = [];
+    const textDeltaEvents: RuntimeStreamCompleteEvent[] = [];
 
     for await (const event of runtime.streamComplete({
       provider: 'openai',
@@ -1240,6 +1250,9 @@ describe('llm-runtime runtime', () => {
       }],
     })) {
       eventTypes.push(event.type);
+      if (event.type === 'text_delta') {
+        textDeltaEvents.push(event);
+      }
     }
 
     expect(eventTypes).toEqual([
@@ -1248,17 +1261,81 @@ describe('llm-runtime runtime', () => {
       'tool_start',
       'tool_result',
       'model_start',
+      'text_delta',
+      'text_delta',
       'assistant_message',
       'completed',
     ]);
+    expect(textDeltaEvents).toEqual([
+      { type: 'text_delta', delta: 'TOKEN=', iteration: 2 },
+      { type: 'text_delta', delta: 'project-token', iteration: 2 },
+    ]);
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
+  it('emits text deltas from runtime.streamComplete without leaking reasoning chunks', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    mockStreamOpenAIResponse.mockImplementation(async (request: any) => {
+      request.onChunk({ content: 'hel' });
+      request.onChunk({ reasoningContent: 'hidden chain' });
+      request.onChunk({ content: 'lo' });
+      return {
+        type: 'text',
+        content: 'hello',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'hello',
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Say hello.' }],
+      defaultTextResponseMode: 'permissive',
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: 'model_start', iteration: 1 },
+      { type: 'text_delta', delta: 'hel', iteration: 1 },
+      { type: 'text_delta', delta: 'lo', iteration: 1 },
+      expect.objectContaining({ type: 'assistant_message', iteration: 1 }),
+      expect.objectContaining({
+        type: 'completed',
+        iteration: 1,
+        result: expect.objectContaining({ status: 'completed', output: 'hello' }),
+      }),
+    ]);
+    expect(events).not.toContainEqual(expect.objectContaining({ delta: 'hidden chain' }));
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
   });
 
   it('fails runtime.streamComplete on plain assistant narration that only announces future work', async () => {
     mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
 
-    mockGenerateOpenAIResponse.mockResolvedValue({
+    mockStreamOpenAIResponse.mockResolvedValue({
       type: 'text',
       content: 'I will inspect the project files next.',
       assistantMessage: {
@@ -1303,7 +1380,539 @@ describe('llm-runtime runtime', () => {
         error: expect.stringContaining('required evidence'),
       }),
     }));
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('continues past non-English plain text in control-tool termination mode', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'lookup-control-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+    const finalAnswerToolCall = {
+      id: 'control-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"完成了"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: '我先看一下。',
+        assistantMessage: {
+          role: 'assistant',
+          content: '我先看一下。',
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [lookupToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [lookupToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerToolCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      terminationMode: 'control_tools',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        evidenceKind: 'read',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async () => ({ token: 'project-token' }),
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('完成了');
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('continues past post-tool future-work narration when agentControlMode is enabled on the runtime facade', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const inspectToolCall = {
+      id: 'inspect-agent-world-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"agent-world"}',
+      },
+    };
+    const finalAnswerToolCall = {
+      id: 'control-final-agent-world-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Created the Agent World files."}',
+      },
+    };
+    const futureWorkNarration = [
+      'Agent World initialization will use:',
+      '',
+      '**Pattern:** Broadcast',
+      '_One message can wake all eligible active agents._',
+      '',
+      'Next, I will:',
+      '',
+      '- Create `.agent-world/`',
+      '- Create `.agent-world/prompts/`',
+      '- Generate prompt files',
+      '',
+      'Proceeding with world creation now.',
+    ].join('\n');
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [inspectToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [inspectToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: futureWorkNarration,
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: futureWorkNarration,
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerToolCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      agentControlMode: true,
+      messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Inspect Agent World state.',
+        evidenceKind: 'read',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: async () => ({ exists: false }),
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('Created the Agent World files.');
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('does not accept successful initialization text before a mutating tool result exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const inspectToolCall = {
+      id: 'inspect-world-1',
+      type: 'function' as const,
+      function: {
+        name: 'inspect_world',
+        arguments: '{}',
+      },
+    };
+    const writeToolCall = {
+      id: 'write-world-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_world_file',
+        arguments: '{"path":".agent-world/world.json"}',
+      },
+    };
+    const unsupportedSuccess = [
+      'Agent World has been successfully initialized.',
+      '',
+      'You can now start using it by sending your first world message.',
+    ].join('\n');
+    const executeInspect = vi.fn(async () => ({ exists: false }));
+    const executeWrite = vi.fn(async () => ({ ok: true }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [inspectToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [inspectToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: unsupportedSuccess,
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: unsupportedSuccess,
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: 'Agent World has been successfully initialized.',
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Agent World has been successfully initialized.',
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      extraTools: [{
+        name: 'inspect_world',
+        description: 'Inspect world state.',
+        evidenceKind: 'read',
+        parameters: { type: 'object' },
+        execute: executeInspect,
+      }, {
+        name: 'write_world_file',
+        description: 'Write world files.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('Agent World has been successfully initialized.');
+    expect(executeInspect).toHaveBeenCalledTimes(1);
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(4);
+
+    await runtime.dispose();
+  });
+
+  it('does not accept final_answer before a mutating tool result exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const prematureFinalToolCall = {
+      id: 'control-final-before-write-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Agent World has been successfully initialized."}',
+      },
+    };
+    const writeToolCall = {
+      id: 'write-world-before-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_world_file',
+        arguments: '{"path":".agent-world/world.json"}',
+      },
+    };
+    const finalToolCall = {
+      id: 'control-final-after-write-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Agent World has been successfully initialized."}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [prematureFinalToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [prematureFinalToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalToolCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      agentControlMode: true,
+      messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      extraTools: [{
+        name: 'write_world_file',
+        description: 'Write world files.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'Agent World has been successfully initialized.',
+    });
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('maps final_answer control tool calls without executing them as normal tools', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const executeLookup = vi.fn();
+    const finalAnswerToolCall = {
+      id: 'control-final-direct-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Verified result"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [finalAnswerToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [finalAnswerToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      terminationMode: 'control_tools',
+      messages: [{ role: 'user', content: 'Finish.' }],
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup.',
+        parameters: { type: 'object' },
+        execute: executeLookup,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'Verified result',
+    });
+    expect(executeLookup).not.toHaveBeenCalled();
+
+    await runtime.dispose();
+  });
+
+  it('maps need_user_input control tool calls to host-actionable tool_calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const needInputToolCall = {
+      id: 'control-input-1',
+      type: 'function' as const,
+      function: {
+        name: 'need_user_input',
+        arguments: '{"question":"Which account?","reason":"A target account is required."}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [needInputToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [needInputToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      terminationMode: 'control_tools',
+      messages: [{ role: 'user', content: 'Find the account.' }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([needInputToolCall]);
+    expect(result.toolCalls?.[0]?.function.arguments).toContain('Which account?');
+
+    await runtime.dispose();
+  });
+
+  it('maps blocked control tool calls to failed results with the reason preserved', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const blockedToolCall = {
+      id: 'control-blocked-1',
+      type: 'function' as const,
+      function: {
+        name: 'blocked',
+        arguments: '{"reason":"Missing permission."}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [blockedToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [blockedToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      terminationMode: 'control_tools',
+      messages: [{ role: 'user', content: 'Do restricted work.' }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      error: 'Missing permission.',
+    });
 
     await runtime.dispose();
   });

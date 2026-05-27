@@ -15,6 +15,8 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-27: Added `agentControlMode` as a runtime-facade compatibility alias for control-tool termination.
+ * - 2026-05-27: Added opt-in runtime control-tool termination mode for agentic runs.
  * - 2026-05-15: Moved runtime-facade completion result/event contracts and HITL resume helpers out of the deleted legacy agentic loop module.
  * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` contracts to the hardened completion-loop-backed runtime path.
  * - 2026-05-15: Added tool evidence metadata so completion loops can separate interaction progress from task action evidence.
@@ -360,6 +362,7 @@ export interface LLMEnvironmentOptions {
 
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
 export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_result';
+export type LLMRuntimeTerminationMode = 'text' | 'control_tools';
 export interface LLMRuntimeRepeatedToolCallGuard {
   maxConsecutiveSameBatches?: number;
 }
@@ -370,6 +373,8 @@ export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOption
   emptyTextRetryLimit?: number;
   repeatedToolCallGuard?: false | LLMRuntimeRepeatedToolCallGuard;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
+  agentControlMode?: boolean;
+  terminationMode?: LLMRuntimeTerminationMode;
   rejectedTextRetryLimit?: number;
 }
 export type LLMRuntimeStreamCompleteOptions = LLMRuntimeCompleteOptions;
