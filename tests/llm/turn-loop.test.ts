@@ -32,6 +32,7 @@ import {
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
   DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
   DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
+  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
   DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
   DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
@@ -2027,6 +2028,72 @@ describe('llm-runtime completion loop', () => {
     expect(result.reason).toBe('timeout');
     expect(result.response).toBeNull();
     expect(result.stop).toEqual(expect.objectContaining({ reason: 'timeout', timedOutDuringIteration: 1 }));
+    expect(seenAbortSignal?.aborted).toBe(true);
+  });
+
+  it('returns final diagnostic text when timeout happens after completed tool work', async () => {
+    vi.useFakeTimers();
+
+    let seenAbortSignal: AbortSignal | undefined;
+    const responses = [toolCall('create_directory', { dirPath: 'agent-world-workflows' }, 'mkdir-1')];
+    const resultPromise = runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'agent-world init' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      maxWallTimeMs: 25,
+      callModel: vi.fn(async ({ abortSignal }) => {
+        seenAbortSignal = abortSignal;
+        const nextResponse = responses.shift();
+        if (nextResponse) {
+          return nextResponse;
+        }
+
+        return await new Promise<LLMResponse>(() => undefined);
+      }),
+      buildMessages: async ({ state }) => state.messages,
+      onTextResponse: async ({ state, responseText, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          finalText: responseText,
+        },
+      }),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            {
+              role: 'tool',
+              tool_call_id: response.tool_calls?.[0]?.id,
+              content: JSON.stringify({ success: true, path: 'agent-world-workflows' }),
+            } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' as const },
+      }),
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    const result = await resultPromise;
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe(DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE);
+    expect(result.response).toEqual(expect.objectContaining({
+      content: DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
+      providerStopReason: 'timeout_after_tool_result',
+    }));
+    expect(result.stop).toEqual(expect.objectContaining({
+      reason: 'text_response',
+      timedOutDuringIteration: 2,
+    }));
+    expect(result.steps.map((step) => step.branch)).toEqual([
+      'tool_calls_continue',
+      'text_response_stop',
+    ]);
     expect(seenAbortSignal?.aborted).toBe(true);
   });
 

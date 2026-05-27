@@ -285,6 +285,7 @@ export const DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION = 'The user already a
 export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You already requested required user input. Do not repeat the same question in assistant text and do not call the same interaction tool again before the user answers. Wait for the user answer, then continue with the appropriate task tool.';
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
 export const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION = 'You already called the same tool with the same arguments and have its tool result in the conversation. Do not call that same tool again. Use the existing tool result to continue now: provide the final answer, call a different necessary tool, or report what is blocked.';
+export const DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE = 'The model timed out after tool work had already completed. The completed tool results are preserved in the conversation, but the model did not produce a final answer before the time limit.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
 export const DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS = 120000;
@@ -540,6 +541,13 @@ function createRepeatedToolCallDiagnosticText(detail: TurnLoopRepeatedToolCallSt
     : 'unknown tool';
 
   return `I could not complete the request because the model kept repeating the same tool call instead of using the previous tool result. Repeated tool: ${toolList}. Stopped after ${detail.consecutiveSameBatchCount} consecutive identical tool-call batches; limit ${detail.maxConsecutiveSameBatches}.`;
+}
+
+function shouldReturnTimeoutDiagnostic(params: {
+  messages: LLMChatMessage[];
+  observedActionEvidence: boolean;
+}): boolean {
+  return params.observedActionEvidence && hasPriorToolResult(params.messages);
 }
 
 function createSyntheticTextResponse(content: string, providerStopReason: string): LLMResponse {
@@ -1102,6 +1110,39 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     return result;
   }
 
+  async function maybeFinalizeTimeoutAfterToolResult(
+    messages: TMessage[],
+    iteration: number,
+  ): Promise<RunCompletionLoopResult<TState> | null> {
+    if (!shouldReturnTimeoutDiagnostic({ messages, observedActionEvidence })) {
+      return null;
+    }
+
+    const syntheticResponse = createSyntheticTextResponse(DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE, 'timeout_after_tool_result');
+    const next = await options.onTextResponse({
+      state,
+      responseText: DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
+      response: syntheticResponse,
+      messages,
+      iteration,
+    });
+    state = next?.state ?? state;
+    recordStep(iteration, syntheticResponse, 'text_response_stop');
+    return await finalize({
+      reason: 'text_response',
+      response: syntheticResponse,
+      stop: {
+        reason: 'text_response',
+        iteration,
+        elapsedMs: getElapsedMs(),
+        maxIterations,
+        maxConsecutiveToolTurns,
+        maxWallTimeMs,
+        timedOutDuringIteration: iteration,
+      },
+    });
+  }
+
   while (true) {
     if (getElapsedMs() >= maxWallTimeMs) {
       return await finalize({
@@ -1169,6 +1210,11 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
 
     const remainingWallTimeMs = maxWallTimeMs - getElapsedMs();
     if (remainingWallTimeMs <= 0) {
+      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
+      if (timeoutDiagnostic) {
+        return timeoutDiagnostic;
+      }
+
       return await finalize({
         reason: 'timeout',
         response: lastResponse,
@@ -1211,6 +1257,11 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     }
 
     if (modelOutcome.kind === 'timeout') {
+      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
+      if (timeoutDiagnostic) {
+        return timeoutDiagnostic;
+      }
+
       return await finalize({
         reason: 'timeout',
         response: lastResponse,
@@ -1253,6 +1304,11 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     });
 
     if (getElapsedMs() >= maxWallTimeMs) {
+      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
+      if (timeoutDiagnostic) {
+        return timeoutDiagnostic;
+      }
+
       recordStep(iteration, response, 'timeout_stop');
       return await finalize({
         reason: 'timeout',
