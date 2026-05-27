@@ -23,6 +23,8 @@ import path from 'node:path';
 import {
   createRuntime,
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
+  DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
+  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
   DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
   parseToolValidationFailureArtifact,
   runCompletionLoop,
@@ -54,6 +56,8 @@ type HardeningScenarioResult = {
   toolNames: string[];
   rejectedTexts: HardeningState['rejectedTexts'];
   validationArtifacts: ToolValidationFailureArtifact[];
+  reason: string;
+  stopReason: string;
   turns: number;
 };
 
@@ -70,6 +74,8 @@ type ScriptedResponder = (params: {
 type HardeningScenario = {
   name: string;
   messages: LLMChatMessage[];
+  maxWallTimeMs?: number;
+  repeatedToolCallGuard?: false | { maxConsecutiveSameBatches?: number };
   responder: ScriptedResponder;
   assertResult: (result: HardeningScenarioResult) => void;
 };
@@ -128,6 +134,8 @@ async function runScenario(
     } satisfies HardeningState,
     emptyTextRetryLimit: 0,
     rejectedTextRetryLimit: 1,
+    maxWallTimeMs: scenario.maxWallTimeMs,
+    repeatedToolCallGuard: scenario.repeatedToolCallGuard,
     buildMessages: async ({ state, transientInstruction }) => {
       if (!transientInstruction) {
         return state.messages;
@@ -156,6 +164,11 @@ async function runScenario(
         rejectedTexts: [...state.rejectedTexts, { classification, responseText }],
       },
     }),
+    classifyTextResponse: ({ responseText }) => (
+      /\bI will\b|\bI'?ll\b|\bnext\b/i.test(responseText)
+        ? 'intent_only_narration'
+        : undefined
+    ),
     onToolCallsResponse: async ({ state, response }) => {
       const tools = await resolveToolsAsync({
         environment: context.environment,
@@ -167,7 +180,7 @@ async function runScenario(
           write_file: true,
           list_files: false,
           search_files: false,
-          create_directory: false,
+          create_directory: true,
           path_exists: false,
         },
       });
@@ -226,6 +239,8 @@ async function runScenario(
     toolNames: result.state.toolNames,
     rejectedTexts: result.state.rejectedTexts,
     validationArtifacts: result.state.validationArtifacts,
+    reason: result.reason,
+    stopReason: result.stop.reason,
     turns: result.iterations,
   };
 }
@@ -329,6 +344,65 @@ function buildHardeningScenarios(): HardeningScenario[] {
         assert.equal(result.rejectedTexts.length, 1);
         assert.equal(result.rejectedTexts[0]?.responseText, 'I will inspect the file next.');
         assert.equal(result.finalText, 'INSPECTED_TOKEN=alpha-repo-token');
+      },
+    },
+    {
+      name: 'Repeated file read recovers from existing tool result instead of stopping',
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'Read docs/repo-guide.txt and return RECOVERED_TOKEN=<token>.',
+        },
+      ],
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      responder: ({ iteration, messages }) => {
+        if (iteration === 1) {
+          return createToolCallResponse('read_file', { filePath: 'docs/repo-guide.txt' }, 'hardening-repeat-1');
+        }
+
+        if (iteration === 2) {
+          assert.equal(messages.at(-1)?.role, 'tool');
+          assert.match(String(messages.at(-1)?.content ?? ''), /alpha-repo-token/);
+          return createToolCallResponse('read_file', { filePath: 'docs/repo-guide.txt' }, 'hardening-repeat-2');
+        }
+
+        assert.equal(messages.at(-1)?.role, 'system');
+        assert.equal(messages.at(-1)?.content, DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION);
+        assert.match(String(messages.at(-2)?.content ?? ''), /alpha-repo-token/);
+        return createTextResponse('RECOVERED_TOKEN=alpha-repo-token');
+      },
+      assertResult: (result) => {
+        assert.equal(result.turns, 3);
+        assert.equal(result.reason, 'text_response');
+        assert.deepEqual(result.toolNames, ['read_file']);
+        assert.equal(result.finalText, 'RECOVERED_TOKEN=alpha-repo-token');
+      },
+    },
+    {
+      name: 'Timeout after directory creation returns a final diagnostic response',
+      messages: [
+        {
+          role: 'user' as const,
+          content: 'Create agent-world-workflows and then report the result.',
+        },
+      ],
+      maxWallTimeMs: 25,
+      responder: ({ iteration, messages }) => {
+        if (iteration === 1) {
+          return createToolCallResponse('create_directory', { path: 'agent-world-workflows' }, 'hardening-timeout-mkdir-1');
+        }
+
+        assert.equal(iteration, 2);
+        assert.equal(messages.at(-1)?.role, 'tool');
+        assert.match(String(messages.at(-1)?.content ?? ''), /success|created|agent-world-workflows/);
+        return new Promise<LLMResponse>(() => undefined);
+      },
+      assertResult: (result) => {
+        assert.equal(result.turns, 2);
+        assert.equal(result.reason, 'text_response');
+        assert.equal(result.stopReason, 'text_response');
+        assert.deepEqual(result.toolNames, ['create_directory']);
+        assert.equal(result.finalText, DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE);
       },
     },
   ];
