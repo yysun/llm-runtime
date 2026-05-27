@@ -452,9 +452,10 @@ describe('llm-runtime runtime provider dispatch', () => {
     const { DEFAULT_WORKSPACE_TOOL_HINT, generate } = await import('../../src/runtime.js');
 
     expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory`');
-    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Use `shell_cmd` only for explicit commands, git workflows, or gaps in the structured tools.');
-    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Preferred shell patterns: `rg --files`, `rg "pattern"`, `find`');
-    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Prefer `rg` over `grep`');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('loaded-skill file exploration');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Do not use `shell_cmd` for routine `cat`, `ls`, `find`, or `grep`');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('call `load_skill` for that skill and retry the structured file tool');
+    expect(DEFAULT_WORKSPACE_TOOL_HINT).toContain('Use `shell_cmd` only for explicit commands, git workflows, build/test commands, or gaps in the structured tools.');
 
     await generate({
       provider: 'openai',

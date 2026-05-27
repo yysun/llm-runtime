@@ -15,6 +15,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-27: Honored per-call skill roots even when executing through a bound runtime environment.
+ * - 2026-05-27: Defaulted runtime completion to one empty-text retry so provider empty stops after tool results can recover.
  * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` methods to the hardened completion loop while preserving the existing runtime result and event contracts.
  * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
@@ -498,6 +500,7 @@ async function runRuntimeCompletion(
     maxIterations: request.maxIterations,
     maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
     maxWallTimeMs: request.maxWallTimeMs,
+    emptyTextRetryLimit: request.emptyTextRetryLimit ?? 1,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
@@ -770,6 +773,13 @@ function getEnvironmentForCall(request: {
   skillRoots?: string[];
 }): LLMEnvironment {
   if (request.environment) {
+    if (request.skillRoots !== undefined) {
+      return {
+        ...request.environment,
+        skillRegistry: getOrCreateSkillRegistry(request.skillRoots),
+      };
+    }
+
     return request.environment;
   }
 

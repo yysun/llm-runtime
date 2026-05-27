@@ -367,6 +367,7 @@ export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOption
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
+  emptyTextRetryLimit?: number;
   repeatedToolCallGuard?: false | LLMRuntimeRepeatedToolCallGuard;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;

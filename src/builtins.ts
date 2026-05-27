@@ -15,6 +15,8 @@
  * - `ask_user_input` is the public HITL built-in.
  *
  * Recent changes:
+ * - 2026-05-27: Clarified load_skill guidance to continue with structured file tools after loading.
+ * - 2026-05-27: Strengthened shell/file tool descriptions so routine file reads, lists, and searches use structured tools instead of shell.
  * - 2026-05-27: Clarified read-only file tool descriptions for loaded-skill referenced paths.
  * - 2026-05-18: Aligned file-tool schema requirements with executor behavior and removed `read_file` wording that implied a fixed hard cap.
  * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
@@ -69,7 +71,7 @@ type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'name' | 'execute'>> = {
   shell_cmd: {
     description:
-      'Execute a user-requested shell command and capture output. Prefer the structured workspace tools (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`) for routine workspace discovery and inspection. Use this tool when the user explicitly asks to run a command, when you need git or other command-specific behavior, or when the structured tools do not cover the task.',
+      'Execute a user-requested shell command and capture output. Do not use this for routine file reads, directory listing, or file discovery such as `cat`, `ls`, `find`, or `grep`; use `read_file`, `list_files`, `search_files`, and `path_exists` instead, including for loaded skill files. Use this tool when the user explicitly asks to run a command, when you need git/build/test or other command-specific behavior, or when structured tools do not cover the task.',
     parameters: {
       type: 'object',
       properties: {
@@ -112,7 +114,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   load_skill: {
     description:
-      'Load the full instructions for a known skill by `skill_id` and return the skill context payload.',
+      'Load the full instructions for a known skill by `skill_id` and return the skill context payload. After this tool returns, continue immediately with the next required structured tool call, such as `read_file` for referenced skill files; do not stop after stating intent.',
     parameters: {
       type: 'object',
       properties: {
@@ -162,7 +164,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   read_file: {
     description:
-      'Read file contents with line pagination. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working directory. Prefer this over `shell_cmd` for routine file inspection.',
+      'Read file contents with line pagination. Use this instead of `shell_cmd cat`, `sed`, `head`, or `tail` for routine file inspection, including loaded skill files. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working directory.',
     parameters: {
       type: 'object',
       properties: {
@@ -217,7 +219,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   list_files: {
     description:
-      'List file and directory names for quick exploration. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working-directory scope.',
+      'List file and directory names for quick exploration. Use this instead of `shell_cmd ls` or `find` for routine directory inspection, including loaded skill roots. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {
@@ -252,7 +254,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
   },
   search_files: {
     description:
-      'Search for files by glob-like pattern. Optional root paths referenced by loaded skill instructions resolve from that skill root; other roots resolve inside the trusted working-directory scope.',
+      'Search for files by glob-like pattern. Use this instead of `shell_cmd find` or `grep` for routine file discovery, including loaded skill roots. Optional root paths referenced by loaded skill instructions resolve from that skill root; other roots resolve inside the trusted working-directory scope.',
     parameters: {
       type: 'object',
       properties: {

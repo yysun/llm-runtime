@@ -15,6 +15,7 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-27: Added an explicit empty-text retry instruction so provider stop-without-content responses continue with tools instead of failing silently.
  * - 2026-05-15: Defaulted `complete(...)` to permissive text-response mode so general chat hosts accept conversational responses; strict callers opt in via `defaultTextResponseMode: 'require_tool_result'`. The post-interaction structural rejection still fires regardless of mode.
  * - 2026-05-15: Replaced English-language narration and unsupported-evidence-claim regex heuristics with language-agnostic structural classification, and made post-interaction-answer text without action evidence unconditionally non-progressing regardless of the host's `requiresActionEvidence` opinion.
  * - 2026-05-15: Auto-enabled `complete(...)` agent control mode only when the caller wires a final/need-input/blocked handler, so hosts that drive completion through `onTextResponse` are not silently switched into strict control-tool semantics.
@@ -285,6 +286,7 @@ export const DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION = 'The user already a
 export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You already requested required user input. Do not repeat the same question in assistant text and do not call the same interaction tool again before the user answers. Wait for the user answer, then continue with the appropriate task tool.';
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
 export const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION = 'You already called the same tool with the same arguments and have its tool result in the conversation. Do not call that same tool again. Use the existing tool result to continue now: provide the final answer, call a different necessary tool, or report what is blocked.';
+export const DEFAULT_EMPTY_TEXT_RECOVERY_INSTRUCTION = 'Your previous response had no final text and no tool calls. Continue now by calling the next required tool or providing the final answer if the task is complete. If you just loaded a skill and it instructs you to read a reference file, call read_file now. Do not narrate future intent.';
 export const DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE = 'The model timed out after tool work had already completed. The completed tool results are preserved in the conversation, but the model did not produce a final answer before the time limit.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
@@ -1853,6 +1855,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     if (response.type === 'text' && emptyTextRetryCount < options.emptyTextRetryLimit) {
       const retryCountBefore = emptyTextRetryCount;
       emptyTextRetryCount += 1;
+      transientInstruction = DEFAULT_EMPTY_TEXT_RECOVERY_INSTRUCTION;
       retries.push({
         iteration,
         kind: 'empty_text',
@@ -1861,6 +1864,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         retryCountAfter: emptyTextRetryCount,
         retryLimit: options.emptyTextRetryLimit,
         elapsedMs: getElapsedMs(),
+        transientInstruction,
       });
       recordStep(iteration, response, 'empty_text_retry');
       continue;

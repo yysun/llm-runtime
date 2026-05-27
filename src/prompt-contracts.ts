@@ -46,11 +46,12 @@ export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
 ].join(' ');
 
 export const DEFAULT_WORKSPACE_TOOL_HINT = [
-  'Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory` for normal workspace exploration.',
-  'Use `shell_cmd` only for explicit commands, git workflows, or gaps in the structured tools.',
+  'Prefer `list_files`, `search_files`, `read_file`, `path_exists`, and `create_directory` for normal workspace and loaded-skill file exploration.',
+  'Do not use `shell_cmd` for routine `cat`, `ls`, `find`, or `grep`; use the structured file tools instead.',
+  'If a structured file tool reports a loaded skill path or scope mismatch, call `load_skill` for that skill and retry the structured file tool; do not fall back to `shell_cmd`.',
+  'Use `shell_cmd` only for explicit commands, git workflows, build/test commands, or gaps in the structured tools.',
   'With `shell_cmd`, send one command plus `parameters`, not a pipeline string.',
-  'Preferred shell patterns: `rg --files`, `rg "pattern"`, `find`, `sed -n "1,200p" path`, `head -n 200 path`, `tail -n 100 path`.',
-  'Prefer `rg` over `grep`, and `head` or `sed -n` over `cat` for bounded reads.',
+  'When shell is genuinely needed, prefer bounded single commands and pass each argument separately in `parameters`.',
   'On Windows, use PowerShell-native commands only if they still fit the same single-command model.',
 ].join(' ');
 

@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-27: Added runtime completion coverage for empty-text recovery after loading a skill.
  * - 2026-05-27: Added regression coverage for read-only file tools resolving loaded-skill referenced paths from the skill root.
  * - 2026-05-18: Added focused contract coverage for file-tool validation, uncapped read pagination, hidden entry discovery, and symlink-aware path checks.
  * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
@@ -880,6 +881,7 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Do the task.' }],
+      emptyTextRetryLimit: 0,
     });
 
     expect(result.status).toBe('failed');
@@ -887,6 +889,146 @@ describe('llm-runtime runtime', () => {
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
+  });
+
+  it('recovers from an empty assistant response after load_skill and continues with read_file', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const skillRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-skill-root-'));
+
+    try {
+      const skillPath = path.join(skillRoot, 'agent-world-skill');
+      await fs.mkdir(skillPath, { recursive: true });
+      await fs.writeFile(
+        path.join(skillPath, 'SKILL.md'),
+        [
+          '---',
+          'name: agent-world-skill',
+          'description: Agent World skill',
+          '---',
+          '# Agent World',
+          '',
+          'Read init-agent-world.md before initializing.',
+        ].join('\n'),
+      );
+      await fs.writeFile(path.join(skillPath, 'init-agent-world.md'), 'agent world init reference');
+
+      const loadSkillToolCall = {
+        id: 'load-agent-world-1',
+        type: 'function' as const,
+        function: {
+          name: 'load_skill',
+          arguments: JSON.stringify({ skill_id: 'agent-world-skill' }),
+        },
+      };
+      const readFileToolCall = {
+        id: 'read-init-agent-world-1',
+        type: 'function' as const,
+        function: {
+          name: 'read_file',
+          arguments: JSON.stringify({ filePath: 'init-agent-world.md' }),
+        },
+      };
+      const seenRequests: any[] = [];
+
+      mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+        seenRequests.push(request);
+        const hasLoadedSkill = request.messages.some((message: any) => (
+          message.role === 'tool'
+          && message.tool_call_id === 'load-agent-world-1'
+          && String(message.content ?? '').includes('<skill_root>')
+        ));
+        const hasReadInitReference = request.messages.some((message: any) => (
+          message.role === 'tool'
+          && message.tool_call_id === 'read-init-agent-world-1'
+          && String(message.content ?? '').includes('agent world init reference')
+        ));
+
+        if (!hasLoadedSkill) {
+          return {
+            type: 'tool_calls',
+            content: '',
+            tool_calls: [loadSkillToolCall],
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [loadSkillToolCall],
+            },
+          };
+        }
+
+        if (!hasReadInitReference && seenRequests.length === 2) {
+          return {
+            type: 'text',
+            content: '',
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+            },
+          };
+        }
+
+        if (!hasReadInitReference) {
+          return {
+            type: 'tool_calls',
+            content: '',
+            tool_calls: [readFileToolCall],
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [readFileToolCall],
+            },
+          };
+        }
+
+        return {
+          type: 'text',
+          content: 'Read the init reference.',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Read the init reference.',
+          },
+        };
+      });
+
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'agent world init' }],
+        skillRoots: [skillRoot],
+      });
+
+      expect(result).toMatchObject({
+        status: 'completed',
+        output: 'Read the init reference.',
+      });
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(4);
+      expect(String(seenRequests[2]?.messages?.at(-1)?.content ?? '')).toContain('previous response had no final text');
+      expect(result.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'load-agent-world-1',
+          content: expect.stringContaining('<next_step>'),
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'read-init-agent-world-1',
+          content: expect.stringContaining('agent world init reference'),
+        }),
+      ]));
+
+      await runtime.dispose();
+    } finally {
+      await fs.rm(skillRoot, { recursive: true, force: true });
+    }
   });
 
   it('defaults runtime.complete to read-only plus ask_user_input built-ins and passes request context into completion-loop tools', async () => {
@@ -1305,8 +1447,49 @@ describe('llm-runtime runtime', () => {
           },
         });
 
-        expect(String(result)).toContain('Error: read_file failed');
-        expect(String(result)).toContain('ENOENT');
+        const parsedResult = JSON.parse(String(result));
+        expect(parsedResult).toEqual(expect.objectContaining({
+          ok: false,
+          status: 'error',
+          errorType: 'read_only_file_tool_failed',
+          toolName: 'read_file',
+          code: 'not_found',
+          requestedPath: 'external.txt',
+        }));
+        expect(parsedResult.message).toContain('ENOENT');
+        expect(parsedResult.recovery).toEqual(expect.objectContaining({
+          avoidTools: ['shell_cmd'],
+        }));
+
+        const absoluteResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-scope-absolute-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: path.join(skillPath, 'external.txt') }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+          },
+        });
+        const parsedAbsoluteResult = JSON.parse(String(absoluteResult));
+
+        expect(parsedAbsoluteResult).toEqual(expect.objectContaining({
+          ok: false,
+          status: 'error',
+          errorType: 'read_only_file_tool_failed',
+          toolName: 'read_file',
+          code: 'path_scope_mismatch',
+          requestedPath: path.join(skillPath, 'external.txt'),
+        }));
+        expect(parsedAbsoluteResult.recovery.instruction).toContain('call load_skill');
+        expect(parsedAbsoluteResult.recovery.instruction).toContain('Do not recover by using shell_cmd');
       } finally {
         await fs.rm(skillRoot, { recursive: true, force: true });
       }
@@ -1315,7 +1498,8 @@ describe('llm-runtime runtime', () => {
 
   it('resolves read_file, list_files, and search_files from a loaded skill root under skill context', async () => {
     await withTempWorkspace(async (workspacePath) => {
-      const skillRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-skill-'));
+      const fakeHomePath = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-runtime-home-'));
+      const skillRoot = path.join(fakeHomePath, '.agents', 'skills');
 
       try {
         const skillPath = path.join(skillRoot, 'sample-skill');
@@ -1325,6 +1509,7 @@ describe('llm-runtime runtime', () => {
           '---\nname: sample-skill\ndescription: Sample skill\n---\n# Sample skill\n\nRead references/guide.md.',
         );
         await fs.writeFile(path.join(skillPath, 'references', 'guide.md'), 'skill-owned guide');
+        await fs.writeFile(path.join(skillPath, 'init-agent-world.md'), 'skill init guide');
         await fs.mkdir(path.join(skillPath, 'notes'), { recursive: true });
         await fs.writeFile(path.join(skillPath, 'notes', 'unmentioned.md'), 'skill unmentioned note');
 
@@ -1350,6 +1535,9 @@ describe('llm-runtime runtime', () => {
             workingDirectory: workspacePath,
           },
         });
+        expect(String(loadSkillResult)).toContain('<next_step>');
+        expect(String(loadSkillResult)).toContain('continue immediately');
+        expect(String(loadSkillResult)).toContain('call read_file, list_files, or search_files as needed');
         const loadedSkillMessages = [
           {
             role: 'assistant' as const,
@@ -1392,6 +1580,29 @@ describe('llm-runtime runtime', () => {
 
         expect(parsedReadResult.filePath).toBe(path.join(skillPath, 'references', 'guide.md'));
         expect(parsedReadResult.content).toBe('skill-owned guide');
+
+        const absoluteReadResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-absolute-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: path.join(skillPath, 'init-agent-world.md') }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedAbsoluteReadResult = JSON.parse(String(absoluteReadResult));
+
+        expect(parsedAbsoluteReadResult.filePath).toBe(path.join(skillPath, 'init-agent-world.md'));
+        expect(parsedAbsoluteReadResult.content).toBe('skill init guide');
 
         const workspaceFallbackReadResult = await executeToolCall({
           toolCall: {
@@ -1441,6 +1652,31 @@ describe('llm-runtime runtime', () => {
           entries: ['guide.md'],
         }));
 
+        const absoluteListResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-list-absolute-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'list_files',
+              arguments: JSON.stringify({ path: skillPath }),
+            },
+          },
+          builtIns: {
+            list_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedAbsoluteListResult = JSON.parse(String(absoluteListResult));
+
+        expect(parsedAbsoluteListResult).toEqual(expect.objectContaining({
+          path: skillPath,
+          entries: expect.arrayContaining(['SKILL.md', 'init-agent-world.md', 'references/']),
+        }));
+
         const searchResult = await executeToolCall({
           toolCall: {
             id: 'tool-search-skill-root-1',
@@ -1469,6 +1705,34 @@ describe('llm-runtime runtime', () => {
           entries: ['guide.md'],
         }));
 
+        const absoluteSearchResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-search-absolute-skill-root-1',
+            type: 'function',
+            function: {
+              name: 'search_files',
+              arguments: JSON.stringify({
+                path: skillPath,
+                pattern: '*.md',
+              }),
+            },
+          },
+          builtIns: {
+            search_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedAbsoluteSearchResult = JSON.parse(String(absoluteSearchResult));
+
+        expect(parsedAbsoluteSearchResult).toEqual(expect.objectContaining({
+          path: skillPath,
+          entries: expect.arrayContaining(['SKILL.md', 'init-agent-world.md']),
+        }));
+
         const createResult = await executeToolCall({
           toolCall: {
             id: 'tool-create-workspace-root-1',
@@ -1492,7 +1756,7 @@ describe('llm-runtime runtime', () => {
         expect(parsedCreateResult.path).toBe(path.join(workspacePath, 'references', 'generated'));
         await expect(fs.access(path.join(skillPath, 'references', 'generated'))).rejects.toThrow();
       } finally {
-        await fs.rm(skillRoot, { recursive: true, force: true });
+        await fs.rm(fakeHomePath, { recursive: true, force: true });
       }
     });
   });

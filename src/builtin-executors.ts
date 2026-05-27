@@ -15,6 +15,8 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-27: Added explicit load-skill next-step guidance so models continue with structured tools immediately.
+ * - 2026-05-27: Made read-only file-tool failures structured with explicit no-shell recovery guidance.
  * - 2026-05-27: Added loaded-skill provenance for read-only file tools while preserving workspace-root writes and creation.
  * - 2026-05-18: Removed the fixed `read_file` hard cap, kept reads workspace-scoped, made hidden entry discovery opt-in, and made `path_exists` symlink-aware.
  * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
@@ -52,6 +54,15 @@ type LoadedSkillPathContext = {
   referencePaths: Set<string>;
 };
 
+type ReadOnlyFileToolName = 'read_file' | 'list_files' | 'search_files' | 'path_exists';
+
+type ReadOnlyFileToolFailureCode =
+  | 'missing_path'
+  | 'missing_pattern'
+  | 'path_scope_mismatch'
+  | 'not_found'
+  | 'execution_failed';
+
 const DEFAULT_READ_PAGE_SIZE = 200;
 const DEFAULT_LIST_MAX_ENTRIES = 200;
 const DEFAULT_LIST_MAX_DEPTH = 2;
@@ -59,6 +70,12 @@ const DEFAULT_SEARCH_MAX_RESULTS = 200;
 const DEFAULT_SHELL_TIMEOUT_MS = 600_000;
 const DEFAULT_WEB_FETCH_TIMEOUT_MS = 15_000;
 const DEFAULT_WEB_FETCH_MAX_CHARS = 16_000;
+const LOAD_SKILL_NEXT_STEP_GUIDANCE = [
+  'After loading this skill, continue immediately.',
+  'If the skill instructions reference files, call read_file, list_files, or search_files as needed.',
+  'Do not stop after stating intent.',
+  'Do not use shell_cmd for routine file reads, directory listing, or file discovery.',
+].join(' ');
 
 function createAbortError(reason?: unknown): Error {
   const reasonMessage = reason instanceof Error
@@ -154,6 +171,52 @@ function resolveScopedPath(inputPath: string, trustedWorkingDirectory: string): 
   }
 
   return resolvedPath;
+}
+
+function classifyReadOnlyFileToolFailure(message: string): ReadOnlyFileToolFailureCode {
+  if (/missing required path parameter|path is required|filePath is required/i.test(message)) {
+    return 'missing_path';
+  }
+  if (/pattern must be a non-empty string/i.test(message)) {
+    return 'missing_pattern';
+  }
+  if (/scope mismatch|outside trusted working directory|working directory mismatch/i.test(message)) {
+    return 'path_scope_mismatch';
+  }
+  if (/\bENOENT\b|no such file or directory/i.test(message)) {
+    return 'not_found';
+  }
+  return 'execution_failed';
+}
+
+function formatReadOnlyFileToolFailure(params: {
+  toolName: ReadOnlyFileToolName;
+  error: unknown;
+  requestedPath?: string;
+  code?: ReadOnlyFileToolFailureCode;
+}): string {
+  const rawMessage = params.error instanceof Error ? params.error.message : String(params.error);
+  const code = params.code ?? classifyReadOnlyFileToolFailure(rawMessage);
+  const skillRootRecovery = code === 'path_scope_mismatch'
+    ? 'If the requested path belongs to a loaded skill, call load_skill for that skill first, then retry this structured file tool with the skill file path.'
+    : 'Retry this structured file tool with corrected arguments or discover the path with list_files/search_files.';
+
+  return JSON.stringify({
+    ok: false,
+    status: 'error',
+    errorType: 'read_only_file_tool_failed',
+    toolName: params.toolName,
+    code,
+    requestedPath: params.requestedPath || undefined,
+    message: `${params.toolName} failed - ${rawMessage}`,
+    recovery: {
+      instruction: `${skillRootRecovery} Do not recover by using shell_cmd for routine cat, ls, find, grep, sed, head, or tail file inspection.`,
+      nextTools: code === 'path_scope_mismatch'
+        ? ['load_skill', params.toolName]
+        : ['list_files', 'search_files', params.toolName],
+      avoidTools: ['shell_cmd'],
+    },
+  }, null, 2);
 }
 
 function extractSkillRootTags(text: string): string[] {
@@ -532,7 +595,11 @@ async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Re
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedFilePath = String(args.filePath ?? args.path ?? '').trim();
     if (!requestedFilePath) {
-      return 'Error: read_file failed - filePath is required';
+      return formatReadOnlyFileToolFailure({
+        toolName: 'read_file',
+        error: 'filePath is required',
+        code: 'missing_path',
+      });
     }
 
     const resolvedPath = await resolveReadableScopedPath(requestedFilePath, trustedWorkingDirectory, context);
@@ -549,7 +616,11 @@ async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Re
       content: lines.slice(offset - 1, offset - 1 + limit).join('\n'),
     }, null, 2);
   } catch (error) {
-    return `Error: read_file failed - ${error instanceof Error ? error.message : String(error)}`;
+    return formatReadOnlyFileToolFailure({
+      toolName: 'read_file',
+      error,
+      requestedPath: String(args.filePath ?? args.path ?? '').trim(),
+    });
   }
 }
 
@@ -640,7 +711,11 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
           : undefined,
     }, null, 2);
   } catch (error) {
-    return `Error: list_files failed - ${error instanceof Error ? error.message : String(error)}`;
+    return formatReadOnlyFileToolFailure({
+      toolName: 'list_files',
+      error,
+      requestedPath: String(args.path ?? '.'),
+    });
   }
 }
 
@@ -648,7 +723,12 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
   try {
     const pattern = String(args.pattern ?? '').trim();
     if (!pattern) {
-      return 'Error: search_files failed - pattern must be a non-empty string';
+      return formatReadOnlyFileToolFailure({
+        toolName: 'search_files',
+        error: 'pattern must be a non-empty string',
+        requestedPath: String(args.path ?? '.'),
+        code: 'missing_pattern',
+      });
     }
 
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
@@ -689,7 +769,11 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
           : undefined,
     }, null, 2);
   } catch (error) {
-    return `Error: search_files failed - ${error instanceof Error ? error.message : String(error)}`;
+    return formatReadOnlyFileToolFailure({
+      toolName: 'search_files',
+      error,
+      requestedPath: String(args.path ?? '.'),
+    });
   }
 }
 
@@ -730,7 +814,11 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedPath = String(args.path ?? '').trim();
     if (!requestedPath) {
-      return 'Error: path_exists failed - path is required';
+      return formatReadOnlyFileToolFailure({
+        toolName: 'path_exists',
+        error: 'path is required',
+        code: 'missing_path',
+      });
     }
 
     const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context);
@@ -757,7 +845,11 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
       isSymbolicLink,
     }, null, 2);
   } catch (error) {
-    return `Error: path_exists failed - ${error instanceof Error ? error.message : String(error)}`;
+    return formatReadOnlyFileToolFailure({
+      toolName: 'path_exists',
+      error,
+      requestedPath: String(args.path ?? '').trim(),
+    });
   }
 }
 
@@ -834,6 +926,9 @@ async function createLoadSkillExecutor(options: BuiltInExecutorOptions, args: Re
     '  <instructions>',
     stripYamlFrontMatter(skill.content).trim(),
     '  </instructions>',
+    '  <next_step>',
+    `    ${LOAD_SKILL_NEXT_STEP_GUIDANCE}`,
+    '  </next_step>',
     '</skill_context>',
   ].join('\n');
 }
