@@ -15,6 +15,8 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-27: Resolved skill-referenced files from the configured skill registry when tool-call message context is unavailable.
+ * - 2026-05-27: Added loaded-skill file existence fallback and skill-root basename aliases for read-only file tools.
  * - 2026-05-27: Added explicit load-skill next-step guidance so models continue with structured tools immediately.
  * - 2026-05-27: Made read-only file-tool failures structured with explicit no-shell recovery guidance.
  * - 2026-05-27: Added loaded-skill provenance for read-only file tools while preserving workspace-root writes and creation.
@@ -419,7 +421,39 @@ function getLoadedSkillRoots(context?: LLMToolExecutionContext): string[] {
   return getLoadedSkillPathContexts(context).map((skillContext) => skillContext.rootPath);
 }
 
-function resolveSkillReferencedPath(inputPath: string, context?: LLMToolExecutionContext): string | undefined {
+async function getRegisteredSkillPathContexts(skillRegistry?: SkillRegistry): Promise<LoadedSkillPathContext[]> {
+  if (!skillRegistry) {
+    return [];
+  }
+
+  const contexts = new Map<string, LoadedSkillPathContext>();
+  const skillEntries = await skillRegistry.listSkills();
+  for (const skillEntry of skillEntries) {
+    const loadedSkill = await skillRegistry.loadSkill(skillEntry.skillId).catch(() => undefined);
+    if (!loadedSkill) {
+      continue;
+    }
+
+    const rootPath = path.resolve(path.dirname(loadedSkill.sourcePath));
+    contexts.set(rootPath, {
+      rootPath,
+      referencePaths: extractSkillReferencePaths(stripYamlFrontMatter(loadedSkill.content)),
+    });
+  }
+
+  return [...contexts.values()];
+}
+
+function uniquePath(paths: string[]): string | undefined {
+  const uniquePaths = [...new Set(paths.map((entry) => path.resolve(entry)))];
+  return uniquePaths.length === 1 ? uniquePaths[0] : undefined;
+}
+
+async function resolveSkillReferencedPath(
+  inputPath: string,
+  context?: LLMToolExecutionContext,
+  skillRegistry?: SkillRegistry,
+): Promise<string | undefined> {
   const requestedReferencePath = normalizeRequestedRelativePath(inputPath);
   if (!requestedReferencePath) {
     return undefined;
@@ -438,13 +472,105 @@ function resolveSkillReferencedPath(inputPath: string, context?: LLMToolExecutio
     }
   }
 
-  return undefined;
+  const registeredMatches: string[] = [];
+  for (const skillContext of await getRegisteredSkillPathContexts(skillRegistry)) {
+    const matchesReference = [...skillContext.referencePaths]
+      .some((referencePath) => skillReferenceMatchesRequest(referencePath, requestedReferencePath));
+    if (!matchesReference) {
+      continue;
+    }
+
+    const resolvedPath = path.resolve(skillContext.rootPath, requestedReferencePath);
+    if (isPathWithinRoot(resolvedPath, skillContext.rootPath) && await pathExistsOnDisk(resolvedPath)) {
+      registeredMatches.push(resolvedPath);
+    }
+  }
+
+  return uniquePath(registeredMatches);
+}
+
+async function pathExistsOnDisk(candidatePath: string): Promise<boolean> {
+  try {
+    await fs.access(candidatePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveSkillAliasPath(
+  inputPath: string,
+  context?: LLMToolExecutionContext,
+  skillRegistry?: SkillRegistry,
+): Promise<string | undefined> {
+  const requestedPath = normalizeRequestedRelativePath(inputPath);
+  if (!requestedPath) {
+    return undefined;
+  }
+
+  const [firstSegment, ...remainingSegments] = requestedPath.split('/');
+  if (!firstSegment) {
+    return undefined;
+  }
+
+  for (const skillContext of getLoadedSkillPathContexts(context)) {
+    if (path.basename(skillContext.rootPath) !== firstSegment) {
+      continue;
+    }
+
+    const resolvedPath = remainingSegments.length > 0
+      ? path.resolve(skillContext.rootPath, remainingSegments.join('/'))
+      : skillContext.rootPath;
+    if (isPathWithinRoot(resolvedPath, skillContext.rootPath)) {
+      return resolvedPath;
+    }
+  }
+
+  const registeredMatches: string[] = [];
+  for (const skillContext of await getRegisteredSkillPathContexts(skillRegistry)) {
+    if (path.basename(skillContext.rootPath) !== firstSegment) {
+      continue;
+    }
+
+    const resolvedPath = remainingSegments.length > 0
+      ? path.resolve(skillContext.rootPath, remainingSegments.join('/'))
+      : skillContext.rootPath;
+    if (isPathWithinRoot(resolvedPath, skillContext.rootPath)) {
+      registeredMatches.push(resolvedPath);
+    }
+  }
+
+  return uniquePath(registeredMatches);
+}
+
+async function resolveExistingLoadedSkillRelativePath(
+  inputPath: string,
+  context?: LLMToolExecutionContext,
+): Promise<string | undefined> {
+  const requestedPath = normalizeRequestedRelativePath(inputPath);
+  if (!requestedPath) {
+    return undefined;
+  }
+
+  const matches: string[] = [];
+  for (const skillContext of getLoadedSkillPathContexts(context)) {
+    const resolvedPath = path.resolve(skillContext.rootPath, requestedPath);
+    if (!isPathWithinRoot(resolvedPath, skillContext.rootPath)) {
+      continue;
+    }
+    if (await pathExistsOnDisk(resolvedPath)) {
+      matches.push(resolvedPath);
+    }
+  }
+
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 async function resolveReadableScopedPath(
   inputPath: string,
   trustedWorkingDirectory: string,
   context?: LLMToolExecutionContext,
+  skillRegistry?: SkillRegistry,
 ): Promise<string> {
   if (!inputPath || typeof inputPath !== 'string') {
     throw new Error('Missing required path parameter');
@@ -452,7 +578,9 @@ async function resolveReadableScopedPath(
 
   if (path.isAbsolute(inputPath)) {
     const resolvedPath = path.resolve(inputPath);
-    const allowedRoots = [trustedWorkingDirectory, ...getLoadedSkillRoots(context)];
+    const registeredSkillRoots = (await getRegisteredSkillPathContexts(skillRegistry))
+      .map((skillContext) => skillContext.rootPath);
+    const allowedRoots = [trustedWorkingDirectory, ...getLoadedSkillRoots(context), ...registeredSkillRoots];
     if (!allowedRoots.some((rootPath) => isPathWithinRoot(resolvedPath, rootPath))) {
       throw new Error('Readable path scope mismatch: requested path is outside trusted working directory and loaded skill roots');
     }
@@ -466,7 +594,21 @@ async function resolveReadableScopedPath(
     return workspacePath;
   }
 
-  return resolveSkillReferencedPath(inputPath, context) ?? workspacePath;
+  const skillReferencedPath = await resolveSkillReferencedPath(inputPath, context, skillRegistry);
+  if (skillReferencedPath) {
+    return skillReferencedPath;
+  }
+
+  const skillAliasPath = await resolveSkillAliasPath(inputPath, context, skillRegistry);
+  if (skillAliasPath) {
+    return skillAliasPath;
+  }
+
+  if (await pathExistsOnDisk(workspacePath)) {
+    return workspacePath;
+  }
+
+  return await resolveExistingLoadedSkillRelativePath(inputPath, context) ?? workspacePath;
 }
 
 function escapeRegExp(text: string): string {
@@ -590,7 +732,7 @@ function splitFileLines(content: string): string[] {
   return content === '' ? [] : content.split(/\r?\n/);
 }
 
-async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+async function createReadFileExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedFilePath = String(args.filePath ?? args.path ?? '').trim();
@@ -602,7 +744,7 @@ async function createReadFileExecutor(_options: BuiltInExecutorOptions, args: Re
       });
     }
 
-    const resolvedPath = await resolveReadableScopedPath(requestedFilePath, trustedWorkingDirectory, context);
+    const resolvedPath = await resolveReadableScopedPath(requestedFilePath, trustedWorkingDirectory, context, options.skillRegistry);
     const rawContent = await fs.readFile(resolvedPath, 'utf8');
     const lines = splitFileLines(toUtf8String(rawContent));
     const offset = clamp(Number(args.offset ?? 1), 1, Number.MAX_SAFE_INTEGER);
@@ -667,11 +809,11 @@ async function createWriteFileExecutor(_options: BuiltInExecutorOptions, args: R
   }
 }
 
-async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+async function createListFilesExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedPath = String(args.path ?? '.');
-    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context);
+    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context, options.skillRegistry);
     const recursive = Boolean(args.recursive ?? false);
     const includeHidden = Boolean(args.includeHidden ?? false);
     const maxDepth = clamp(Number(args.maxDepth ?? (recursive ? DEFAULT_LIST_MAX_DEPTH : 1)), 1, DEFAULT_LIST_MAX_DEPTH);
@@ -719,7 +861,7 @@ async function createListFilesExecutor(_options: BuiltInExecutorOptions, args: R
   }
 }
 
-async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+async function createSearchFilesExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
     const pattern = String(args.pattern ?? '').trim();
     if (!pattern) {
@@ -733,7 +875,7 @@ async function createSearchFilesExecutor(_options: BuiltInExecutorOptions, args:
 
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const searchRoot = args.path
-      ? await resolveReadableScopedPath(String(args.path), trustedWorkingDirectory, context)
+      ? await resolveReadableScopedPath(String(args.path), trustedWorkingDirectory, context, options.skillRegistry)
       : trustedWorkingDirectory;
     const includeHidden = Boolean(args.includeHidden ?? false);
     const maxResults = clamp(Number(args.maxResults ?? DEFAULT_SEARCH_MAX_RESULTS), 1, DEFAULT_SEARCH_MAX_RESULTS);
@@ -809,7 +951,7 @@ async function createDirectoryExecutor(_options: BuiltInExecutorOptions, args: R
   }
 }
 
-async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+async function createPathExistsExecutor(options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
   try {
     const trustedWorkingDirectory = getTrustedWorkingDirectory(context);
     const requestedPath = String(args.path ?? '').trim();
@@ -821,7 +963,7 @@ async function createPathExistsExecutor(_options: BuiltInExecutorOptions, args: 
       });
     }
 
-    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context);
+    const resolvedPath = await resolveReadableScopedPath(requestedPath, trustedWorkingDirectory, context, options.skillRegistry);
     const stats = await fs.lstat(resolvedPath).catch(() => null);
     const isSymbolicLink = stats?.isSymbolicLink() ?? false;
     const targetStats = isSymbolicLink

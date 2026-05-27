@@ -1506,7 +1506,7 @@ describe('llm-runtime runtime', () => {
         await fs.mkdir(path.join(skillPath, 'references'), { recursive: true });
         await fs.writeFile(
           path.join(skillPath, 'SKILL.md'),
-          '---\nname: sample-skill\ndescription: Sample skill\n---\n# Sample skill\n\nRead references/guide.md.',
+          '---\nname: sample-skill\ndescription: Sample skill\n---\n# Sample skill\n\nRead references/guide.md. Before setup, read `init-agent-world.md`.',
         );
         await fs.writeFile(path.join(skillPath, 'references', 'guide.md'), 'skill-owned guide');
         await fs.writeFile(path.join(skillPath, 'init-agent-world.md'), 'skill init guide');
@@ -1604,6 +1604,51 @@ describe('llm-runtime runtime', () => {
         expect(parsedAbsoluteReadResult.filePath).toBe(path.join(skillPath, 'init-agent-world.md'));
         expect(parsedAbsoluteReadResult.content).toBe('skill init guide');
 
+        const registeredSkillReferenceReadResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-registered-skill-reference-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'init-agent-world.md' }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+          },
+        });
+        const parsedRegisteredSkillReferenceReadResult = JSON.parse(String(registeredSkillReferenceReadResult));
+
+        expect(parsedRegisteredSkillReferenceReadResult.filePath).toBe(path.join(skillPath, 'init-agent-world.md'));
+        expect(parsedRegisteredSkillReferenceReadResult.content).toBe('skill init guide');
+
+        const relativeSkillFileReadResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-read-existing-skill-relative-1',
+            type: 'function',
+            function: {
+              name: 'read_file',
+              arguments: JSON.stringify({ filePath: 'init-agent-world.md' }),
+            },
+          },
+          builtIns: {
+            read_file: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedRelativeSkillFileReadResult = JSON.parse(String(relativeSkillFileReadResult));
+
+        expect(parsedRelativeSkillFileReadResult.filePath).toBe(path.join(skillPath, 'init-agent-world.md'));
+        expect(parsedRelativeSkillFileReadResult.content).toBe('skill init guide');
+
         const workspaceFallbackReadResult = await executeToolCall({
           toolCall: {
             id: 'tool-read-workspace-fallback-1',
@@ -1673,6 +1718,55 @@ describe('llm-runtime runtime', () => {
         const parsedAbsoluteListResult = JSON.parse(String(absoluteListResult));
 
         expect(parsedAbsoluteListResult).toEqual(expect.objectContaining({
+          path: skillPath,
+          entries: expect.arrayContaining(['SKILL.md', 'init-agent-world.md', 'references/']),
+        }));
+
+        const registeredSkillAliasListResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-list-registered-skill-alias-1',
+            type: 'function',
+            function: {
+              name: 'list_files',
+              arguments: JSON.stringify({ path: 'sample-skill' }),
+            },
+          },
+          builtIns: {
+            list_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+          },
+        });
+        const parsedRegisteredSkillAliasListResult = JSON.parse(String(registeredSkillAliasListResult));
+
+        expect(parsedRegisteredSkillAliasListResult).toEqual(expect.objectContaining({
+          path: skillPath,
+          entries: expect.arrayContaining(['SKILL.md', 'init-agent-world.md', 'references/']),
+        }));
+
+        const skillAliasListResult = await executeToolCall({
+          toolCall: {
+            id: 'tool-list-skill-alias-1',
+            type: 'function',
+            function: {
+              name: 'list_files',
+              arguments: JSON.stringify({ path: 'sample-skill' }),
+            },
+          },
+          builtIns: {
+            list_files: true,
+          },
+          skillRoots: [skillRoot],
+          context: {
+            workingDirectory: workspacePath,
+            messages: loadedSkillMessages,
+          },
+        });
+        const parsedSkillAliasListResult = JSON.parse(String(skillAliasListResult));
+
+        expect(parsedSkillAliasListResult).toEqual(expect.objectContaining({
           path: skillPath,
           entries: expect.arrayContaining(['SKILL.md', 'init-agent-world.md', 'references/']),
         }));
