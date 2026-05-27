@@ -31,6 +31,7 @@ import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
   DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
+  DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
   DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
   DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   runCompletionLoop,
@@ -1930,6 +1931,77 @@ describe('llm-runtime completion loop', () => {
       maxConsecutiveSameBatches: 1,
     }));
     expect(onToolCallsResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers repeated tool calls when prior tool results are available', async () => {
+    const repeated = toolCall('read_file', { filePath: 'init-agent-world.md' });
+    const seenInstructions: string[] = [];
+    const callModel = vi.fn(async ({ messages }: { messages: LLMChatMessage[] }) => {
+      const latestSystem = [...messages].reverse().find((message) => message.role === 'system');
+      if (latestSystem?.content.includes(DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION)) {
+        seenInstructions.push(latestSystem.content);
+        return text('Initialized from the existing skill instructions.');
+      }
+
+      return repeated;
+    });
+    const onToolCallsResponse = vi.fn(async ({ state, response }) => ({
+      state: {
+        ...state,
+        messages: [
+          ...state.messages,
+          response.assistantMessage,
+          {
+            role: 'tool',
+            tool_call_id: response.tool_calls?.[0]?.id,
+            content: JSON.stringify({
+              filePath: '/Users/esun/.agents/skills/agent-world-skill/init-agent-world.md',
+              content: 'init instructions',
+            }),
+          } satisfies LLMChatMessage,
+        ],
+      },
+      next: { control: 'continue' as const },
+    }));
+
+    const result = await runCompletionLoop({
+      initialState: {
+        messages: [{ role: 'user', content: 'agent-world init' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      callModel,
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
+      ),
+      onTextResponse: async ({ state, responseText, response }) => ({
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          finalText: responseText,
+        },
+      }),
+      onToolCallsResponse,
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('Initialized from the existing skill instructions.');
+    expect(result.steps.map((step) => step.branch)).toEqual([
+      'tool_calls_continue',
+      'repeated_tool_call_retry',
+      'text_response_stop',
+    ]);
+    expect(result.retries).toEqual([
+      expect.objectContaining({
+        kind: 'repeated_tool_call',
+        decision: 'retry',
+        transientInstruction: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
+      }),
+    ]);
+    expect(seenInstructions).toEqual([DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION]);
+    expect(onToolCallsResponse).toHaveBeenCalledTimes(1);
+    expect(callModel).toHaveBeenCalledTimes(3);
   });
 
   it('stops on timeout and aborts the provided model signal', async () => {

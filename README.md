@@ -299,7 +299,7 @@ The split of responsibilities is deliberate:
 
 `runCompletionLoop(...)` keeps `defaultTextResponseMode: 'permissive'` unless the caller opts into stricter behavior.
 
-`runtime.complete(...)` and `runtime.streamComplete(...)` also accept `repeatedToolCallGuard`. If the repeated-call guard fires in the runtime facade, the facade returns a final diagnostic assistant message instead of surfacing a blank failed turn, so callers that require final text do not collapse into a transport-style request failure. Lower-level `complete(...)` and `runCompletionLoop(...)` still expose `repeated_tool_call_stopped` for harnesses that branch on stop reasons directly.
+`runtime.complete(...)` and `runtime.streamComplete(...)` also accept `repeatedToolCallGuard`. If a repeated tool call happens after a prior tool result is already present, the loop first sends a bounded recovery instruction telling the model to use the existing result instead of calling the same tool again. If the model still repeats, the runtime facade returns a final diagnostic assistant message instead of surfacing a blank failed turn, so callers that require final text do not collapse into a transport-style request failure. Lower-level `complete(...)` and `runCompletionLoop(...)` still expose `repeated_tool_call_stopped` when there is no prior tool result to recover from.
 
 Terminal reasons are stable string literals suitable for harness branching:
 

@@ -115,6 +115,7 @@ export type TurnLoopStepBranch =
   | 'empty_text_stop'
   | 'unhandled_response_stop'
   | 'max_tool_rounds_stop'
+  | 'repeated_tool_call_retry'
   | 'repeated_tool_call_stop'
   | 'timeout_stop';
 
@@ -171,7 +172,7 @@ export interface TurnLoopClassificationSummary {
   elapsedMs: number;
 }
 
-export type TurnLoopRetryKind = 'empty_text' | 'rejected_text';
+export type TurnLoopRetryKind = 'empty_text' | 'rejected_text' | 'repeated_tool_call';
 
 export interface TurnLoopRetrySummary {
   iteration: number;
@@ -283,10 +284,12 @@ export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last respo
 export const DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION = 'The user already answered the interaction request. Do not ask the same question again and do not narrate unverified results. Use the user\'s answer now and call the appropriate task tool in this turn.';
 export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You already requested required user input. Do not repeat the same question in assistant text and do not call the same interaction tool again before the user answers. Wait for the user answer, then continue with the appropriate task tool.';
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
+export const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION = 'You already called the same tool with the same arguments and have its tool result in the conversation. Do not call that same tool again. Use the existing tool result to continue now: provide the final answer, call a different necessary tool, or report what is blocked.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
 export const DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS = 120000;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_SAME_TOOL_CALL_BATCHES = 2;
+const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT = 1;
 
 export type TurnLoopStepResult<TState> = {
   state: TState;
@@ -426,6 +429,15 @@ export interface RunCompletionLoopResult<TState> {
   stop: TurnLoopStopMetadata;
 }
 
+type TurnLoopToolGuardContinue = { control: 'continue' };
+type TurnLoopToolGuardDecision<TState> = RunCompletionLoopResult<TState> | TurnLoopToolGuardContinue | null;
+
+function isTurnLoopToolGuardContinue<TState>(
+  decision: Exclude<TurnLoopToolGuardDecision<TState>, null>,
+): decision is TurnLoopToolGuardContinue {
+  return 'control' in decision && decision.control === 'continue';
+}
+
 function normalizeTextAssessment(
   assessment: TurnLoopTextResponseClassification | TurnLoopTextResponseAssessment | void,
 ): TurnLoopTextResponseAssessment | undefined {
@@ -502,6 +514,45 @@ function shouldPauseRejectedTextRetriesForPendingInteraction(params: {
 
   const latestConversationMessage = [...messages].reverse().find((message) => message.role !== 'system');
   return latestConversationMessage?.role !== 'user';
+}
+
+function hasPriorToolResult(messages: LLMChatMessage[]): boolean {
+  return messages.some((message) => message.role === 'tool' && Boolean(String(message.content || '').trim()));
+}
+
+function createRepeatedToolCallStopDetail(params: {
+  batchSignature: string;
+  consecutiveSameToolBatchCount: number;
+  maxConsecutiveSameBatches: number;
+  currentToolCallSummaries: TurnLoopToolCallSummary[];
+}): TurnLoopRepeatedToolCallStopDetail {
+  return {
+    batchSignature: params.batchSignature,
+    consecutiveSameBatchCount: params.consecutiveSameToolBatchCount,
+    maxConsecutiveSameBatches: params.maxConsecutiveSameBatches,
+    toolNames: params.currentToolCallSummaries.map((toolCall) => toolCall.toolName),
+  };
+}
+
+function createRepeatedToolCallDiagnosticText(detail: TurnLoopRepeatedToolCallStopDetail): string {
+  const toolList = detail.toolNames.length
+    ? Array.from(new Set(detail.toolNames)).join(', ')
+    : 'unknown tool';
+
+  return `I could not complete the request because the model kept repeating the same tool call instead of using the previous tool result. Repeated tool: ${toolList}. Stopped after ${detail.consecutiveSameBatchCount} consecutive identical tool-call batches; limit ${detail.maxConsecutiveSameBatches}.`;
+}
+
+function createSyntheticTextResponse(content: string, providerStopReason: string): LLMResponse {
+  return {
+    type: 'text',
+    content,
+    assistantMessage: {
+      role: 'assistant',
+      content,
+    },
+    stopKind: 'natural_stop',
+    providerStopReason,
+  };
 }
 
 function isActionEvidenceKind(evidenceKind: LLMToolEvidenceKind | undefined): boolean {
@@ -1001,6 +1052,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
   let lastResponse: LLMResponse | null = null;
   let lastToolBatchSignature: string | null = null;
   let consecutiveSameToolBatchCount = 0;
+  let repeatedToolCallRecoveryRetryCount = 0;
   let syntheticToolCallSequence = 0;
   let observedInteractionProgress = false;
   let observedActionEvidence = false;
@@ -1256,9 +1308,75 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
       }));
       toolCalls.push(...currentToolCallSummaries);
 
-      const stopForRepeatedToolCall = async () => {
+      const stopForRepeatedToolCall = async (): Promise<TurnLoopToolGuardDecision<TState>> => {
         if (!repeatedToolCallStopped) {
           return null;
+        }
+
+        const repeatedToolCall = createRepeatedToolCallStopDetail({
+          batchSignature,
+          consecutiveSameToolBatchCount,
+          maxConsecutiveSameBatches: repeatedToolCallGuard.maxConsecutiveSameBatches,
+          currentToolCallSummaries,
+        });
+        const canRecoverFromPriorToolResult = observedActionEvidence && hasPriorToolResult(messages);
+
+        if (
+          canRecoverFromPriorToolResult
+          && repeatedToolCallRecoveryRetryCount < DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT
+        ) {
+          const retryCountBefore = repeatedToolCallRecoveryRetryCount;
+          repeatedToolCallRecoveryRetryCount += 1;
+          transientInstruction = DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION;
+          retries.push({
+            iteration,
+            kind: 'repeated_tool_call',
+            decision: 'retry',
+            retryCountBefore,
+            retryCountAfter: repeatedToolCallRecoveryRetryCount,
+            retryLimit: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT,
+            elapsedMs: getElapsedMs(),
+            transientInstruction,
+          });
+          recordStep(iteration, response, 'repeated_tool_call_retry');
+          return { control: 'continue' as const };
+        }
+
+        if (canRecoverFromPriorToolResult) {
+          const output = createRepeatedToolCallDiagnosticText(repeatedToolCall);
+          const syntheticResponse = createSyntheticTextResponse(output, 'repeated_tool_call_guard');
+          const next = await options.onTextResponse({
+            state,
+            responseText: output,
+            response: syntheticResponse,
+            messages,
+            iteration,
+          });
+          state = next?.state ?? state;
+          retries.push({
+            iteration,
+            kind: 'repeated_tool_call',
+            decision: 'stop',
+            retryCountBefore: repeatedToolCallRecoveryRetryCount,
+            retryCountAfter: repeatedToolCallRecoveryRetryCount,
+            retryLimit: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT,
+            elapsedMs: getElapsedMs(),
+            transientInstruction: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
+          });
+          recordStep(iteration, syntheticResponse, 'text_response_stop');
+          return await finalize({
+            reason: 'text_response',
+            response: syntheticResponse,
+            stop: {
+              reason: 'text_response',
+              iteration,
+              elapsedMs: getElapsedMs(),
+              maxIterations,
+              maxConsecutiveToolTurns,
+              maxWallTimeMs,
+              repeatedToolCall,
+            },
+          });
         }
 
         recordStep(iteration, response, 'repeated_tool_call_stop');
@@ -1272,12 +1390,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             maxIterations,
             maxConsecutiveToolTurns,
             maxWallTimeMs,
-            repeatedToolCall: {
-              batchSignature,
-              consecutiveSameBatchCount: consecutiveSameToolBatchCount,
-              maxConsecutiveSameBatches: repeatedToolCallGuard.maxConsecutiveSameBatches,
-              toolNames: currentToolCallSummaries.map((toolCall) => toolCall.toolName),
-            },
+            repeatedToolCall,
           },
         });
       };
@@ -1302,7 +1415,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         });
       };
 
-      const stopForToolGuards = async () => {
+      const stopForToolGuards = async (): Promise<TurnLoopToolGuardDecision<TState>> => {
         const repeatedStop = await stopForRepeatedToolCall();
         if (repeatedStop) {
           return repeatedStop;
@@ -1317,6 +1430,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           if (controlToolCalls.length !== 1 || (response.tool_calls?.length ?? 0) !== 1) {
             const guardStop = await stopForToolGuards();
             if (guardStop) {
+              if (isTurnLoopToolGuardContinue(guardStop)) {
+                continue;
+              }
               return guardStop;
             }
             recordStep(iteration, response, 'tool_calls_continue');
@@ -1328,6 +1444,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           if (!controlOutput) {
             const guardStop = await stopForToolGuards();
             if (guardStop) {
+              if (isTurnLoopToolGuardContinue(guardStop)) {
+                continue;
+              }
               return guardStop;
             }
             recordStep(iteration, response, 'tool_calls_continue');
@@ -1347,6 +1466,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             if (next?.next?.control === 'continue') {
               const guardStop = await stopForToolGuards();
               if (guardStop) {
+                if (isTurnLoopToolGuardContinue(guardStop)) {
+                  continue;
+                }
                 return guardStop;
               }
               recordStep(iteration, response, 'tool_calls_continue');
@@ -1383,6 +1505,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             if (next?.next?.control === 'continue') {
               const guardStop = await stopForToolGuards();
               if (guardStop) {
+                if (isTurnLoopToolGuardContinue(guardStop)) {
+                  continue;
+                }
                 return guardStop;
               }
               recordStep(iteration, response, 'tool_calls_continue');
@@ -1419,6 +1544,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             if (next?.next?.control === 'continue') {
               const guardStop = await stopForToolGuards();
               if (guardStop) {
+                if (isTurnLoopToolGuardContinue(guardStop)) {
+                  continue;
+                }
                 return guardStop;
               }
               recordStep(iteration, response, 'tool_calls_continue');
@@ -1447,6 +1575,9 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
 
       const guardStop = await stopForToolGuards();
       if (guardStop) {
+        if (isTurnLoopToolGuardContinue(guardStop)) {
+          continue;
+        }
         return guardStop;
       }
 

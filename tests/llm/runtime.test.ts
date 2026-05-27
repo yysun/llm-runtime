@@ -559,7 +559,7 @@ describe('llm-runtime runtime', () => {
       role: 'assistant',
       content: result.output,
     }));
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
     expect(executeLookup).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
