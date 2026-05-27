@@ -59,15 +59,17 @@ import {
   type RuntimeStreamCompleteEvent,
   createAskUserInputResult,
   createHumanInputToolResult,
+} from '../../src/runtime-complete-contract.js';
+import {
   createRuntime,
   executeToolCall,
   executeToolCalls,
-  intersectBuiltInToolSelections,
-  parseMCPConfigJson,
   resolveTools,
-  type LLMEnvironmentOptions,
-  type SkillFileSystemAdapter,
-} from '../../src/index.js';
+} from '../../src/runtime.js';
+import { intersectBuiltInToolSelections } from '../../src/builtins.js';
+import { parseMCPConfigJson } from '../../src/mcp.js';
+import type { LLMEnvironmentOptions } from '../../src/types.js';
+import type { SkillFileSystemAdapter } from '../../src/skills.js';
 import {
   ASK_USER_INPUT_TOOL_DESCRIPTION,
   ASK_USER_INPUT_TOOL_PARAMETERS,

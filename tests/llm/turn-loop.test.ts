@@ -35,7 +35,7 @@ import {
   DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
   runCompletionLoop,
 } from '../../src/completion-loop.js';
-import { complete } from '../../src/index.js';
+import { complete } from '../../src/completion-loop.js';
 import { createMockLLMScenario } from './mock-llm-scenario.test-support.js';
 import {
   runCompletionLoop as compatibilityPathRunCompletionLoop,

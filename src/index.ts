@@ -2,102 +2,64 @@
  * LLM Package Public Entrypoint
  *
  * Purpose:
- * - Export the public API for the publishable `llm-runtime` workspace.
+ * - Export the minimal public API for the publishable `llm-runtime` workspace.
  *
  * Key features:
- * - Per-call `generate(...)`, plus explicit runtime-facade agentic helpers.
- * - Package-owned provider configuration helpers.
- * - Package-owned built-in tool catalog and runtime helpers.
- * - Generic host-agnostic turn-loop orchestration helpers.
- * - MCP, skill, and tool registry helpers and types.
+ * - One-shot `generate(...)` for a single model call.
+ * - Agentic `complete(...)` and `streamComplete(...)` that own the tool-loop and terminate on control tools.
+ * - Optional `createRuntime(...)` for callers that want to reuse providers/MCP/skills across many calls.
+ * - Compact type set covering messages, tool definitions, results, and provider configuration.
  *
  * Implementation notes:
- * - Keeps the package surface explicit and typed.
- * - Avoids package-to-core imports so the workspace stays publishable.
- * - Serves as the primary import target for `core` and external consumers.
+ * - Internal turn-loop machinery, recovery instructions, validation helpers, and direct provider clients
+ *   are intentionally not re-exported here. Import them from internal paths only when extending the package.
  *
  * Recent changes:
- * - 2026-05-27: Hid `runCompletionLoop` and `RunCompletionLoopOptions` from the public surface; `complete(...)` is the only supported loop entrypoint.
- * - 2026-05-15: The runtime facade now exposes hardened `complete(...)` and `streamComplete(...)` helpers backed by the package completion loop.
- * - 2026-05-15: Exported package-owned `executeToolCall(...)` and `executeToolCalls(...)` helpers.
- * - 2026-05-15: Promoted `createRuntime(...)`, `complete(...)`, and `runCompletionLoop(...)` as the preferred public API names.
- * - 2026-03-29: Exported the generic host-agnostic completion-loop package API.
- * - 2026-03-27: Initial public API for `packages/llm`.
+ * - 2026-05-27: Reduced the public surface to `complete`, `streamComplete`, `generate`, `createRuntime`,
+ *   and the minimum type set needed to use them. Internal helpers, turn-loop hooks, recovery prompts,
+ *   and direct provider clients are no longer re-exported.
  */
 
-export * from './types.js';
-export * from './builtins.js';
-export * from './human-input-contract.js';
-export * from './llm-config.js';
-export * from './mcp.js';
-export * from './skills.js';
-export * from './tools.js';
-export * from './tool-validation.js';
 export {
-  AGENT_CONTROL_TOOL_NAMES,
-  COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG,
-  DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
-  DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
-  DEFAULT_EMPTY_TEXT_RECOVERY_INSTRUCTION,
-  DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
-  DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION,
-  DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
-  DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
-  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
-  DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_SAME_TOOL_CALL_BATCHES,
-  DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS,
-  DEFAULT_TURN_LOOP_MAX_ITERATIONS,
-  DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS,
-  DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION,
-  DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION,
   complete,
-  createAgentControlToolDefinitions,
-} from './completion-loop.js';
-export type {
-  AgentControlToolName,
-  CompleteOptions,
-  RunCompletionLoopResult,
-  TurnLoopBlockedControlOutput,
-  TurnLoopBoundToolExecutorOptions,
-  TurnLoopClassificationEvent,
-  TurnLoopClassificationSummary,
-  TurnLoopControl,
-  TurnLoopControlOutput,
-  TurnLoopControlToolCallEvent,
-  TurnLoopDefaultTextResponseMode,
-  TurnLoopFinalAnswerControlOutput,
-  TurnLoopIterationStartEvent,
-  TurnLoopModelResponseEvent,
-  TurnLoopNeedUserInputControlOutput,
-  TurnLoopPackageModelRequest,
-  TurnLoopRepeatedToolCallGuard,
-  TurnLoopRepeatedToolCallStopDetail,
-  TurnLoopRetryKind,
-  TurnLoopRetrySummary,
-  TurnLoopStepBranch,
-  TurnLoopStepResult,
-  TurnLoopStepSummary,
-  TurnLoopStopEvent,
-  TurnLoopStopMetadata,
-  TurnLoopTerminalReason,
-  TurnLoopTextResponseAssessment,
-  TurnLoopTextResponseClassification,
-  TurnLoopToolCallSource,
-  TurnLoopToolCallSummary,
-  TurnLoopToolExecutor,
-} from './completion-loop.js';
-export * from './runtime-complete-contract.js';
-export {
-  DEFAULT_HUMAN_INTERVENTION_TOOL_HINT,
-  DEFAULT_WORKSPACE_TOOL_HINT,
   createRuntime,
-  disposeRuntimeCaches,
-  executeToolCall,
-  executeToolCalls,
   generate,
-  resolveTools,
-  resolveToolsAsync,
+  streamComplete,
 } from './runtime.js';
-export * from './openai-direct.js';
-export * from './anthropic-direct.js';
-export * from './google-direct.js';
+
+export type {
+  BuiltInToolName,
+  BuiltInToolSelection,
+  BuiltInToolSelectionMode,
+  LLMChatMessage,
+  LLMEnvironment,
+  LLMEnvironmentOptions,
+  LLMProviderConfigs,
+  LLMProviderName,
+  LLMResponse,
+  LLMRuntime,
+  LLMRuntimeCompleteOptions,
+  LLMRuntimeCompleteResult,
+  LLMRuntimeStreamCompleteEvent,
+  LLMRuntimeStreamCompleteOptions,
+  LLMRuntimeToolApprovalRequest,
+  LLMRuntimeToolApprovalResponse,
+  LLMRuntimeToolHandlerRequest,
+  LLMRuntimeToolHandlerResponse,
+  LLMStreamChunk,
+  LLMToolCall,
+  LLMToolDefinition,
+  LLMToolEvidenceKind,
+  LLMToolExecutionContext,
+  LLMUsage,
+  MCPConfig,
+  ProviderConfig,
+  ReasoningEffort,
+  ToolPermission,
+} from './types.js';
+
+export type {
+  RuntimeCompleteResult,
+  RuntimeCompleteStatus,
+  RuntimeStreamCompleteEvent,
+} from './runtime-complete-contract.js';

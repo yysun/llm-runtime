@@ -361,12 +361,32 @@ export interface LLMEnvironmentOptions {
   skillFileSystem?: SkillFileSystemAdapter;
 }
 
-export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
+export type LLMRuntimeGenerateOptions = LLMGenerateOptions;
 export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_result';
 export interface LLMRuntimeRepeatedToolCallGuard {
   maxConsecutiveSameBatches?: number;
 }
-export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
+export interface LLMRuntimeToolApprovalRequest {
+  toolCall: LLMToolCall;
+  toolName: string;
+  parsedArguments: Record<string, unknown>;
+}
+export interface LLMRuntimeToolApprovalResponse {
+  approved: boolean;
+  reason?: string;
+}
+export interface LLMRuntimeToolHandlerRequest {
+  toolCall: LLMToolCall;
+  toolName: string;
+  parsedArguments: Record<string, unknown>;
+  context: LLMToolExecutionContext;
+  executeDefault: () => Promise<unknown>;
+}
+export interface LLMRuntimeToolHandlerResponse {
+  handled: boolean;
+  result?: unknown;
+}
+export interface LLMRuntimeCompleteOptions extends LLMPerCallProviderOptions {
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
@@ -374,6 +394,8 @@ export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOption
   repeatedToolCallGuard?: false | LLMRuntimeRepeatedToolCallGuard;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;
+  onToolApproval?: (request: LLMRuntimeToolApprovalRequest) => Promise<LLMRuntimeToolApprovalResponse> | LLMRuntimeToolApprovalResponse;
+  onToolCall?: (request: LLMRuntimeToolHandlerRequest) => Promise<LLMRuntimeToolHandlerResponse> | LLMRuntimeToolHandlerResponse;
 }
 export type LLMRuntimeStreamCompleteOptions = LLMRuntimeCompleteOptions;
 export type LLMRuntimeCompleteResult = RuntimeCompleteResult;

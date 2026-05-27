@@ -81,6 +81,7 @@ import type {
   LLMRuntimeCompleteOptions,
   LLMRuntimeCompleteResult,
   LLMRuntimeStreamCompleteEvent,
+  LLMRuntimeStreamCompleteOptions,
   LLMStreamChunk,
   LLMStreamOptions,
   LLMToolCall,
@@ -258,9 +259,12 @@ type RuntimeCompletionState = {
 };
 
 function hasHostExecutableTool(
-  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools'>,
+  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools' | 'onToolCall'>,
   toolName: string,
 ): boolean {
+  if (typeof request.onToolCall === 'function') {
+    return true;
+  }
   const extraTool = request.extraTools?.find((tool) => String(tool.name || '').trim() === toolName);
   const directTool = request.tools?.[toolName];
   return typeof extraTool?.execute === 'function' || typeof directTool?.execute === 'function';
@@ -768,6 +772,7 @@ async function runRuntimeCompletion(
       const toolMessages = [...nextMessages];
       for (const toolCall of toolCalls) {
         const parsedArguments = parseToolCallArguments(toolCall);
+        const parsedArgs = parsedArguments.ok ? parsedArguments.args : {};
         const executionContext: LLMToolExecutionContext = {
           ...(request.context ?? {}),
           messages: toolMessages.map((message) => ({ ...message })),
@@ -779,11 +784,40 @@ async function runRuntimeCompletion(
           iteration,
         });
 
-        const toolResult = await toolExecutor.executeToolCall(
-          toolCall,
-          executionContext,
-          { errorMode: 'return-artifact' },
-        );
+        let toolResult: unknown;
+        const toolName = toolCall.function.name;
+        if (request.onToolApproval) {
+          const approval = await request.onToolApproval({ toolCall, toolName, parsedArguments: parsedArgs });
+          if (!approval.approved) {
+            toolResult = createToolExecutionFailureArtifact({
+              toolCall,
+              code: 'execution_failed',
+              message: approval.reason ?? `Tool execution rejected: ${toolName}`,
+            });
+          }
+        }
+
+        if (toolResult === undefined && request.onToolCall) {
+          const handled = await request.onToolCall({
+            toolCall,
+            toolName,
+            parsedArguments: parsedArgs,
+            context: executionContext,
+            executeDefault: () => toolExecutor.executeToolCall(toolCall, executionContext, { errorMode: 'return-artifact' }),
+          });
+          if (handled.handled) {
+            toolResult = handled.result;
+          }
+        }
+
+        if (toolResult === undefined) {
+          toolResult = await toolExecutor.executeToolCall(
+            toolCall,
+            executionContext,
+            { errorMode: 'return-artifact' },
+          );
+        }
+
         toolMessages.push(createToolResultMessage(toolCall, toolResult));
 
         if (isToolExecutionFailureArtifact(toolResult)) {
@@ -936,6 +970,60 @@ async function disposeRuntime(environment: LLMEnvironment): Promise<void> {
 
   disposedEnvironments.add(environment);
   await shutdownRegistries([environment.mcpRegistry]);
+}
+
+function resolveEnvironmentForCall(options: LLMRuntimeCompleteOptions): { environment: LLMEnvironment; ownsEnvironment: boolean } {
+  if (options.environment) {
+    return { environment: options.environment, ownsEnvironment: false };
+  }
+  const environment = createRuntime({
+    ...(options.providers ? { providers: options.providers } : {}),
+    ...(options.mcpConfig !== undefined ? { mcpConfig: options.mcpConfig } : {}),
+    ...(options.skillRoots ? { skillRoots: options.skillRoots } : {}),
+  });
+  return { environment, ownsEnvironment: true };
+}
+
+export async function complete(options: LLMRuntimeCompleteOptions): Promise<LLMRuntimeCompleteResult> {
+  const { environment, ownsEnvironment } = resolveEnvironmentForCall(options);
+  try {
+    return await runRuntimeCompletion(environment, options);
+  } finally {
+    if (ownsEnvironment) {
+      await disposeRuntime(environment);
+    }
+  }
+}
+
+export async function* streamComplete(options: LLMRuntimeStreamCompleteOptions): AsyncGenerator<LLMRuntimeStreamCompleteEvent> {
+  const { environment, ownsEnvironment } = resolveEnvironmentForCall(options);
+  const events = createAsyncEventQueue<LLMRuntimeStreamCompleteEvent>();
+  const completion = runRuntimeCompletion(environment, options, async (event) => {
+    events.push(event);
+  }, { streamModel: true }).catch(async (error) => {
+    events.push({
+      type: 'failed',
+      result: {
+        status: 'failed',
+        messages: options.messages,
+        error: stringifyError(error),
+      },
+      iteration: 0,
+    });
+  }).finally(() => {
+    events.close();
+  });
+
+  try {
+    for await (const event of events.iterate()) {
+      yield event;
+    }
+    await completion;
+  } finally {
+    if (ownsEnvironment) {
+      await disposeRuntime(environment);
+    }
+  }
 }
 
 export async function disposeRuntimeCaches(): Promise<void> {

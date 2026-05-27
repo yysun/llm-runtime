@@ -22,7 +22,7 @@ import {
   createRuntime,
   disposeRuntimeCaches,
   resolveToolsAsync,
-} from '../../src/index.js';
+} from '../../src/runtime.js';
 
 const {
   mockClientConnect,
