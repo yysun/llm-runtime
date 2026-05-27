@@ -631,6 +631,13 @@ async function runRuntimeCompletion(
       streamModel: options.streamModel,
       onChunk: options.streamModel
         ? (chunk) => {
+          if (chunk.reasoningContent) {
+            void emitEvent?.({
+              type: 'reasoning_delta',
+              delta: chunk.reasoningContent,
+              iteration: activeIteration,
+            });
+          }
           if (chunk.content) {
             void emitEvent?.({
               type: 'text_delta',

@@ -1297,6 +1297,7 @@ describe('llm-runtime runtime', () => {
 
     const eventTypes: string[] = [];
     const textDeltaEvents: RuntimeStreamCompleteEvent[] = [];
+    const reasoningDeltaEvents: RuntimeStreamCompleteEvent[] = [];
 
     for await (const event of runtime.streamComplete({
       provider: 'openai',
@@ -1320,6 +1321,9 @@ describe('llm-runtime runtime', () => {
       if (event.type === 'text_delta') {
         textDeltaEvents.push(event);
       }
+      if (event.type === 'reasoning_delta') {
+        reasoningDeltaEvents.push(event);
+      }
     }
 
     expect(eventTypes).toEqual([
@@ -1329,6 +1333,7 @@ describe('llm-runtime runtime', () => {
       'tool_result',
       'model_start',
       'text_delta',
+      'reasoning_delta',
       'text_delta',
       'assistant_message',
       'completed',
@@ -1337,13 +1342,16 @@ describe('llm-runtime runtime', () => {
       { type: 'text_delta', delta: 'TOKEN=', iteration: 2 },
       { type: 'text_delta', delta: 'project-token', iteration: 2 },
     ]);
+    expect(reasoningDeltaEvents).toEqual([
+      { type: 'reasoning_delta', delta: 'private reasoning', iteration: 2 },
+    ]);
     expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
     expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(2);
 
     await runtime.dispose();
   });
 
-  it('emits text deltas from runtime.streamComplete without leaking reasoning chunks', async () => {
+  it('emits text and reasoning deltas from runtime.streamComplete separately', async () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();
 
@@ -1394,6 +1402,7 @@ describe('llm-runtime runtime', () => {
     expect(events).toEqual([
       { type: 'model_start', iteration: 1 },
       { type: 'text_delta', delta: 'hel', iteration: 1 },
+      { type: 'reasoning_delta', delta: 'hidden chain', iteration: 1 },
       { type: 'text_delta', delta: 'lo', iteration: 1 },
       expect.objectContaining({ type: 'assistant_message', iteration: 1 }),
       expect.objectContaining({
@@ -1402,7 +1411,6 @@ describe('llm-runtime runtime', () => {
         result: expect.objectContaining({ status: 'completed', output: 'hello' }),
       }),
     ]);
-    expect(events).not.toContainEqual(expect.objectContaining({ delta: 'hidden chain' }));
     expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
     expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
 

@@ -41,6 +41,7 @@ export type RuntimeStreamCompleteEvent =
   | { type: 'model_start'; iteration: number }
   | { type: 'assistant_message'; message: LLMChatMessage; iteration: number }
   | { type: 'text_delta'; delta: string; iteration: number }
+  | { type: 'reasoning_delta'; delta: string; iteration: number }
   | { type: 'tool_start'; toolCall: LLMToolCall; args: unknown; iteration: number }
   | { type: 'tool_result'; toolCall: LLMToolCall; result: unknown; iteration: number }
   | { type: 'tool_error'; toolCall: LLMToolCall; error: string; iteration: number }
