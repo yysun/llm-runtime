@@ -440,6 +440,14 @@ function normalizeTextAssessment(
   return assessment;
 }
 
+function classifyIncompleteTextResponse(response: LLMResponse): TurnLoopTextResponseAssessment | undefined {
+  if (response.type === 'text' && response.stopKind === 'length') {
+    return { classification: 'non_progressing' };
+  }
+
+  return undefined;
+}
+
 function hasPendingInteractionAwaitingAction(params: {
   messages: LLMChatMessage[];
   observedInteractionProgress: boolean;
@@ -1491,7 +1499,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         messages,
         iteration,
         requiresActionEvidence,
-      }));
+      })) ?? classifyIncompleteTextResponse(response);
       const pendingInteractionAwaitingAction = hasPendingInteractionAwaitingAction({
         messages,
         observedInteractionProgress,
@@ -1792,7 +1800,10 @@ export async function complete<TState, TMessage extends LLMChatMessage = LLMChat
         observedInteractionProgress,
         observedActionEvidence,
       });
-      return await callerClassifyTextResponse?.(params);
+      const callerAssessment = await callerClassifyTextResponse?.(params);
+      if (callerAssessment) {
+        return callerAssessment;
+      }
     },
     requiresActionEvidence: async (params) => {
       const packageRequiresActionEvidence = defaultTextResponseMode === 'require_tool_result'

@@ -570,6 +570,75 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('keeps looping when assistant text stopped for length after read-only evidence', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      mockGenerateOpenAIResponse.mockReset();
+      await fs.writeFile(path.join(workspacePath, 'notes.txt'), 'contents');
+
+      const readToolCall = {
+        id: 'read-continue-1',
+        type: 'function' as const,
+        function: {
+          name: 'read_file',
+          arguments: JSON.stringify({ filePath: 'notes.txt' }),
+        },
+      };
+
+      mockGenerateOpenAIResponse
+        .mockResolvedValueOnce({
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [readToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [readToolCall],
+          },
+        })
+        .mockResolvedValueOnce({
+          type: 'text',
+          content: 'Please wait while I analyze the file.',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Please wait while I analyze the file.',
+          },
+          stopKind: 'length',
+          providerStopReason: 'length',
+        })
+        .mockResolvedValueOnce({
+          type: 'text',
+          content: 'The file contains contents.',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'The file contains contents.',
+          },
+        });
+
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Inspect notes.txt.' }],
+        context: {
+          workingDirectory: workspacePath,
+        },
+      });
+
+      expect(result.status).toBe('completed');
+      expect(result.output).toBe('The file contains contents.');
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+      await runtime.dispose();
+    });
+  });
+
   it('handles ask_user_input alongside other runtime tool calls without special pausing', async () => {
     mockGenerateOpenAIResponse.mockReset();
 

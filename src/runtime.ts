@@ -144,11 +144,6 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value);
 }
 
-const INTENT_ONLY_NARRATION_PATTERNS = [
-  /^\s*(i(?:['’]?ll| will)|let me|i(?:['’]?m| am) going to|proceeding|checking|searching|looking up)\b/i,
-  /\b(i(?:['’]?ll| will)|let me)\s+(check|search|look|inspect|read|open|analyze|review|find|run)\b/i,
-] as const;
-
 function normalizeSkillRoots(roots?: string[]): string[] {
   return [...new Set((roots ?? []).map((root) => path.resolve(String(root || '').trim())).filter(Boolean))];
 }
@@ -256,17 +251,6 @@ function hasHostExecutableTool(
   const extraTool = request.extraTools?.find((tool) => String(tool.name || '').trim() === toolName);
   const directTool = request.tools?.[toolName];
   return typeof extraTool?.execute === 'function' || typeof directTool?.execute === 'function';
-}
-
-function classifyRuntimeNarration(responseText: string): 'intent_only_narration' | undefined {
-  const normalized = responseText.trim();
-  if (!normalized) {
-    return undefined;
-  }
-
-  return INTENT_ONLY_NARRATION_PATTERNS.some((pattern) => pattern.test(normalized))
-    ? 'intent_only_narration'
-    : undefined;
 }
 
 function appendTransientInstruction(
@@ -482,7 +466,6 @@ async function runRuntimeCompletion(
         iteration,
       });
     },
-    classifyTextResponse: async ({ responseText }) => classifyRuntimeNarration(responseText),
     onTextResponse: async ({ state, responseText, response }) => ({
       state: {
         ...state,

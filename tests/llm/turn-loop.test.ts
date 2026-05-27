@@ -43,11 +43,12 @@ import {
 } from '../../src/turn-loop.js';
 import type { LLMChatMessage, LLMResponse } from '../../src/types.js';
 
-function text(content: string): LLMResponse {
+function text(content: string, responseOverrides: Partial<LLMResponse> = {}): LLMResponse {
   return {
     type: 'text',
     content,
     assistantMessage: { role: 'assistant', content },
+    ...responseOverrides,
   };
 }
 
@@ -138,6 +139,50 @@ describe('llm-runtime completion loop', () => {
 
     expect(result.reason).toBe('text_response');
     expect(result.state.finalText).toBe('完成了');
+  });
+
+  it('complete retries length-stopped assistant text before accepting permissive text', async () => {
+    const responses = [
+      text('Please wait while I inspect the file.', { stopKind: 'length', providerStopReason: 'length' }),
+      toolCall('read_file', { filePath: 'notes.txt' }),
+      text('The file contains contents.'),
+    ];
+
+    const result = await complete({
+      initialState: {
+        messages: [{ role: 'user', content: 'inspect the file' } satisfies LLMChatMessage] as LLMChatMessage[],
+        finalText: '',
+      },
+      emptyTextRetryLimit: 0,
+      callModel: vi.fn(async () => responses.shift() ?? text('unexpected')),
+      buildMessages: async ({ state, transientInstruction }) => (
+        transientInstruction ? [...state.messages, { role: 'system', content: transientInstruction }] : state.messages
+      ),
+      onToolCallsResponse: async ({ state, response }) => ({
+        state: {
+          ...state,
+          messages: [
+            ...state.messages,
+            response.assistantMessage,
+            { role: 'tool', tool_call_id: response.tool_calls?.[0]?.id, content: 'contents' } satisfies LLMChatMessage,
+          ],
+        },
+        next: { control: 'continue' },
+      }),
+      onTextResponse: async ({ state, responseText }) => ({
+        state: { ...state, finalText: responseText },
+      }),
+    });
+
+    expect(result.reason).toBe('text_response');
+    expect(result.state.finalText).toBe('The file contains contents.');
+    expect(result.classifications).toEqual([
+      expect.objectContaining({ classification: 'non_progressing' }),
+      expect.objectContaining({ classification: 'verified_final_response' }),
+    ]);
+    expect(result.retries).toEqual([
+      expect.objectContaining({ kind: 'rejected_text', decision: 'retry' }),
+    ]);
   });
 
   it('complete accepts final text after current-run tool progress even when history is compacted', async () => {
