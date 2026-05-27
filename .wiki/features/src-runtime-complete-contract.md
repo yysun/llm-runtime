@@ -20,12 +20,12 @@ Facts from source:
 - `RuntimeCompleteResult` normalizes runtime-facade completion outcomes into `completed`, `tool_calls`, `failed`, or `max_iterations`.
 - `tool_calls` is the generic host-handled branch. It is used when runtime completion should surface model tool calls to the host instead of executing or waiting internally.
 - `PendingHumanInput` stores the original tool call id, tool name, and structured request payload so the host can present a human question and resume later when that pattern is useful.
-- `RuntimeStreamCompleteEvent` gives `streamComplete(...)` a stable event stream with `model_start`, `assistant_message`, `tool_start`, `tool_result`, `tool_error`, `tool_calls`, `completed`, `failed`, and `raw` events.
-- `createHumanInputToolResult(...)` and `createAskUserInputResult(...)` turn a collected human answer back into a normal `tool` message, which lets hosts resume the same transcript without inventing a second resume protocol.
+- `RuntimeStreamCompleteEvent` gives `streamComplete(...)` a stable event stream with `model_start`, `assistant_message`, `text_delta`, `reasoning_delta`, `tool_start`, `tool_result`, `tool_error`, `tool_calls`, `completed`, `failed`, and `raw` events.
+- `src/runtime-complete-contract.ts` still defines `createHumanInputToolResult(...)` and `createAskUserInputResult(...)` helpers internally, but the root package entrypoint no longer exports them. Root consumers can resume by appending a normal `tool` message with the pending tool call id and serialized answer.
 
 Why this matters:
 - The runtime facade can keep a stable host-facing contract even though the underlying completion-loop implementation has been hardened and refactored.
-- Hosts that need pause-and-resume human input do not need to reverse-engineer the tool-result message shape.
+- Hosts that need pause-and-resume human input can use the ordinary chat/tool message shape instead of a second resume protocol.
 - The runtime no longer exposes a special `waiting_for_human` status or event. Human waiting, timeout, cancellation, and UI rendering are host concerns.
 - Streaming harnesses can branch on event type instead of scraping mixed logs.
 

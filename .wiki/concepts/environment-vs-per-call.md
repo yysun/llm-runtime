@@ -7,7 +7,7 @@ source_paths:
   - "README.md"
   - "src/runtime.ts"
   - "src/types.ts"
-updated_at: "2026-04-12"
+updated_at: "2026-05-27"
 ---
 
 The package is designed around one rule: keep long-lived app setup in `environment`, and keep request-specific state on each individual call.
@@ -15,8 +15,9 @@ The package is designed around one rule: keep long-lived app setup in `environme
 Here, "harness" just means the host app or test runner that calls `llm-runtime`.
 
 Facts from source:
-- `createLLMEnvironment(...)` builds or accepts an explicit provider config store, MCP registry, skill registry, and default `reasoningEffort` / `toolPermission` values.
-- Per-call request data still carries `provider`, `model`, `messages`, `workingDirectory`, `reasoningEffort`, `toolPermission`, and `abortSignal`.
+- `createRuntime(...)` builds or accepts an explicit provider config store, MCP registry, skill registry, and default `reasoningEffort` / `toolPermission` values.
+- Per-call request data carries `provider`, `model`, `messages`, `temperature`, `maxTokens`, `webSearch`, `builtIns`, `extraTools`, `tools`, and execution `context`.
+- Filesystem scope, `reasoningEffort`, `toolPermission`, and `abortSignal` are request-local execution context fields, commonly passed as `context.workingDirectory`, `context.reasoningEffort`, `context.toolPermission`, and `context.abortSignal`.
 - When no explicit environment is supplied, [[src-runtime]] builds a cached environment from provider configs, MCP config, and skill roots.
 
 Why it matters:

@@ -11,10 +11,10 @@ source_paths:
   - "src/google-direct.ts"
   - "tests/llm/runtime.test.ts"
   - "tests/llm/runtime-provider.test.ts"
-updated_at: "2026-05-14"
+updated_at: "2026-05-27"
 ---
 
-This page explains the safest way to build the first system message before calling `generate(...)` or `stream(...)`.
+This page explains the safest way to build the first system message before calling `generate(...)`, `complete(...)`, or `streamComplete(...)`.
 
 In plain terms, put your app's rules, any repository instructions from `AGENTS.md`, and your own tool-use preferences into one combined system message, then let the runtime append its own package-managed guidance after that.
 
@@ -38,8 +38,8 @@ Recommended schema:
 4. Let the runtime append its own tool guidance after the caller-owned sections.
 
 What the runtime adds today:
-- `generate(...)` and `stream(...)` can append the human-input hint and workspace-tool hint when those tools are enabled.
-- `complete(...)` and `runtime.complete(...)` also append the agent run-loop contract so the model is reminded that narration is not completion.
+- `generate(...)` can append the human-input hint and workspace-tool hint when those tools are enabled.
+- `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` append the agent run-loop contract so the model is reminded that narration is not completion and should stop through `final_answer`, `need_user_input`, or `blocked`.
 - The managed block is inserted into the same first system message rather than as a separate transport field, which keeps cross-provider behavior stable.
 
 Suggested section layout:

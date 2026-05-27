@@ -26,11 +26,11 @@ What changed at `HEAD`:
 - The loop result now includes trace summaries (`steps`, `toolCalls`, `classifications`, `retries`, `stop`, `elapsedMs`) plus lifecycle hooks for iteration start, model response, classification, and stop.
 - The preferred `src/completion-loop.ts` path now has a narrower wall-clock timeout behavior after completed tool work: if action evidence and a prior tool result exist, it can return a final diagnostic text response while preserving `timedOutDuringIteration` in stop metadata.
 - `LLMToolCall.synthetic?: boolean` and `markSyntheticToolCalls` let callers distinguish normalized plain-text tool intents from model-emitted tool calls.
-- `src/runtime.ts` now exports `disposeLLMEnvironment(...)` and `disposeLLMRuntimeCaches()`, with ownership-aware cleanup so caller-injected MCP registries are not shut down by the runtime.
+- `src/runtime.ts` keeps ownership-aware cleanup internally, and explicit `LLMRuntime` objects expose `runtime.dispose()` so caller-injected MCP registries are not shut down by the runtime.
 
 Why it matters:
 - Callers no longer need outer guards just to prevent runaway tool loops.
 - Stop reasons and diagnostic branches are machine-readable and suitable for harness branching or telemetry.
-- Cleanup moved from test-only helpers and direct registry shutdown calls into a supported public API.
+- Cleanup moved from test-only helpers and direct registry shutdown calls into a supported runtime API.
 
 Read [[src-completion-loop]] for current loop semantics, [[src-turn-loop]] for compatibility aliases, [[timeout-after-tool-result]] for the timeout diagnostic behavior, [[src-runtime]] for cleanup ownership, and [[testing-and-showcases]] for regression coverage.

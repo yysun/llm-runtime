@@ -8,6 +8,10 @@ source_paths:
   - ".docs/done/2026/05/15/runtime-api-rename.md"
   - ".docs/done/2026/05/15/action-evidence-separation.md"
   - ".docs/done/2026/05/15/runtime-safety-hardening.md"
+  - ".docs/reqs/2026/05/27/req-harden-completion-loop.md"
+  - ".docs/plans/2026/05/27/plan-harden-completion-loop.md"
+  - ".docs/done/2026/05/27/harden-completion-loop.md"
+  - ".docs/tests/test-harden-completion-loop.md"
   - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
   - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
   - ".docs/reqs/2026/05/14/req-natural-language-continuation.md"
@@ -30,20 +34,20 @@ updated_at: "2026-05-27"
 
 `src/completion-loop.ts` is the part of the package that keeps the model working until there is a real result, a real blocker, or a real need for user input.
 
-`runCompletionLoop(...)` is the lower-level API, and `complete(...)` is the package-owned wrapper that applies the runtime's preferred defaults.
+`runCompletionLoop(...)` is the lower-level implementation API. The root public examples should use the runtime facade: `complete(...)`, `streamComplete(...)`, or the methods returned by `createRuntime(...)`.
 
 Facts from source:
-- Callers can supply either `callModel` to own model invocation themselves or `modelRequest` to reuse package `generate(...)` and `stream(...)` through [[src-runtime]].
+- Internal callers can supply either `callModel` to own model invocation themselves or `modelRequest` to reuse package `generate(...)` and `stream(...)` through [[src-runtime]].
 - `buildMessages(...)` rebuilds prompt state each iteration and can receive a transient recovery instruction when the loop decides to retry instead of stop.
 - Plain-text tool intent normalization is optional through `parsePlainTextToolIntent(...)`, and `markSyntheticToolCalls` can annotate normalized tool calls on the public response surface.
 - The loop applies intrinsic hard bounds for iterations, consecutive tool rounds, wall-clock duration, and repeated identical tool-call batches.
 - `runCompletionLoop(...)` returns structured trace data in `steps`, `toolCalls`, `classifications`, `retries`, `stop`, and `elapsedMs` in addition to the final `state`, `response`, and `reason`.
 - Additive lifecycle hooks such as `onIterationStart(...)`, `onModelResponse(...)`, `onClassification(...)`, and `onStop(...)` expose deterministic trace points without taking ownership of host state.
-- Standalone `complete(...)` prepends a package-owned completion-loop system prompt, defaults `defaultTextResponseMode` to `permissive`, and still defaults `rejectedTextRetryLimit` to `2`, so general chat hosts can accept conversational final text while strict callers can opt into `require_tool_result`.
+- Standalone lower-level `complete(...)` prepends a package-owned completion-loop system prompt and is used by the runtime facade. It remains useful for internal extension and tests, but it is no longer exported from the root entrypoint.
 - The package-managed `modelRequest` path defaults built-ins to [[src-builtins]]' read-only set plus `ask_user_input` through `src/complete-defaults.ts`, so package-owned completion helpers can inspect safely and still let the model request required human decisions.
 - `ask_user_input` counts as interaction progress, not task-action evidence. Final text after human input still needs later read, write, external-action, or artifact evidence when the turn requires action evidence.
-- Agent control mode is not forced globally. `complete(...)` auto-enables it only when the caller wires final-answer, needs-input, or blocked handlers, and callers can still set `agentControlMode` explicitly.
-- When agent control mode is active, the runtime injects the internal control tools `final_answer`, `need_user_input`, and `blocked`, intercepts them before host tool execution, and returns structured `controlOutput` metadata instead of relying on bare assistant text.
+- Runtime-facade completion now always uses control-tool termination. The model should call `final_answer`, `need_user_input`, or `blocked`; bare narration is retried or rejected instead of ending the run.
+- The loop injects internal control tools `final_answer`, `need_user_input`, and `blocked`, intercepts them before host tool execution, and returns structured `controlOutput` metadata instead of relying on bare assistant text.
 - Terminal reasons cover both text/tool branches and deterministic stops such as `final_answer`, `needs_user_input`, `blocked`, `max_iterations_exceeded`, `max_tool_rounds_exceeded`, `timeout`, and `repeated_tool_call_stopped`.
 - If wall-clock timeout fires after completed tool work has produced action evidence, the loop can synthesize a final diagnostic text response using `DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE` instead of returning a bare `timeout`. The stop metadata still records `timedOutDuringIteration`.
 - The structural classifier is evidence-first rather than phrase-first: unsupported tool-backed claims and post-interaction narration are rejected as non-progressing based on observed run evidence rather than English-only regex heuristics.

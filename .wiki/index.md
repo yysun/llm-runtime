@@ -3,7 +3,7 @@ title: "Project Wiki"
 type: "index"
 status: "active"
 language: "default"
-last_commit: "340f35e37d5263e09be8f7f9414e5995c9029374"
+last_commit: "5c47d314b0044f5a3941b85799611090ec03bff7"
 updated_at: "2026-05-27"
 ---
 
@@ -27,7 +27,7 @@ The core ownership rule is [[environment-vs-per-call]]: stable dependencies can 
 
 ## What happens when I run it?
 
-`generate(...)` resolves provider config, built-ins, extra tools, MCP tools, and skills, injects managed prompt guidance when needed, and dispatches to the selected provider adapter. `complete(...)`, `runCompletionLoop(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add a bounded model/tool loop with retry, stop, trace, and action-evidence handling. See [[src-runtime]] and [[src-completion-loop]].
+The root package entrypoint is deliberately small: `generate(...)`, `complete(...)`, `streamComplete(...)`, and `createRuntime(...)`. `generate(...)` performs one provider call and may return text or tool calls. `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add the bounded runtime-owned model/tool loop and terminate through control tools. Lower-level loop machinery still exists internally, but it is no longer root public API. See [[src-runtime]], [[src-completion-loop]], and [[public-types]].
 
 If the model calls `ask_user_input`, package-managed completion advertises the contract by default, but default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
 
@@ -58,4 +58,4 @@ Risk pages: [[shell-command-safeguards]], [[turn-loop-safety-and-lifecycle]], [[
 
 For a public API question, start at [[public-types]] and [[src-runtime]]. For loop behavior, start at [[src-completion-loop]]. For tool behavior, start at [[src-builtins]], [[src-builtin-executors]], and [[src-tool-validation]]. For recent contract changes, read [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
 
-Coverage note: this wiki reflects the current May 2026 package shape at commit `340f35e37d5263e09be8f7f9414e5995c9029374`, including host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, safer read-only defaults, runtime-facade completion helpers, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.
+Coverage note: this wiki reflects the current May 2026 package shape at commit `5c47d314b0044f5a3941b85799611090ec03bff7`, including the narrowed root entrypoint, control-tool runtime completion, host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, safer read-only defaults, streaming text/reasoning deltas, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.

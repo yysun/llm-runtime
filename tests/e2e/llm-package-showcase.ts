@@ -6,15 +6,16 @@
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.
- * - Exercises package-owned built-ins, skill loading, MCP discovery/execution, and streaming.
+ * - Exercises the public runtime facade across built-ins, skill loading, MCP discovery/execution, and streaming events.
  * - Prints a terminal-friendly walkthrough with assertions for each scenario.
  *
  * Implementation notes:
- * - The runner manages its own tool loop around package-level `generate(...)` and `stream(...)`.
+ * - The runner uses `runtime.complete(...)` and `runtime.streamComplete(...)` as the current public example path.
  * - A temporary workspace provides deterministic files and skills without touching the repo.
  * - `--dry-run` validates setup without making real provider calls.
  *
  * Recent changes:
+ * - 2026-05-27: Reworked the showcase around the narrowed public root API and runtime facade.
  * - 2026-03-27: Added the real e2e showcase runner for `llm-runtime`.
  * - 2026-03-27: Switched env loading to the repo-local `.env` file explicitly.
  * - 2026-05-14: Updated showcase built-in selections for the filesystem tool surface.
@@ -27,13 +28,10 @@ import process from 'node:process';
 import { config as loadDotEnv } from 'dotenv';
 import {
   createRuntime,
-  generate,
   type LLMChatMessage,
-  type LLMEnvironment,
-  type LLMResponse,
+  type LLMRuntime,
   type LLMStreamChunk,
 } from '../../src/index.js';
-import { resolveToolsAsync, stream } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
   resolveShowcaseProviderSelection,
@@ -44,12 +42,12 @@ import {
   buildShowcaseScenarios,
   createShowcaseWorkspace,
   summarizeChunks,
-  toToolMessageContent,
   type ShowcaseScenario,
   type ShowcaseScenarioResult,
 } from './support/llm-showcase-fixtures.js';
 
-const MAX_TOOL_TURNS = 6;
+const MAX_ITERATIONS = 8;
+const CONTROL_TOOL_NAMES = new Set(['final_answer', 'need_user_input', 'blocked']);
 
 loadDotEnv({
   path: path.resolve(process.cwd(), '.env'),
@@ -82,9 +80,8 @@ function parseToolJsonResult(result: unknown, label: string): Record<string, unk
   return JSON.parse(result) as Record<string, unknown>;
 }
 
-async function assertHitlStrictSchema(environment: LLMEnvironment) {
-  const tools = await resolveToolsAsync({
-    environment,
+async function assertHitlStrictSchema(runtime: LLMRuntime) {
+  const tools = runtime.resolveTools({
     builtIns: {
       ask_user_input: true,
     },
@@ -136,88 +133,116 @@ async function assertHitlStrictSchema(environment: LLMEnvironment) {
   assert.equal((unknownFieldResult.issues as any[])[2].code, 'unknown_parameter');
 }
 
-async function runToolLoop(
+function collectToolNames(messages: LLMChatMessage[]): string[] {
+  return messages.flatMap((message) => (
+    message.tool_calls ?? []
+  ))
+    .map((toolCall) => toolCall.function.name)
+    .filter((toolName) => !CONTROL_TOOL_NAMES.has(toolName));
+}
+
+function countModelTurns(messages: LLMChatMessage[]): number {
+  return messages.filter((message) => message.role === 'assistant').length;
+}
+
+async function runRuntimeScenario(
   scenario: ShowcaseScenario,
   workingDirectory: string,
   providerSelection: ShowcaseProviderSelection,
-  environment: LLMEnvironment,
+  runtime: LLMRuntime,
 ): Promise<ShowcaseScenarioResult> {
-  const messages: LLMChatMessage[] = [...scenario.messages];
-  const chunks: LLMStreamChunk[] = [];
-  const toolNames: string[] = [];
+  if (scenario.mode === 'stream') {
+    const chunks: LLMStreamChunk[] = [];
+    const toolNames: string[] = [];
+    let finalText = '';
+    let turns = 0;
 
-  for (let turn = 1; turn <= MAX_TOOL_TURNS; turn += 1) {
-    const response: LLMResponse = scenario.mode === 'stream'
-      ? await stream({
-        provider: providerSelection.provider,
-        model: providerSelection.model,
-        builtIns: scenario.builtIns,
-        messages,
-        temperature: 0,
-        environment,
-        context: {
-          workingDirectory,
-        },
-        onChunk: (chunk) => {
-          chunks.push(chunk);
-        },
-      })
-      : await generate({
-        provider: providerSelection.provider,
-        model: providerSelection.model,
-        builtIns: scenario.builtIns,
-        messages,
-        temperature: 0,
-        environment,
-        context: {
-          workingDirectory,
-        },
-      });
-
-    messages.push(response.assistantMessage);
-
-    if (response.type !== 'tool_calls' || !response.tool_calls?.length) {
-      return {
-        finalText: response.content,
-        toolNames,
-        chunks,
-        turns: turn,
-      };
-    }
-
-    const tools = await resolveToolsAsync({
-      environment,
+    for await (const event of runtime.streamComplete({
+      provider: providerSelection.provider,
+      model: providerSelection.model,
       builtIns: scenario.builtIns,
-    });
-    for (const toolCall of response.tool_calls) {
-      const tool = tools[toolCall.function.name];
-      assert(tool?.execute, `Missing executable tool: ${toolCall.function.name}`);
+      messages: [...scenario.messages],
+      temperature: 0,
+      context: {
+        workingDirectory,
+      },
+      maxIterations: MAX_ITERATIONS,
+    })) {
+      turns = Math.max(turns, event.iteration);
 
-      let parsedArgs: Record<string, unknown> = {};
-      try {
-        parsedArgs = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
-      } catch (error) {
-        throw new Error(`Invalid tool arguments for ${toolCall.function.name}: ${error instanceof Error ? error.message : String(error)}`);
+      if (event.type === 'text_delta') {
+        chunks.push({ content: event.delta });
       }
 
-      toolNames.push(toolCall.function.name);
-      console.log(`  tool -> ${toolCall.function.name}(${toolCall.function.arguments || '{}'})`);
+      if (event.type === 'reasoning_delta') {
+        chunks.push({ reasoningContent: event.delta });
+      }
 
-      const toolResult = await tool.execute(parsedArgs, {
-        workingDirectory,
-        toolCallId: toolCall.id,
-        toolPermission: 'auto',
-      });
+      if (event.type === 'tool_start' && !CONTROL_TOOL_NAMES.has(event.toolCall.function.name)) {
+        toolNames.push(event.toolCall.function.name);
+        console.log(`  tool -> ${event.toolCall.function.name}(${event.toolCall.function.arguments || '{}'})`);
+      }
 
-      messages.push({
-        role: 'tool',
-        tool_call_id: toolCall.id,
-        content: toToolMessageContent(toolResult),
-      });
+      if (event.type === 'completed') {
+        finalText = event.result.output ?? '';
+      }
+
+      if (event.type === 'tool_calls') {
+        throw new Error(`Scenario returned host-handled tool calls: ${(event.result.toolCalls ?? []).map((toolCall) => toolCall.function.name).join(', ')}`);
+      }
+
+      if (event.type === 'failed') {
+        throw new Error(event.result.error ?? 'Runtime stream completion failed.');
+      }
     }
+
+    if (!finalText) {
+      throw new Error(`Scenario "${scenario.name}" finished without a final answer.`);
+    }
+
+    if (!chunks.length) {
+      chunks.push({ content: finalText });
+    }
+
+    return {
+      finalText,
+      toolNames,
+      chunks,
+      turns,
+    };
   }
 
-  throw new Error(`Scenario exceeded ${MAX_TOOL_TURNS} tool rounds without reaching a final answer.`);
+  const result = await runtime.complete({
+    provider: providerSelection.provider,
+    model: providerSelection.model,
+    builtIns: scenario.builtIns,
+    messages: [...scenario.messages],
+    temperature: 0,
+    context: {
+      workingDirectory,
+    },
+    maxIterations: MAX_ITERATIONS,
+  });
+
+  if (result.status === 'tool_calls') {
+    throw new Error(`Scenario returned host-handled tool calls: ${(result.toolCalls ?? []).map((toolCall) => toolCall.function.name).join(', ')}`);
+  }
+
+  if (result.status !== 'completed') {
+    throw new Error(result.error ?? `Scenario ended with status ${result.status}.`);
+  }
+
+  const toolNames = collectToolNames(result.messages);
+  for (const toolName of toolNames) {
+    console.log(`  tool -> ${toolName}`);
+  }
+
+  return {
+    finalText: result.output ?? '',
+    toolNames,
+    chunks: [],
+    turns: countModelTurns(result.messages),
+  };
 }
 
 async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelection, dryRun: boolean) {
@@ -253,10 +278,10 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
     console.log(`provider=${providerSelection.provider}`);
     console.log(`model=${providerSelection.model}`);
 
-    const resolvedTools = await resolveToolsAsync({
-      environment,
-      builtIns: showcaseBuiltIns,
-    });
+    const resolvedTools = {
+      ...environment.resolveTools({ builtIns: showcaseBuiltIns }),
+      ...await environment.mcpRegistry.resolveTools(),
+    };
     console.log(`tools=${Object.keys(resolvedTools).join(', ')}`);
     await assertHitlStrictSchema(environment);
     console.log('hitl-strict-schema=ok');
@@ -268,7 +293,7 @@ async function runShowcaseWithSelection(providerSelection: ShowcaseProviderSelec
 
     for (const scenario of buildShowcaseScenarios()) {
       console.log(`\n[scenario] ${scenario.name}`);
-      const result = await runToolLoop(
+      const result = await runRuntimeScenario(
         scenario,
         workspace.rootPath,
         providerSelection,

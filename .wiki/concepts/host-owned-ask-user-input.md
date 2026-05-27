@@ -25,7 +25,8 @@ Facts from source:
 - `src/runtime.ts` treats default `ask_user_input` calls as host-handled when the host did not provide an executable tool with that name. The runtime facade returns `status: "tool_calls"` with the assistant message and tool-call batch.
 - The runtime does not wait for human input, enforce a human-input timeout, or emit a `waiting_for_human` result.
 - If the host supplies executable `ask_user_input` through `extraTools` or `tools`, runtime completion executes that host tool normally.
-- `src/runtime-complete-contract.ts` keeps helper functions for turning a collected answer into a normal `tool` message: `createHumanInputToolResult(...)` and `createAskUserInputResult(...)`.
+- Hosts resume by appending a normal `tool` message with the pending tool call id and serialized answer, then calling `complete(...)` or `streamComplete(...)` again with the updated messages.
+- `src/runtime-complete-contract.ts` still contains helper functions for that message shape, but they are no longer exported from the root entrypoint.
 - `ask_user_input` is an interaction tool, not task-action evidence. The loop still requires later action evidence when the turn cannot be completed from human input alone.
 
 Why this matters:

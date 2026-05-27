@@ -5,7 +5,7 @@
  * - Exercise the action-execution hardening behavior end-to-end with deterministic scripted model replies.
  *
  * Key features:
- * - Runs the real package `runCompletionLoop(...)` implementation with real built-in tool resolution/execution.
+ * - Runs the lower-level `runCompletionLoop(...)` implementation with real built-in tool resolution/execution.
  * - Covers intent-only narration recovery on direct and continuation paths.
  * - Covers durable validation-failure artifacts plus caller-driven self-correction.
  *
@@ -14,6 +14,7 @@
  * - The host-side recovery logic intentionally lives in this runner to mirror production integration.
  *
  * Recent changes:
+ * - 2026-05-27: Moved lower-level loop and validation imports off the narrowed root entrypoint.
  * - 2026-05-14: Updated hardening built-in selections for the filesystem tool surface.
  */
 
@@ -22,19 +23,23 @@ import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import {
   createRuntime,
-  DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
-  DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
-  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
-  DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
-  parseToolValidationFailureArtifact,
-  runCompletionLoop,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
-  type ToolValidationFailureArtifact,
-  type TurnLoopTextResponseClassification,
 } from '../../src/index.js';
+import {
+  DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
+  DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
+  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
+  runCompletionLoop,
+  type TurnLoopTextResponseClassification,
+} from '../../src/completion-loop.js';
 import { resolveToolsAsync } from '../../src/runtime.js';
+import {
+  DEFAULT_TOOL_VALIDATION_RECOVERY_INSTRUCTION,
+  parseToolValidationFailureArtifact,
+} from '../../src/tool-validation.js';
+import type { ToolValidationFailureArtifact } from '../../src/types.js';
 import {
   createShowcaseWorkspace,
   toToolMessageContent,

@@ -9,6 +9,7 @@
  * - Supports dry-run mode for configuration and tool-surface validation.
  *
  * Recent changes:
+ * - 2026-05-27: Moved lower-level loop imports off the narrowed root entrypoint.
  * - 2026-05-14: Updated built-in selections for the filesystem tool surface.
  */
 
@@ -19,10 +20,10 @@ import { config as loadDotEnv } from 'dotenv';
 import {
   createRuntime,
   generate,
-  runCompletionLoop,
   type LLMChatMessage,
   type LLMResponse,
 } from '../../src/index.js';
+import { runCompletionLoop } from '../../src/completion-loop.js';
 import { resolveToolsAsync } from '../../src/runtime.js';
 import {
   getGeminiE2EEnvHelp,

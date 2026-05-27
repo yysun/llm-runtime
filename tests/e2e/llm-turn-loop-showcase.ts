@@ -2,19 +2,20 @@
  * LLM Package Turn Loop Real Showcase Runner
  *
  * Purpose:
- * - Run a real end-to-end terminal showcase for the generic `runCompletionLoop(...)` API in `llm-runtime`.
+ * - Run a real end-to-end terminal regression for the internal `runCompletionLoop(...)` API.
  *
  * Key features:
  * - Uses a real LLM provider selected from env vars loaded from the repo `.env`.
- * - Exercises `runCompletionLoop(...)` across built-ins, MCP tool use, and streaming callbacks.
+ * - Exercises the lower-level loop across built-ins, MCP tool use, and streaming callbacks.
  * - Prints a terminal-friendly walkthrough with assertions for each scenario.
  *
  * Implementation notes:
- * - The runner uses the package turn loop directly instead of managing its own local loop.
+ * - This is an internal regression runner. Public examples should use `runtime.complete(...)` or `runtime.streamComplete(...)`.
  * - A temporary workspace provides deterministic files and skills without touching the repo.
  * - `--dry-run` validates setup without making real provider calls.
  *
  * Recent changes:
+ * - 2026-05-27: Moved lower-level loop imports off the narrowed root entrypoint.
  * - 2026-03-29: Added the real terminal showcase runner for `runCompletionLoop(...)`.
  * - 2026-05-14: Updated showcase built-in selections for the filesystem tool surface.
  */
@@ -27,12 +28,12 @@ import { config as loadDotEnv } from 'dotenv';
 import {
   createRuntime,
   generate,
-  runCompletionLoop,
   type LLMChatMessage,
   type LLMEnvironment,
   type LLMResponse,
   type LLMStreamChunk,
 } from '../../src/index.js';
+import { runCompletionLoop } from '../../src/completion-loop.js';
 import { resolveToolsAsync, stream } from '../../src/runtime.js';
 import {
   getShowcaseEnvHelp,
