@@ -1417,6 +1417,80 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('keeps retrying reasoning-only stream turns until the model produces a visible result', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const finalAnswerCall = {
+      id: 'reasoning-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"done"}',
+      },
+    };
+
+    mockStreamOpenAIResponse
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({ reasoningContent: 'thinking one' });
+        return {
+          type: 'text',
+          content: '',
+          assistantMessage: { role: 'assistant', content: '' },
+        };
+      })
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({ reasoningContent: 'thinking two' });
+        return {
+          type: 'text',
+          content: '',
+          assistantMessage: { role: 'assistant', content: '' },
+        };
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Think, then finish.' }],
+      maxIterations: 4,
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      { type: 'reasoning_delta', delta: 'thinking one', iteration: 1 },
+      { type: 'reasoning_delta', delta: 'thinking two', iteration: 2 },
+      expect.objectContaining({
+        type: 'completed',
+        iteration: 3,
+        result: expect.objectContaining({ status: 'completed', output: 'done' }),
+      }),
+    ]));
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
   it('keeps streamComplete retrying plain assistant narration until maxIterations is reached', async () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();

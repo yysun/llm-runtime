@@ -36,6 +36,7 @@ import {
 } from './builtins.js';
 import {
   complete as runCompletionLoopComplete,
+  DEFAULT_TURN_LOOP_MAX_ITERATIONS,
   type RunCompletionLoopResult,
 } from './completion-loop.js';
 import {
@@ -651,7 +652,7 @@ async function runRuntimeCompletion(
     maxIterations: request.maxIterations,
     maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
     maxWallTimeMs: request.maxWallTimeMs,
-    emptyTextRetryLimit: request.emptyTextRetryLimit ?? 1,
+    emptyTextRetryLimit: request.emptyTextRetryLimit ?? DEFAULT_TURN_LOOP_MAX_ITERATIONS,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
