@@ -340,11 +340,41 @@ function createRuntimeFailureMessage(reason: string): string {
   }
 }
 
+function createRepeatedToolCallDiagnosticOutput(result: {
+  stop: {
+    repeatedToolCall?: {
+      consecutiveSameBatchCount: number;
+      maxConsecutiveSameBatches: number;
+      toolNames: string[];
+    };
+  };
+}): string {
+  const repeated = result.stop.repeatedToolCall;
+  const toolList = repeated?.toolNames.length
+    ? Array.from(new Set(repeated.toolNames)).join(', ')
+    : 'unknown tool';
+  const repeatCount = repeated
+    ? `${repeated.consecutiveSameBatchCount} consecutive identical tool-call batches`
+    : 'repeated identical tool-call batches';
+  const limit = repeated
+    ? `limit ${repeated.maxConsecutiveSameBatches}`
+    : 'the configured limit';
+
+  return `I could not complete the request because the model kept repeating the same tool call instead of using the previous tool result. Repeated tool: ${toolList}. Stopped after ${repeatCount}; ${limit}.`;
+}
+
 function adaptRuntimeCompleteResult(result: {
   state: RuntimeCompletionState;
   reason: string;
   response: LLMResponse | null;
-  stop: { maxIterations: number };
+  stop: {
+    maxIterations: number;
+    repeatedToolCall?: {
+      consecutiveSameBatchCount: number;
+      maxConsecutiveSameBatches: number;
+      toolNames: string[];
+    };
+  };
 }): LLMRuntimeCompleteResult {
   if (result.reason === 'tool_calls_response' && result.state.toolCalls?.length) {
     return {
@@ -369,6 +399,22 @@ function adaptRuntimeCompleteResult(result: {
       status: 'max_iterations',
       messages: result.state.messages,
       error: result.state.error ?? `Reached maxIterations=${result.stop.maxIterations} before completion.`,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
+  if (result.reason === 'repeated_tool_call_stopped') {
+    const output = createRepeatedToolCallDiagnosticOutput(result);
+    return {
+      status: 'completed',
+      messages: [
+        ...result.state.messages,
+        {
+          role: 'assistant',
+          content: output,
+        },
+      ],
+      output,
       raw: result.state.raw ?? result.response ?? undefined,
     };
   }
@@ -452,6 +498,7 @@ async function runRuntimeCompletion(
     maxIterations: request.maxIterations,
     maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
     maxWallTimeMs: request.maxWallTimeMs,
+    repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',
     rejectedTextRetryLimit: request.rejectedTextRetryLimit,
     abortSignal: request.context?.abortSignal,

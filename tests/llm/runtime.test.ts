@@ -500,6 +500,71 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('returns final diagnostic text when runtime.complete stops repeated tool calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'lookup-repeat-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+    const executeLookup = vi.fn(async () => ({ token: 'project-token' }));
+
+    mockGenerateOpenAIResponse.mockImplementation(async () => ({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [lookupToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [lookupToolCall],
+      },
+    }));
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: executeLookup,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toContain('kept repeating the same tool call');
+    expect(result.output).toContain('project_lookup');
+    expect(result.messages.at(-1)).toEqual(expect.objectContaining({
+      role: 'assistant',
+      content: result.output,
+    }));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    expect(executeLookup).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
   it('forwards maxWallTimeMs through runtime.complete', async () => {
     mockGenerateOpenAIResponse.mockReset();
 

@@ -360,10 +360,14 @@ export interface LLMEnvironmentOptions {
 
 export type LLMRuntimeGenerateOptions = Omit<LLMGenerateOptions, 'environment'>;
 export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_result';
+export interface LLMRuntimeRepeatedToolCallGuard {
+  maxConsecutiveSameBatches?: number;
+}
 export interface LLMRuntimeCompleteOptions extends Omit<LLMPerCallProviderOptions, 'environment'> {
   maxIterations?: number;
   maxConsecutiveToolTurns?: number;
   maxWallTimeMs?: number;
+  repeatedToolCallGuard?: false | LLMRuntimeRepeatedToolCallGuard;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;
 }
