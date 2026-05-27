@@ -611,6 +611,182 @@ function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type StreamToolCallDeltaState = {
+  id?: string;
+  name?: string;
+  argumentsText: string;
+  emittedFinalAnswer: string;
+};
+
+function getStreamToolCallStateKey(iteration: number, index: number): string {
+  return `${iteration}:${index}`;
+}
+
+function readJsonStringToken(source: string, start: number): { value: string; end: number; closed: boolean } {
+  let value = '';
+  let index = start + 1;
+
+  while (index < source.length) {
+    const char = source[index];
+
+    if (char === '"') {
+      return { value, end: index + 1, closed: true };
+    }
+
+    if (char !== '\\') {
+      value += char;
+      index += 1;
+      continue;
+    }
+
+    if (index + 1 >= source.length) {
+      return { value, end: index, closed: false };
+    }
+
+    const escaped = source[index + 1];
+    if (escaped === 'u') {
+      const sequence = source.slice(index, index + 6);
+      if (!/^\\u[0-9a-fA-F]{4}$/.test(sequence)) {
+        return { value, end: index, closed: false };
+      }
+      value += String.fromCharCode(Number.parseInt(sequence.slice(2), 16));
+      index += 6;
+      continue;
+    }
+
+    const simpleEscapes: Record<string, string> = {
+      '"': '"',
+      '\\': '\\',
+      '/': '/',
+      b: '\b',
+      f: '\f',
+      n: '\n',
+      r: '\r',
+      t: '\t',
+    };
+    const decoded = simpleEscapes[escaped];
+    if (decoded === undefined) {
+      return { value, end: index, closed: false };
+    }
+
+    value += decoded;
+    index += 2;
+  }
+
+  return { value, end: source.length, closed: false };
+}
+
+function skipJsonWhitespace(source: string, start: number): number {
+  let index = start;
+  while (index < source.length && /\s/.test(source[index])) {
+    index += 1;
+  }
+  return index;
+}
+
+function findJsonStringPropertyValueStart(source: string, propertyName: string): number | null {
+  let index = 0;
+
+  while (index < source.length) {
+    if (source[index] !== '"') {
+      index += 1;
+      continue;
+    }
+
+    const token = readJsonStringToken(source, index);
+    if (!token.closed) {
+      return null;
+    }
+
+    const afterKey = skipJsonWhitespace(source, token.end);
+    if (token.value === propertyName && source[afterKey] === ':') {
+      const valueStart = skipJsonWhitespace(source, afterKey + 1);
+      return source[valueStart] === '"' ? valueStart + 1 : null;
+    }
+
+    index = token.end;
+  }
+
+  return null;
+}
+
+function decodeJsonStringPrefix(source: string, start: number): string {
+  let value = '';
+  let index = start;
+
+  while (index < source.length) {
+    const char = source[index];
+
+    if (char === '"') {
+      return value;
+    }
+
+    if (char !== '\\') {
+      value += char;
+      index += 1;
+      continue;
+    }
+
+    if (index + 1 >= source.length) {
+      return value;
+    }
+
+    const escaped = source[index + 1];
+    if (escaped === 'u') {
+      const sequence = source.slice(index, index + 6);
+      if (!/^\\u[0-9a-fA-F]{4}$/.test(sequence)) {
+        return value;
+      }
+
+      const codeUnit = Number.parseInt(sequence.slice(2), 16);
+      if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
+        const nextSequence = source.slice(index + 6, index + 12);
+        if (!/^\\u[0-9a-fA-F]{4}$/.test(nextSequence)) {
+          return value;
+        }
+        const lowCodeUnit = Number.parseInt(nextSequence.slice(2), 16);
+        if (lowCodeUnit < 0xDC00 || lowCodeUnit > 0xDFFF) {
+          return value;
+        }
+        value += String.fromCodePoint(
+          ((codeUnit - 0xD800) * 0x400) + (lowCodeUnit - 0xDC00) + 0x10000,
+        );
+        index += 12;
+        continue;
+      }
+
+      value += String.fromCharCode(codeUnit);
+      index += 6;
+      continue;
+    }
+
+    const simpleEscapes: Record<string, string> = {
+      '"': '"',
+      '\\': '\\',
+      '/': '/',
+      b: '\b',
+      f: '\f',
+      n: '\n',
+      r: '\r',
+      t: '\t',
+    };
+    const decoded = simpleEscapes[escaped];
+    if (decoded === undefined) {
+      return value;
+    }
+
+    value += decoded;
+    index += 2;
+  }
+
+  return value;
+}
+
+function extractFinalAnswerPrefix(argumentsText: string): string {
+  const valueStart = findJsonStringPropertyValueStart(argumentsText, 'answer');
+  return valueStart === null ? '' : decodeJsonStringPrefix(argumentsText, valueStart);
+}
+
 const DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION = 'The last response claimed completion before the required write or external action happened. Continue now by calling the necessary tool. If the required tool is unavailable or blocked, use blocked or explain the missing capability.';
 
 async function runRuntimeCompletion(
@@ -622,6 +798,7 @@ async function runRuntimeCompletion(
   } = {},
 ): Promise<LLMRuntimeCompleteResult> {
   let activeIteration = 0;
+  const streamToolCallStates = new Map<string, StreamToolCallDeltaState>();
   const mutatingToolRequired = requestExposesMutatingTools(request);
   const requestToolDefinitions = createRequestToolDefinitionMap(request);
   const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
@@ -645,6 +822,40 @@ async function runRuntimeCompletion(
               delta: chunk.content,
               iteration: activeIteration,
             });
+          }
+          if (chunk.toolCallDelta?.argumentsDelta !== undefined) {
+            const stateKey = getStreamToolCallStateKey(activeIteration, chunk.toolCallDelta.index);
+            const state = streamToolCallStates.get(stateKey) ?? {
+              argumentsText: '',
+              emittedFinalAnswer: '',
+            };
+
+            state.argumentsText += chunk.toolCallDelta.argumentsDelta;
+            state.id = chunk.toolCallDelta.id ?? state.id;
+            state.name = chunk.toolCallDelta.name ?? state.name;
+            streamToolCallStates.set(stateKey, state);
+
+            void emitEvent?.({
+              type: 'tool_call_delta',
+              ...(state.id ? { toolCallId: state.id } : {}),
+              ...(state.name ? { toolName: state.name } : {}),
+              argumentsDelta: chunk.toolCallDelta.argumentsDelta,
+              index: chunk.toolCallDelta.index,
+              iteration: activeIteration,
+            });
+
+            if (state.name === 'final_answer') {
+              const answerPrefix = extractFinalAnswerPrefix(state.argumentsText);
+              const delta = answerPrefix.slice(state.emittedFinalAnswer.length);
+              if (delta) {
+                state.emittedFinalAnswer = answerPrefix;
+                void emitEvent?.({
+                  type: 'final_answer_delta',
+                  delta,
+                  iteration: activeIteration,
+                });
+              }
+            }
           }
         }
         : undefined,

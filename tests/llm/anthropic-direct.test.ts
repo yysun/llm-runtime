@@ -335,17 +335,36 @@ describe('llm-runtime anthropic-direct', () => {
   });
 
   it('preserves Anthropic stop metadata on streamed tool-use responses', async () => {
+    const chunks: Array<{ toolCallDelta?: unknown }> = [];
+
     const response = await streamAnthropicResponse({
       client: {
         messages: {
           create: async function* () {
             yield {
               type: 'content_block_start',
+              index: 0,
               content_block: {
                 id: 'anthropic-tool-2',
-                input: { query: 'hello' },
+                input: {},
                 name: 'lookup',
                 type: 'tool_use',
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: '{"query":"hel',
+              },
+            };
+            yield {
+              type: 'content_block_delta',
+              index: 0,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: 'lo"}',
               },
             };
             yield {
@@ -371,9 +390,30 @@ describe('llm-runtime anthropic-direct', () => {
           parameters: { type: 'object', properties: { query: { type: 'string' } } },
         },
       },
-      onChunk: () => undefined,
+      onChunk: (chunk) => {
+        chunks.push(chunk);
+      },
     });
 
+    expect(chunks).toEqual([
+      {
+        toolCallDelta: {
+          id: 'anthropic-tool-2',
+          index: 0,
+          name: 'lookup',
+          argumentsDelta: '{"query":"hel',
+        },
+      },
+      {
+        toolCallDelta: {
+          id: 'anthropic-tool-2',
+          index: 0,
+          name: 'lookup',
+          argumentsDelta: 'lo"}',
+        },
+      },
+    ]);
+    expect(response.tool_calls?.[0]?.function.arguments).toBe('{"query":"hello"}');
     expect(response.stopKind).toBe('tool_call');
     expect(response.providerStopReason).toBe('tool_use');
   });

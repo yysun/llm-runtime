@@ -573,12 +573,22 @@ export async function streamGoogleResponse(request: GoogleProviderStreamRequest)
           }
 
           if (part.functionCall) {
+            const argumentsJson = JSON.stringify(part.functionCall.args || {});
+            const id = generateId();
             functionCalls.push({
-              id: generateId(),
+              id,
               type: 'function',
               function: {
                 name: resolvedGoogleTools.toolNameTranslator.toRuntimeName(part.functionCall.name),
-                arguments: JSON.stringify(part.functionCall.args || {}),
+                arguments: argumentsJson,
+              },
+            });
+            warningChunkEmitter.onChunk({
+              toolCallDelta: {
+                id,
+                index: functionCalls.length - 1,
+                name: resolvedGoogleTools.toolNameTranslator.toRuntimeName(part.functionCall.name),
+                argumentsDelta: argumentsJson,
               },
             });
           }

@@ -146,6 +146,12 @@ export interface LLMResponse {
 export interface LLMStreamChunk {
   content?: string;
   reasoningContent?: string;
+  toolCallDelta?: {
+    id?: string;
+    index: number;
+    name?: string;
+    argumentsDelta?: string;
+  };
   warnings?: LLMWarning[];
 }
 

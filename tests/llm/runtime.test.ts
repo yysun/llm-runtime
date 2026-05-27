@@ -1417,6 +1417,117 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('emits tool-call and final-answer deltas from runtime.streamComplete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const finalAnswerCall = {
+      id: 'stream-final-args-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Hello\\nworld"}',
+      },
+    };
+
+    mockStreamOpenAIResponse.mockImplementation(async (request: any) => {
+      request.onChunk({
+        toolCallDelta: {
+          id: 'stream-final-args-1',
+          index: 0,
+          name: 'final_answer',
+          argumentsDelta: '{"answer":"Hel',
+        },
+      });
+      request.onChunk({
+        toolCallDelta: {
+          id: 'stream-final-args-1',
+          index: 0,
+          name: 'final_answer',
+          argumentsDelta: 'lo\\nwo',
+        },
+      });
+      request.onChunk({
+        toolCallDelta: {
+          id: 'stream-final-args-1',
+          index: 0,
+          name: 'final_answer',
+          argumentsDelta: 'rld"}',
+        },
+      });
+
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      };
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Say hello.' }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: 'model_start', iteration: 1 },
+      {
+        type: 'tool_call_delta',
+        toolCallId: 'stream-final-args-1',
+        toolName: 'final_answer',
+        argumentsDelta: '{"answer":"Hel',
+        index: 0,
+        iteration: 1,
+      },
+      { type: 'final_answer_delta', delta: 'Hel', iteration: 1 },
+      {
+        type: 'tool_call_delta',
+        toolCallId: 'stream-final-args-1',
+        toolName: 'final_answer',
+        argumentsDelta: 'lo\\nwo',
+        index: 0,
+        iteration: 1,
+      },
+      { type: 'final_answer_delta', delta: 'lo\nwo', iteration: 1 },
+      {
+        type: 'tool_call_delta',
+        toolCallId: 'stream-final-args-1',
+        toolName: 'final_answer',
+        argumentsDelta: 'rld"}',
+        index: 0,
+        iteration: 1,
+      },
+      { type: 'final_answer_delta', delta: 'rld', iteration: 1 },
+      expect.objectContaining({ type: 'assistant_message', iteration: 1 }),
+      expect.objectContaining({
+        type: 'completed',
+        iteration: 1,
+        result: expect.objectContaining({ status: 'completed', output: 'Hello\nworld' }),
+      }),
+    ]);
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
   it('keeps retrying reasoning-only stream turns until the model produces a visible result', async () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();

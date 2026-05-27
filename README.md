@@ -199,11 +199,13 @@ if (result.status === 'tool_calls') {
 }
 ```
 
-`streamComplete(...)` runs the same completion path and yields lifecycle events. It emits model/tool events plus provider text and reasoning deltas when the provider adapter supplies them:
+`streamComplete(...)` runs the same completion path and yields lifecycle events. It emits model/tool events plus provider text, reasoning, tool-call argument, and `final_answer` answer deltas when the provider adapter supplies them:
 
 - `model_start`
 - `text_delta`
 - `reasoning_delta`
+- `tool_call_delta`
+- `final_answer_delta`
 - `assistant_message`
 - `tool_start`
 - `tool_result`
@@ -222,7 +224,7 @@ for await (const event of runtime.streamComplete({
   ],
   builtIns: 'read-only',
 })) {
-  if (event.type === 'text_delta') {
+  if (event.type === 'text_delta' || event.type === 'final_answer_delta') {
     process.stdout.write(event.delta);
   }
 

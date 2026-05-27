@@ -382,7 +382,7 @@ describe('llm-runtime openai-direct', () => {
       },
     } as any;
 
-    const chunks: Array<{ content?: string; reasoningContent?: string }> = [];
+    const chunks: Array<{ content?: string; reasoningContent?: string; toolCallDelta?: unknown }> = [];
     const response = await streamOpenAIResponse({
       client: fakeClient,
       provider: 'openai',
@@ -413,6 +413,22 @@ describe('llm-runtime openai-direct', () => {
     expect(chunks).toEqual([
       { reasoningContent: 'think-1' },
       { content: 'hello ' },
+      {
+        toolCallDelta: {
+          id: 'tool-stream-1',
+          index: 0,
+          name: 'read_file',
+          argumentsDelta: '{"filePath":"README',
+        },
+      },
+      {
+        toolCallDelta: {
+          id: 'tool-stream-1',
+          index: 0,
+          name: 'read_file',
+          argumentsDelta: '.md"}',
+        },
+      },
     ]);
     expect(response).toEqual({
       type: 'tool_calls',

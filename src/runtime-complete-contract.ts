@@ -42,6 +42,15 @@ export type RuntimeStreamCompleteEvent =
   | { type: 'assistant_message'; message: LLMChatMessage; iteration: number }
   | { type: 'text_delta'; delta: string; iteration: number }
   | { type: 'reasoning_delta'; delta: string; iteration: number }
+  | {
+    type: 'tool_call_delta';
+    toolCallId?: string;
+    toolName?: string;
+    argumentsDelta: string;
+    index: number;
+    iteration: number;
+  }
+  | { type: 'final_answer_delta'; delta: string; iteration: number }
   | { type: 'tool_start'; toolCall: LLMToolCall; args: unknown; iteration: number }
   | { type: 'tool_result'; toolCall: LLMToolCall; result: unknown; iteration: number }
   | { type: 'tool_error'; toolCall: LLMToolCall; error: string; iteration: number }

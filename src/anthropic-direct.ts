@@ -161,8 +161,12 @@ function isAnthropicServerToolBlock(
   return block.type === 'server_tool_use' || block.type === 'web_search_tool_result';
 }
 
+type AnthropicToolUseForMapping = Anthropic.Messages.ToolUseBlock & {
+  inputJson?: string;
+};
+
 function mapAnthropicToolUses(
-  toolUses: Anthropic.Messages.ToolUseBlock[],
+  toolUses: AnthropicToolUseForMapping[],
   toolNameTranslator: ProviderToolNameTranslator,
 ) {
   return toolUses
@@ -172,7 +176,7 @@ function mapAnthropicToolUses(
       type: 'function' as const,
       function: {
         name: toolNameTranslator.toRuntimeName(toolUse.name),
-        arguments: JSON.stringify(toolUse.input),
+        arguments: toolUse.inputJson ?? JSON.stringify(toolUse.input),
       },
     }));
 }
@@ -235,7 +239,8 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
   let fullResponse = '';
   let stopReason: string | null | undefined;
   const usage: { input_tokens?: number | null; output_tokens?: number | null } = {};
-  const toolUses: Anthropic.Messages.ToolUseBlock[] = [];
+  const toolUses: AnthropicToolUseForMapping[] = [];
+  const toolUsesByIndex = new Map<number, AnthropicToolUseForMapping>();
 
   try {
     for await (const chunk of stream) {
@@ -257,7 +262,26 @@ export async function streamAnthropicResponse(request: AnthropicProviderStreamRe
         fullResponse += chunk.delta.text;
         request.onChunk({ content: chunk.delta.text });
       } else if (chunk.type === 'content_block_start' && isAnthropicClientToolUseBlock(chunk.content_block)) {
-        toolUses.push(chunk.content_block);
+        const toolUse = chunk.content_block as AnthropicToolUseForMapping;
+        toolUses.push(toolUse);
+        toolUsesByIndex.set(chunk.index, toolUse);
+      } else if (
+        chunk.type === 'content_block_delta'
+        && (chunk.delta as { type?: string }).type === 'input_json_delta'
+      ) {
+        const toolUse = toolUsesByIndex.get(chunk.index);
+        const partialJson = (chunk.delta as { partial_json?: string }).partial_json;
+        if (toolUse && partialJson) {
+          toolUse.inputJson = `${toolUse.inputJson ?? ''}${partialJson}`;
+          request.onChunk({
+            toolCallDelta: {
+              id: toolUse.id,
+              index: chunk.index,
+              name: toolNameTranslator.toRuntimeName(toolUse.name),
+              argumentsDelta: partialJson,
+            },
+          });
+        }
       } else if (chunk.type === 'content_block_start' && isAnthropicServerToolBlock(chunk.content_block)) {
         // Anthropic server tools are handled provider-side and should not surface as host tool calls.
       }

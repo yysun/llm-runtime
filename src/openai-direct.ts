@@ -607,6 +607,16 @@ export async function streamOpenAIResponse(request: OpenAIProviderStreamRequest)
 
           if (toolCall.function?.arguments) {
             functionCalls[toolCall.index].function.arguments += toolCall.function.arguments;
+            warningChunkEmitter.onChunk({
+              toolCallDelta: {
+                id: functionCalls[toolCall.index].id,
+                index: toolCall.index,
+                ...(functionCalls[toolCall.index].function.name
+                  ? { name: toolNameTranslator.toRuntimeName(functionCalls[toolCall.index].function.name) }
+                  : {}),
+                argumentsDelta: toolCall.function.arguments,
+              },
+            });
           }
         }
       }
