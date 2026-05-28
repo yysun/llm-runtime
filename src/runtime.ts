@@ -848,7 +848,7 @@ async function runRuntimeCompletion(
               if (delta) {
                 state.emittedFinalAnswer = answerPrefix;
                 void emitEvent?.({
-                  type: 'final_answer_delta',
+                  type: 'answer_delta',
                   delta,
                   iteration: activeIteration,
                 });

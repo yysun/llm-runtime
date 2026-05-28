@@ -50,7 +50,7 @@ export type RuntimeStreamCompleteEvent =
     index: number;
     iteration: number;
   }
-  | { type: 'final_answer_delta'; delta: string; iteration: number }
+  | { type: 'answer_delta'; delta: string; iteration: number }
   | { type: 'tool_start'; toolCall: LLMToolCall; args: unknown; iteration: number }
   | { type: 'tool_result'; toolCall: LLMToolCall; result: unknown; iteration: number }
   | { type: 'tool_error'; toolCall: LLMToolCall; error: string; iteration: number }

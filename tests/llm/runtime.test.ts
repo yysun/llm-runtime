@@ -1591,7 +1591,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('emits tool-call and final-answer deltas from runtime.streamComplete', async () => {
+  it('emits tool-call and answer deltas from runtime.streamComplete', async () => {
     mockGenerateOpenAIResponse.mockReset();
     mockStreamOpenAIResponse.mockReset();
 
@@ -1670,7 +1670,7 @@ describe('llm-runtime runtime', () => {
         index: 0,
         iteration: 1,
       },
-      { type: 'final_answer_delta', delta: 'Hel', iteration: 1 },
+      { type: 'answer_delta', delta: 'Hel', iteration: 1 },
       {
         type: 'tool_call_delta',
         toolCallId: 'stream-final-args-1',
@@ -1679,7 +1679,7 @@ describe('llm-runtime runtime', () => {
         index: 0,
         iteration: 1,
       },
-      { type: 'final_answer_delta', delta: 'lo\nwo', iteration: 1 },
+      { type: 'answer_delta', delta: 'lo\nwo', iteration: 1 },
       {
         type: 'tool_call_delta',
         toolCallId: 'stream-final-args-1',
@@ -1688,7 +1688,7 @@ describe('llm-runtime runtime', () => {
         index: 0,
         iteration: 1,
       },
-      { type: 'final_answer_delta', delta: 'rld', iteration: 1 },
+      { type: 'answer_delta', delta: 'rld', iteration: 1 },
       expect.objectContaining({ type: 'assistant_message', iteration: 1 }),
       expect.objectContaining({
         type: 'completed',
