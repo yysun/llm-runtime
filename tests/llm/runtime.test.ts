@@ -15,6 +15,8 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-28: Updated repeated-tool guard coverage to expect failed runtime results.
+ * - 2026-05-28: Added host-only loop coverage for `builtIns: false` and host mutating-tool evidence isolation.
  * - 2026-05-27: Removed runtime `agentControlMode`/`terminationMode` opt-outs; tests rely on the new control-tool termination default.
  * - 2026-05-27: Added streaming delta and control-tool termination coverage.
  * - 2026-05-27: Added runtime completion coverage for empty-text recovery after loading a skill.
@@ -462,28 +464,56 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('forwards maxConsecutiveToolTurns through runtime.complete', async () => {
+  it('runs the loop with builtIns disabled and host tools only', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const lookupToolCall = {
-      id: 'lookup-loop-1',
+      id: 'host-only-lookup-1',
       type: 'function' as const,
       function: {
         name: 'project_lookup',
         arguments: '{"query":"token"}',
       },
     };
-
-    mockGenerateOpenAIResponse.mockImplementation(async () => ({
-      type: 'tool_calls',
-      content: '',
-      tool_calls: [lookupToolCall],
-      assistantMessage: {
-        role: 'assistant',
-        content: '',
-        tool_calls: [lookupToolCall],
+    const finalAnswerCall = {
+      id: 'host-only-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"TOKEN=host-only-token"}',
       },
-    }));
+    };
+    const executeLookup = vi.fn(async () => ({ token: 'host-only-token' }));
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      const hasLookupResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'host-only-lookup-1'
+      ));
+
+      if (!hasLookupResult) {
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [lookupToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [lookupToolCall],
+          },
+        };
+      }
+
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      };
+    });
 
     const runtime = createRuntime({
       providers: {
@@ -496,31 +526,47 @@ describe('llm-runtime runtime', () => {
     const result = await runtime.complete({
       provider: 'openai',
       model: 'gpt-5',
-      messages: [{ role: 'user', content: 'Keep looking until done.' }],
-      maxConsecutiveToolTurns: 1,
-      extraTools: [{
-        name: 'project_lookup',
-        description: 'Lookup the project token.',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string' },
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      builtIns: false,
+      tools: {
+        project_lookup: {
+          name: 'project_lookup',
+          description: 'Lookup the project token.',
+          evidenceKind: 'read',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string' },
+            },
+            required: ['query'],
+            additionalProperties: false,
           },
-          required: ['query'],
-          additionalProperties: false,
+          execute: executeLookup,
         },
-        execute: async () => ({ token: 'project-token' }),
-      }],
+      },
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.error).toBe('Completion loop exceeded the maximum number of consecutive tool turns.');
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'TOKEN=host-only-token',
+    });
+    expect(executeLookup).toHaveBeenCalledTimes(1);
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    const firstProviderRequest = mockGenerateOpenAIResponse.mock.calls[0]?.[0] as any;
+    expect(firstProviderRequest.tools).toEqual(expect.objectContaining({
+      project_lookup: expect.objectContaining({ name: 'project_lookup' }),
+      final_answer: expect.objectContaining({ name: 'final_answer' }),
+      need_user_input: expect.objectContaining({ name: 'need_user_input' }),
+      blocked: expect.objectContaining({ name: 'blocked' }),
+    }));
+    for (const builtInToolName of BUILT_IN_TOOL_NAMES) {
+      expect(firstProviderRequest.tools).not.toHaveProperty(builtInToolName);
+    }
 
     await runtime.dispose();
   });
 
-  it('returns final diagnostic text when runtime.complete stops repeated tool calls', async () => {
+  it('returns a failed guard result when runtime.complete stops repeated tool calls', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const lookupToolCall = {
@@ -572,52 +618,15 @@ describe('llm-runtime runtime', () => {
       }],
     });
 
-    expect(result.status).toBe('completed');
-    expect(result.output).toContain('kept repeating the same tool call');
-    expect(result.output).toContain('project_lookup');
+    expect(result.status).toBe('failed');
+    expect(result.error).toContain('kept repeating the same tool call');
+    expect(result.error).toContain('project_lookup');
     expect(result.messages.at(-1)).toEqual(expect.objectContaining({
       role: 'assistant',
-      content: result.output,
+      content: result.error,
     }));
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
     expect(executeLookup).toHaveBeenCalledTimes(1);
-
-    await runtime.dispose();
-  });
-
-  it('forwards maxWallTimeMs through runtime.complete', async () => {
-    mockGenerateOpenAIResponse.mockReset();
-
-    mockGenerateOpenAIResponse.mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      return {
-        type: 'text',
-        content: 'done',
-        assistantMessage: {
-          role: 'assistant',
-          content: 'done',
-        },
-      };
-    });
-
-    const runtime = createRuntime({
-      providers: {
-        openai: {
-          apiKey: 'runtime-openai-key',
-        },
-      },
-    });
-
-    const result = await runtime.complete({
-      provider: 'openai',
-      model: 'gpt-5',
-      messages: [{ role: 'user', content: 'Finish quickly.' }],
-      maxWallTimeMs: 10,
-    });
-
-    expect(result.status).toBe('failed');
-    expect(result.error).toBe('Completion loop timed out before producing a final answer.');
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
   });
@@ -1820,6 +1829,76 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('emits a failed stream result when streamComplete stops repeated tool calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const lookupToolCall = {
+      id: 'stream-lookup-repeat-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+    const executeLookup = vi.fn(async () => ({ token: 'stream-token' }));
+
+    mockStreamOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [lookupToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [lookupToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find the token.' }],
+      repeatedToolCallGuard: { maxConsecutiveSameBatches: 1 },
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Lookup the project token.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: executeLookup,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      type: 'failed',
+      result: expect.objectContaining({
+        status: 'failed',
+        error: expect.stringContaining('kept repeating the same tool call'),
+      }),
+    }));
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+    expect(executeLookup).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
   it('continues past non-English plain text in control-tool termination mode', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
@@ -2215,6 +2294,146 @@ describe('llm-runtime runtime', () => {
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
 
     await runtime.dispose();
+  });
+
+  it('does not let a mutating built-in result satisfy a host mutating tool requirement', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      mockGenerateOpenAIResponse.mockReset();
+
+      const builtInWriteToolCall = {
+        id: 'builtin-write-before-host-1',
+        type: 'function' as const,
+        function: {
+          name: 'write_file',
+          arguments: JSON.stringify({
+            filePath: 'notes/builtin.txt',
+            content: 'built-in write happened',
+          }),
+        },
+      };
+      const prematureFinalToolCall = {
+        id: 'control-final-after-builtin-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: '{"answer":"done after built-in write"}',
+        },
+      };
+      const hostWriteToolCall = {
+        id: 'host-write-after-recovery-1',
+        type: 'function' as const,
+        function: {
+          name: 'write_world_file',
+          arguments: '{"path":".agent-world/world.json"}',
+        },
+      };
+      const finalToolCall = {
+        id: 'control-final-after-host-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: '{"answer":"done after host write"}',
+        },
+      };
+      const executeHostWrite = vi.fn(async () => ({ ok: true }));
+
+      mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+        const hasBuiltInWriteResult = request.messages.some((message: any) => (
+          message.role === 'tool' && message.tool_call_id === 'builtin-write-before-host-1'
+        ));
+        const hasPrematureFinalAttempt = request.messages.some((message: any) => (
+          message.role === 'assistant'
+          && message.tool_calls?.some((toolCall: any) => toolCall.id === 'control-final-after-builtin-1')
+        ));
+        const hasHostWriteResult = request.messages.some((message: any) => (
+          message.role === 'tool' && message.tool_call_id === 'host-write-after-recovery-1'
+        ));
+
+        if (!hasBuiltInWriteResult) {
+          return {
+            type: 'tool_calls',
+            content: '',
+            tool_calls: [builtInWriteToolCall],
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [builtInWriteToolCall],
+            },
+          };
+        }
+
+        if (!hasPrematureFinalAttempt) {
+          return {
+            type: 'tool_calls',
+            content: '',
+            tool_calls: [prematureFinalToolCall],
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [prematureFinalToolCall],
+            },
+          };
+        }
+
+        if (!hasHostWriteResult) {
+          return {
+            type: 'tool_calls',
+            content: '',
+            tool_calls: [hostWriteToolCall],
+            assistantMessage: {
+              role: 'assistant',
+              content: '',
+              tool_calls: [hostWriteToolCall],
+            },
+          };
+        }
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [finalToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [finalToolCall],
+          },
+        };
+      });
+
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        context: { workingDirectory: workspacePath },
+        messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+        builtIns: true,
+        extraTools: [{
+          name: 'write_world_file',
+          description: 'Write world files.',
+          evidenceKind: 'write',
+          parameters: { type: 'object' },
+          execute: executeHostWrite,
+        }],
+      });
+
+      expect(result).toMatchObject({
+        status: 'completed',
+        output: 'done after host write',
+      });
+      expect(await fs.readFile(path.join(workspacePath, 'notes/builtin.txt'), 'utf8'))
+        .toBe('built-in write happened');
+      expect(executeHostWrite).toHaveBeenCalledTimes(1);
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(4);
+
+      await runtime.dispose();
+    });
   });
 
   it('accepts final text after a mutating tool result exists', async () => {

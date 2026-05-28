@@ -4,7 +4,7 @@ type: "index"
 status: "active"
 language: "default"
 last_commit: "a6efd8d1ced45f9fd81cf2006644595a78fd4853"
-updated_at: "2026-05-27"
+updated_at: "2026-05-28"
 ---
 
 ## What is this?
@@ -27,7 +27,7 @@ The core ownership rule is [[environment-vs-per-call]]: stable dependencies can 
 
 ## What happens when I run it?
 
-The root package entrypoint is deliberately small: `generate(...)`, `complete(...)`, `streamComplete(...)`, and `createRuntime(...)`. `generate(...)` performs one provider call and may return text or tool calls. `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add the bounded runtime-owned model/tool loop and terminate through control tools. `streamComplete(...)` can now surface streamed provider text, reasoning, raw tool-call argument deltas, and parsed `final_answer` answer deltas. Lower-level loop machinery still exists internally, but it is no longer root public API. See [[src-runtime]], [[src-completion-loop]], and [[public-types]].
+The root package entrypoint is deliberately small: `generate(...)`, `complete(...)`, `streamComplete(...)`, and `createRuntime(...)`. `generate(...)` performs one provider call and may return text or tool calls. `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add the bounded runtime-owned model/tool loop and terminate through control tools. `streamComplete(...)` can now surface streamed provider text, reasoning, raw tool-call argument deltas, and parsed `final_answer` answer deltas. Lower-level loop machinery still exists internally, but it is no longer root public API. See [[generate-vs-complete]], [[src-runtime]], [[src-completion-loop]], and [[public-types]].
 
 If the model calls `ask_user_input`, default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
 
@@ -39,6 +39,7 @@ The package itself does not own durable storage. It may cache provider stores, M
 
 - [[src-runtime]] is the main API facade.
 - [[src-completion-loop]] is the bounded iterative loop.
+- [[generate-vs-complete]] explains the one-call versus runtime-owned-loop contract.
 - [[src-builtins]] and [[src-builtin-executors]] define and execute reserved package tools.
 - [[src-tool-validation]] turns malformed tool arguments into structured artifacts.
 - [[src-mcp]], [[src-skills]], and [[provider-adapters]] wire external capability surfaces.
@@ -50,12 +51,13 @@ The package itself does not own durable storage. It may cache provider stores, M
 - Do not make `ask_user_input` a runtime wait state again; keep it model-visible and host-handled by default.
 - Do not weaken the trusted working-directory boundary for structured file tools.
 - Do not treat human-input artifacts as action evidence for task completion.
+- Do not make `builtIns` control whether completion can loop; built-ins are only one tool source.
 - Do not make provider-specific tool names leak into the public tool-call surface.
 
-Risk pages: [[shell-command-safeguards]], [[turn-loop-safety-and-lifecycle]], [[approval-and-synthetic-tool-call-messages]], [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
+Risk pages: [[shell-command-safeguards]], [[turn-loop-safety-and-lifecycle]], [[approval-and-synthetic-tool-call-messages]], [[host-owned-ask-user-input]], and [[file-tool-contract-hardening]].
 
 ## Where do I look first?
 
-For a public API question, start at [[public-types]] and [[src-runtime]]. For loop behavior, start at [[src-completion-loop]]. For tool behavior, start at [[src-builtins]], [[src-builtin-executors]], and [[src-tool-validation]]. For recent contract changes, read [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
+For a public API question, start at [[public-types]] and [[src-runtime]]. For `generate(...)` versus `complete(...)`, start at [[generate-vs-complete]]. For loop behavior, start at [[src-completion-loop]]. For tool behavior, start at [[src-builtins]], [[src-builtin-executors]], and [[src-tool-validation]]. For recent contract changes, read [[host-owned-ask-user-input]] and [[file-tool-contract-hardening]].
 
-Coverage note: this wiki reflects the current May 2026 package shape at commit `a6efd8d1ced45f9fd81cf2006644595a78fd4853`, including the narrowed root entrypoint, control-tool runtime completion, host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, default-all built-ins with explicit disable/narrowing, streamed text/reasoning/tool-call/final-answer deltas, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.
+Coverage note: the last full ingest checkpoint is commit `a6efd8d1ced45f9fd81cf2006644595a78fd4853`. Current wiki notes also document the `generate(...)` versus `complete(...)` contract, control-tool runtime completion, host-owned `ask_user_input`, default-all built-ins with explicit disable/narrowing, and the rule that built-ins affect tool availability rather than loop ownership.

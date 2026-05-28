@@ -14,6 +14,7 @@
  * - The host-side recovery logic intentionally lives in this runner to mirror production integration.
  *
  * Recent changes:
+ * - 2026-05-28: Kept host cancellation outside this hardening runner.
  * - 2026-05-27: Moved lower-level loop and validation imports off the narrowed root entrypoint.
  * - 2026-05-14: Updated hardening built-in selections for the filesystem tool surface.
  */
@@ -30,7 +31,6 @@ import {
 import {
   DEFAULT_INTENT_ONLY_NARRATION_RECOVERY_INSTRUCTION,
   DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
-  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
   runCompletionLoop,
   type TurnLoopTextResponseClassification,
 } from '../../src/completion-loop.js';
@@ -79,7 +79,6 @@ type ScriptedResponder = (params: {
 type HardeningScenario = {
   name: string;
   messages: LLMChatMessage[];
-  maxWallTimeMs?: number;
   repeatedToolCallGuard?: false | { maxConsecutiveSameBatches?: number };
   responder: ScriptedResponder;
   assertResult: (result: HardeningScenarioResult) => void;
@@ -139,7 +138,6 @@ async function runScenario(
     } satisfies HardeningState,
     emptyTextRetryLimit: 0,
     rejectedTextRetryLimit: 1,
-    maxWallTimeMs: scenario.maxWallTimeMs,
     repeatedToolCallGuard: scenario.repeatedToolCallGuard,
     buildMessages: async ({ state, transientInstruction }) => {
       if (!transientInstruction) {
@@ -381,33 +379,6 @@ function buildHardeningScenarios(): HardeningScenario[] {
         assert.equal(result.reason, 'text_response');
         assert.deepEqual(result.toolNames, ['read_file']);
         assert.equal(result.finalText, 'RECOVERED_TOKEN=alpha-repo-token');
-      },
-    },
-    {
-      name: 'Timeout after directory creation returns a final diagnostic response',
-      messages: [
-        {
-          role: 'user' as const,
-          content: 'Create agent-world-workflows and then report the result.',
-        },
-      ],
-      maxWallTimeMs: 25,
-      responder: ({ iteration, messages }) => {
-        if (iteration === 1) {
-          return createToolCallResponse('create_directory', { path: 'agent-world-workflows' }, 'hardening-timeout-mkdir-1');
-        }
-
-        assert.equal(iteration, 2);
-        assert.equal(messages.at(-1)?.role, 'tool');
-        assert.match(String(messages.at(-1)?.content ?? ''), /success|created|agent-world-workflows/);
-        return new Promise<LLMResponse>(() => undefined);
-      },
-      assertResult: (result) => {
-        assert.equal(result.turns, 2);
-        assert.equal(result.reason, 'text_response');
-        assert.equal(result.stopReason, 'text_response');
-        assert.deepEqual(result.toolNames, ['create_directory']);
-        assert.equal(result.finalText, DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE);
       },
     },
   ];

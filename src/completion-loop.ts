@@ -15,7 +15,10 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
- * - 2026-05-27: Removed `complete(...)` `rejectedTextRetryLimit` default of 2 in favor of `Number.MAX_SAFE_INTEGER` so narration responses keep looping until the model calls a control tool or `maxIterations`/`maxWallTimeMs` fire.
+ * - 2026-05-28: Removed the consecutive tool-turn guard; changing tool work is valid progress and should not be capped by the runtime.
+ * - 2026-05-28: Host task budgets now cancel with `abortSignal` while runtime keeps structural loop guards.
+ * - 2026-05-28: Made repeated-tool guard exits remain guard stops instead of synthetic successful text responses.
+ * - 2026-05-27: Removed `complete(...)` `rejectedTextRetryLimit` default of 2 in favor of `Number.MAX_SAFE_INTEGER` so narration responses keep looping until the model calls a control tool or `maxIterations` fires.
  * - 2026-05-27: Defaulted `complete(...)` to `agentControlMode: true` so free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop; callers must call `final_answer`, `need_user_input`, or `blocked` to stop. Opt out with `agentControlMode: false`.
  * - 2026-05-27: Passed package-managed tool executors from the generic loop when `modelRequest` is provided.
  * - 2026-05-27: Added an explicit empty-text retry instruction so provider stop-without-content responses continue with tools instead of failing silently.
@@ -101,8 +104,6 @@ export type TurnLoopTerminalReason =
   | 'rejected_text_response'
   | 'unhandled_response'
   | 'max_iterations_exceeded'
-  | 'max_tool_rounds_exceeded'
-  | 'timeout'
   | 'repeated_tool_call_stopped';
 
 export type TurnLoopStepBranch =
@@ -118,10 +119,8 @@ export type TurnLoopStepBranch =
   | 'empty_text_retry'
   | 'empty_text_stop'
   | 'unhandled_response_stop'
-  | 'max_tool_rounds_stop'
   | 'repeated_tool_call_retry'
-  | 'repeated_tool_call_stop'
-  | 'timeout_stop';
+  | 'repeated_tool_call_stop';
 
 export type TurnLoopTextResponseClassification =
   | 'verified_final_response'
@@ -202,10 +201,7 @@ export interface TurnLoopStopMetadata {
   iteration: number;
   elapsedMs: number;
   maxIterations: number;
-  maxConsecutiveToolTurns: number;
-  maxWallTimeMs: number;
   controlOutput?: TurnLoopControlOutput;
-  timedOutDuringIteration?: number;
   repeatedToolCall?: TurnLoopRepeatedToolCallStopDetail;
 }
 
@@ -290,10 +286,7 @@ export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You alrea
 export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
 export const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION = 'You already called the same tool with the same arguments and have its tool result in the conversation. Do not call that same tool again. Use the existing tool result to continue now: provide the final answer, call a different necessary tool, or report what is blocked.';
 export const DEFAULT_EMPTY_TEXT_RECOVERY_INSTRUCTION = 'Your previous response had no final text and no tool calls. Continue now by calling the next required tool or providing the final answer if the task is complete. If you just loaded a skill and it instructs you to read a reference file, call read_file now. Do not narrate future intent.';
-export const DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE = 'The model timed out after tool work had already completed. The completed tool results are preserved in the conversation, but the model did not produce a final answer before the time limit.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
-export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS = 8;
-export const DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS = 120000;
 export const DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_SAME_TOOL_CALL_BATCHES = 2;
 const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT = 1;
 
@@ -332,8 +325,6 @@ export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessag
   defaultTextResponseMode?: TurnLoopDefaultTextResponseMode;
   agentControlMode?: boolean;
   maxIterations?: number;
-  maxConsecutiveToolTurns?: number;
-  maxWallTimeMs?: number;
   repeatedToolCallGuard?: false | TurnLoopRepeatedToolCallGuard;
   markSyntheticToolCalls?: boolean;
   abortSignal?: AbortSignal;
@@ -537,34 +528,6 @@ function createRepeatedToolCallStopDetail(params: {
     consecutiveSameBatchCount: params.consecutiveSameToolBatchCount,
     maxConsecutiveSameBatches: params.maxConsecutiveSameBatches,
     toolNames: params.currentToolCallSummaries.map((toolCall) => toolCall.toolName),
-  };
-}
-
-function createRepeatedToolCallDiagnosticText(detail: TurnLoopRepeatedToolCallStopDetail): string {
-  const toolList = detail.toolNames.length
-    ? Array.from(new Set(detail.toolNames)).join(', ')
-    : 'unknown tool';
-
-  return `I could not complete the request because the model kept repeating the same tool call instead of using the previous tool result. Repeated tool: ${toolList}. Stopped after ${detail.consecutiveSameBatchCount} consecutive identical tool-call batches; limit ${detail.maxConsecutiveSameBatches}.`;
-}
-
-function shouldReturnTimeoutDiagnostic(params: {
-  messages: LLMChatMessage[];
-  observedActionEvidence: boolean;
-}): boolean {
-  return params.observedActionEvidence && hasPriorToolResult(params.messages);
-}
-
-function createSyntheticTextResponse(content: string, providerStopReason: string): LLMResponse {
-  return {
-    type: 'text',
-    content,
-    assistantMessage: {
-      role: 'assistant',
-      content,
-    },
-    stopKind: 'natural_stop',
-    providerStopReason,
   };
 }
 
@@ -1043,11 +1006,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
   const defaultTextResponseMode = options.defaultTextResponseMode ?? 'permissive';
   const agentControlMode = options.agentControlMode ?? false;
   const maxIterations = normalizePositiveInteger(options.maxIterations, DEFAULT_TURN_LOOP_MAX_ITERATIONS);
-  const maxConsecutiveToolTurns = normalizePositiveInteger(
-    options.maxConsecutiveToolTurns,
-    DEFAULT_TURN_LOOP_MAX_CONSECUTIVE_TOOL_TURNS,
-  );
-  const maxWallTimeMs = normalizePositiveInteger(options.maxWallTimeMs, DEFAULT_TURN_LOOP_MAX_WALL_TIME_MS);
   const repeatedToolCallGuard = options.repeatedToolCallGuard === false
     ? false
     : {
@@ -1127,55 +1085,7 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     return result;
   }
 
-  async function maybeFinalizeTimeoutAfterToolResult(
-    messages: TMessage[],
-    iteration: number,
-  ): Promise<RunCompletionLoopResult<TState> | null> {
-    if (!shouldReturnTimeoutDiagnostic({ messages, observedActionEvidence })) {
-      return null;
-    }
-
-    const syntheticResponse = createSyntheticTextResponse(DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE, 'timeout_after_tool_result');
-    const next = await options.onTextResponse({
-      state,
-      responseText: DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
-      response: syntheticResponse,
-      messages,
-      iteration,
-    });
-    state = next?.state ?? state;
-    recordStep(iteration, syntheticResponse, 'text_response_stop');
-    return await finalize({
-      reason: 'text_response',
-      response: syntheticResponse,
-      stop: {
-        reason: 'text_response',
-        iteration,
-        elapsedMs: getElapsedMs(),
-        maxIterations,
-        maxConsecutiveToolTurns,
-        maxWallTimeMs,
-        timedOutDuringIteration: iteration,
-      },
-    });
-  }
-
   while (true) {
-    if (getElapsedMs() >= maxWallTimeMs) {
-      return await finalize({
-        reason: 'timeout',
-        response: lastResponse,
-        stop: {
-          reason: 'timeout',
-          iteration: iterations,
-          elapsedMs: getElapsedMs(),
-          maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
-        },
-      });
-    }
-
     if (iterations >= maxIterations) {
       return await finalize({
         reason: 'max_iterations_exceeded',
@@ -1185,8 +1095,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           iteration: iterations,
           elapsedMs: getElapsedMs(),
           maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
         },
       });
     }
@@ -1209,96 +1117,18 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
     transientInstruction = undefined;
     iterations = iteration;
 
-    if (getElapsedMs() >= maxWallTimeMs) {
-      return await finalize({
-        reason: 'timeout',
-        response: lastResponse,
-        stop: {
-          reason: 'timeout',
-          iteration,
-          elapsedMs: getElapsedMs(),
-          maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
-          timedOutDuringIteration: iteration,
-        },
-      });
-    }
-
-    const remainingWallTimeMs = maxWallTimeMs - getElapsedMs();
-    if (remainingWallTimeMs <= 0) {
-      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
-      if (timeoutDiagnostic) {
-        return timeoutDiagnostic;
-      }
-
-      return await finalize({
-        reason: 'timeout',
-        response: lastResponse,
-        stop: {
-          reason: 'timeout',
-          iteration,
-          elapsedMs: getElapsedMs(),
-          maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
-          timedOutDuringIteration: iteration,
-        },
-      });
-    }
-
     const modelAbortController = new AbortController();
     const cleanupAbortRelay = relayAbortSignal(options.abortSignal, modelAbortController);
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-
-    const modelPromise = callModel({
-      messages,
-      abortSignal: modelAbortController.signal,
-      state,
-    }).then(
-      (response) => ({ kind: 'response' as const, response }),
-      (error) => ({ kind: 'error' as const, error }),
-    );
-
-    const timeoutPromise = new Promise<{ kind: 'timeout' }>((resolve) => {
-      timeoutHandle = setTimeout(() => {
-        modelAbortController.abort(new Error(`runCompletionLoop timed out after ${maxWallTimeMs}ms`));
-        resolve({ kind: 'timeout' });
-      }, remainingWallTimeMs);
-    });
-
-    const modelOutcome = await Promise.race([modelPromise, timeoutPromise]);
-    cleanupAbortRelay();
-    if (timeoutHandle) {
-      clearTimeout(timeoutHandle);
-    }
-
-    if (modelOutcome.kind === 'timeout') {
-      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
-      if (timeoutDiagnostic) {
-        return timeoutDiagnostic;
-      }
-
-      return await finalize({
-        reason: 'timeout',
-        response: lastResponse,
-        stop: {
-          reason: 'timeout',
-          iteration,
-          elapsedMs: getElapsedMs(),
-          maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
-          timedOutDuringIteration: iteration,
-        },
+    let rawResponse: LLMResponse;
+    try {
+      rawResponse = await callModel({
+        messages,
+        abortSignal: modelAbortController.signal,
+        state,
       });
+    } finally {
+      cleanupAbortRelay();
     }
-
-    if (modelOutcome.kind === 'error') {
-      throw modelOutcome.error;
-    }
-
-    const rawResponse = modelOutcome.response;
 
     const normalizedResponse = normalizeToolIntentResponse({
       response: rawResponse,
@@ -1319,28 +1149,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
       response,
       normalizedToolIntent,
     });
-
-    if (getElapsedMs() >= maxWallTimeMs) {
-      const timeoutDiagnostic = await maybeFinalizeTimeoutAfterToolResult(messages, iteration);
-      if (timeoutDiagnostic) {
-        return timeoutDiagnostic;
-      }
-
-      recordStep(iteration, response, 'timeout_stop');
-      return await finalize({
-        reason: 'timeout',
-        response,
-        stop: {
-          reason: 'timeout',
-          iteration,
-          elapsedMs: getElapsedMs(),
-          maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
-          timedOutDuringIteration: iteration,
-        },
-      });
-    }
 
     if (response.type === 'tool_calls') {
       emptyTextRetryCount = 0;
@@ -1415,43 +1223,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           return { control: 'continue' as const };
         }
 
-        if (canRecoverFromPriorToolResult) {
-          const output = createRepeatedToolCallDiagnosticText(repeatedToolCall);
-          const syntheticResponse = createSyntheticTextResponse(output, 'repeated_tool_call_guard');
-          const next = await options.onTextResponse({
-            state,
-            responseText: output,
-            response: syntheticResponse,
-            messages,
-            iteration,
-          });
-          state = next?.state ?? state;
-          retries.push({
-            iteration,
-            kind: 'repeated_tool_call',
-            decision: 'stop',
-            retryCountBefore: repeatedToolCallRecoveryRetryCount,
-            retryCountAfter: repeatedToolCallRecoveryRetryCount,
-            retryLimit: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_RETRY_LIMIT,
-            elapsedMs: getElapsedMs(),
-            transientInstruction: DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
-          });
-          recordStep(iteration, syntheticResponse, 'text_response_stop');
-          return await finalize({
-            reason: 'text_response',
-            response: syntheticResponse,
-            stop: {
-              reason: 'text_response',
-              iteration,
-              elapsedMs: getElapsedMs(),
-              maxIterations,
-              maxConsecutiveToolTurns,
-              maxWallTimeMs,
-              repeatedToolCall,
-            },
-          });
-        }
-
         recordStep(iteration, response, 'repeated_tool_call_stop');
         return await finalize({
           reason: 'repeated_tool_call_stopped',
@@ -1461,40 +1232,13 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             iteration,
             elapsedMs: getElapsedMs(),
             maxIterations,
-            maxConsecutiveToolTurns,
-            maxWallTimeMs,
             repeatedToolCall,
           },
         });
       };
 
-      const stopForMaxToolRounds = async () => {
-        if (consecutiveToolTurns <= maxConsecutiveToolTurns) {
-          return null;
-        }
-
-        recordStep(iteration, response, 'max_tool_rounds_stop');
-        return await finalize({
-          reason: 'max_tool_rounds_exceeded',
-          response,
-          stop: {
-            reason: 'max_tool_rounds_exceeded',
-            iteration,
-            elapsedMs: getElapsedMs(),
-            maxIterations,
-            maxConsecutiveToolTurns,
-            maxWallTimeMs,
-          },
-        });
-      };
-
       const stopForToolGuards = async (): Promise<TurnLoopToolGuardDecision<TState>> => {
-        const repeatedStop = await stopForRepeatedToolCall();
-        if (repeatedStop) {
-          return repeatedStop;
-        }
-
-        return await stopForMaxToolRounds();
+        return await stopForRepeatedToolCall();
       };
 
       if (agentControlMode) {
@@ -1559,8 +1303,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
                 iteration,
                 elapsedMs: getElapsedMs(),
                 maxIterations,
-                maxConsecutiveToolTurns,
-                maxWallTimeMs,
                 controlOutput,
               },
             });
@@ -1598,8 +1340,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
                 iteration,
                 elapsedMs: getElapsedMs(),
                 maxIterations,
-                maxConsecutiveToolTurns,
-                maxWallTimeMs,
                 controlOutput,
               },
             });
@@ -1637,8 +1377,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
                 iteration,
                 elapsedMs: getElapsedMs(),
                 maxIterations,
-                maxConsecutiveToolTurns,
-                maxWallTimeMs,
                 controlOutput,
               },
             });
@@ -1676,8 +1414,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           iteration,
           elapsedMs: getElapsedMs(),
           maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
         },
       });
     }
@@ -1779,8 +1515,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
             iteration,
             elapsedMs: getElapsedMs(),
             maxIterations,
-            maxConsecutiveToolTurns,
-            maxWallTimeMs,
           },
         });
       }
@@ -1863,8 +1597,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           iteration,
           elapsedMs: getElapsedMs(),
           maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
         },
       });
     }
@@ -1914,8 +1646,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
           iteration,
           elapsedMs: getElapsedMs(),
           maxIterations,
-          maxConsecutiveToolTurns,
-          maxWallTimeMs,
         },
       });
     }
@@ -1937,8 +1667,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
         iteration,
         elapsedMs: getElapsedMs(),
         maxIterations,
-        maxConsecutiveToolTurns,
-        maxWallTimeMs,
       },
     });
   }

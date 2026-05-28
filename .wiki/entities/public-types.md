@@ -27,7 +27,7 @@ Recent type surface changes:
 - `RuntimeCompleteStatus` now uses `tool_calls` as the generic host-handled branch instead of a HITL-specific `waiting_for_human` state.
 - `RuntimeStreamCompleteEvent` includes `tool_calls`, `text_delta`, `reasoning_delta`, `tool_call_delta`, and `final_answer_delta` events, so streaming callers can separate lifecycle updates from provider-visible deltas and display control-tool final answers before the completed tool call is assembled.
 - `LLMResponse` now carries additive stop metadata through `stopKind` and `providerStopReason`, which lets callers preserve the provider's native stop reason without giving up a normalized package-level stop kind.
-- `LLMRuntimeCompleteOptions` includes completion-loop guardrails such as `maxConsecutiveToolTurns`, `maxWallTimeMs`, `defaultTextResponseMode`, `rejectedTextRetryLimit`, `emptyTextRetryLimit`, and `repeatedToolCallGuard`, which the runtime facade forwards into the hardened loop.
+- `LLMRuntimeCompleteOptions` includes completion-loop guardrails such as `defaultTextResponseMode`, `rejectedTextRetryLimit`, `emptyTextRetryLimit`, `maxIterations`, and `repeatedToolCallGuard`, which the runtime facade forwards into the hardened loop. Outer wall-clock budgets and tool-turn budgets are host policy and should be enforced through host cancellation with `context.abortSignal`.
 - The root entrypoint now exports only `generate(...)`, `complete(...)`, `streamComplete(...)`, `createRuntime(...)`, and the minimum type set needed to call them. Lower-level completion-loop, validation, recovery, direct provider, cache cleanup, and tool-resolution helpers are intentionally not root exports.
 
 Design intent:

@@ -15,6 +15,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-28: Mapped repeated-tool guard stops to failed runtime results instead of completed diagnostic output.
+ * - 2026-05-28: Kept host mutating-tool completion requirements independent from package built-in results.
  * - 2026-05-28: Defaulted omitted `builtIns` to all package-owned built-ins for host convenience.
  * - 2026-05-27: Previously removed implicit built-ins from runtime completion.
  * - 2026-05-27: Removed runtime-facade `agentControlMode` / `terminationMode` options; control-tool termination is the only supported behavior. Free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop.
@@ -117,11 +119,6 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'path_exists',
   'create_directory',
 ] as const;
-const MUTATING_BUILT_IN_TOOL_NAMES = new Set<string>([
-  'write_file',
-  'create_directory',
-  'shell_cmd',
-]);
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
   toolPermission: ToolPermission;
@@ -338,14 +335,10 @@ function createRequestToolDefinitionMap(
   return definitions;
 }
 
-function isMutatingToolName(
+function isHostMutatingToolName(
   toolName: string,
   requestToolDefinitions: ReadonlyMap<string, LLMToolDefinition>,
 ): boolean {
-  if (MUTATING_BUILT_IN_TOOL_NAMES.has(toolName)) {
-    return true;
-  }
-
   const definition = requestToolDefinitions.get(toolName);
   if (!definition) {
     return false;
@@ -391,7 +384,7 @@ function hasMutatingToolResult(
     }
 
     const toolName = toolCallNamesById.get(message.tool_call_id);
-    if (toolName && isMutatingToolName(toolName, requestToolDefinitions)) {
+    if (toolName && isHostMutatingToolName(toolName, requestToolDefinitions)) {
       return true;
     }
   }
@@ -437,12 +430,8 @@ function createRuntimeFailureMessage(reason: string): string {
       return 'Completion loop stopped after handling tool calls.';
     case 'unhandled_response':
       return 'Assistant returned an unhandled response.';
-    case 'timeout':
-      return 'Completion loop timed out before producing a final answer.';
     case 'repeated_tool_call_stopped':
       return 'Completion loop stopped after repeating the same tool calls.';
-    case 'max_tool_rounds_exceeded':
-      return 'Completion loop exceeded the maximum number of consecutive tool turns.';
     default:
       return 'Completion loop failed before producing a final answer.';
   }
@@ -530,7 +519,7 @@ function adaptRuntimeCompleteResult(result: RunCompletionLoopResult<RuntimeCompl
   if (result.reason === 'repeated_tool_call_stopped') {
     const output = createRepeatedToolCallDiagnosticOutput(result);
     return {
-      status: 'completed',
+      status: 'failed',
       messages: [
         ...result.state.messages,
         {
@@ -539,6 +528,7 @@ function adaptRuntimeCompleteResult(result: RunCompletionLoopResult<RuntimeCompl
         },
       ],
       output,
+      error: output,
       raw: result.state.raw ?? result.response ?? undefined,
     };
   }
@@ -859,8 +849,6 @@ async function runRuntimeCompletion(
         : undefined,
     }),
     maxIterations: request.maxIterations,
-    maxConsecutiveToolTurns: request.maxConsecutiveToolTurns,
-    maxWallTimeMs: request.maxWallTimeMs,
     emptyTextRetryLimit: request.emptyTextRetryLimit ?? DEFAULT_TURN_LOOP_MAX_ITERATIONS,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
     defaultTextResponseMode: request.defaultTextResponseMode ?? 'require_tool_result',

@@ -2,6 +2,7 @@
  * Feature: turn-loop regression and behavior tests for generic and tool-capable runtime flows.
  * Notes: covers package defaults, narration rejection, synthetic tool intent, and stop conditions.
  * Recent changes:
+ * - 2026-05-28: Added host abort-signal relay coverage.
  * - 2026-05-27: Added generic-loop package-managed tool executor contract coverage.
  * - 2026-05-15: Added a reusable scripted mock LLM scenario helper and a Jazz Gill package-managed flow regression.
  * - 2026-05-15: Added action-evidence separation regressions for HITL tools, bound executors, custom tools, and trace metadata.
@@ -32,7 +33,6 @@ import {
   DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION,
   DEFAULT_COMPLETION_LOOP_SYSTEM_PROMPT,
   DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION,
-  DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
   runCompletionLoop,
 } from '../../src/completion-loop.js';
 import { complete } from '../../src/completion-loop.js';
@@ -637,32 +637,6 @@ describe('llm-runtime completion loop', () => {
       maxConsecutiveSameBatches: 1,
       toolNames: ['final_answer'],
     }));
-    expect(onToolCallsResponse).not.toHaveBeenCalled();
-  });
-
-  it('stops changing malformed control tool calls through the max-tool-round guard', async () => {
-    const responses = [
-      toolCall('final_answer', { nonce: 1 }, 'malformed-final-1'),
-      toolCall('need_user_input', { nonce: 2 }, 'malformed-input-2'),
-    ];
-    const onToolCallsResponse = vi.fn(async ({ state }) => ({ state }));
-
-    const result = await runCompletionLoop({
-      initialState: {
-        messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
-      },
-      emptyTextRetryLimit: 0,
-      agentControlMode: true,
-      maxConsecutiveToolTurns: 1,
-      repeatedToolCallGuard: false,
-      callModel: vi.fn(async () => responses.shift() ?? toolCall('blocked', { nonce: 3 }, 'malformed-blocked-3')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse,
-      onTextResponse: async ({ state }) => ({ state }),
-    });
-
-    expect(result.reason).toBe('max_tool_rounds_exceeded');
-    expect(result.steps.map((step) => step.branch)).toEqual(['tool_calls_continue', 'max_tool_rounds_stop']);
     expect(onToolCallsResponse).not.toHaveBeenCalled();
   });
 
@@ -1503,27 +1477,6 @@ describe('llm-runtime completion loop', () => {
     ]);
   });
 
-  it('stops on max_tool_rounds_exceeded before re-entering host execution', async () => {
-    const onToolCallsResponse = vi.fn(async ({ state, response }) => ({
-      state: { ...state, messages: [...state.messages, response.assistantMessage] },
-      next: { control: 'continue' as const },
-    }));
-
-    const result = await runCompletionLoop({
-      initialState: { messages: [{ role: 'user', content: 'use tools until done' } satisfies LLMChatMessage] },
-      emptyTextRetryLimit: 0,
-      maxConsecutiveToolTurns: 1,
-      callModel: vi.fn(async () => toolCall('read_file', { filePath: 'notes.txt' })),
-      buildMessages: async ({ state }) => state.messages,
-      onTextResponse: async ({ state }) => ({ state }),
-      onToolCallsResponse,
-    });
-
-    expect(result.reason).toBe('max_tool_rounds_exceeded');
-    expect(result.steps.map((step) => step.branch)).toEqual(['tool_calls_continue', 'max_tool_rounds_stop']);
-    expect(onToolCallsResponse).toHaveBeenCalledTimes(1);
-  });
-
   it('stops repeated identical tool-call batches before host execution repeats', async () => {
     const repeated = toolCall('read_file', { filePath: 'notes.txt' });
     const onToolCallsResponse = vi.fn(async ({ state, response }) => ({
@@ -1620,95 +1573,31 @@ describe('llm-runtime completion loop', () => {
     expect(callModel).toHaveBeenCalledTimes(3);
   });
 
-  it('stops on timeout and aborts the provided model signal', async () => {
-    vi.useFakeTimers();
-
+  it('relays host abort signals into the active model call', async () => {
+    const hostAbortController = new AbortController();
+    const abortReason = new Error('host cancelled completion');
     let seenAbortSignal: AbortSignal | undefined;
     const resultPromise = runCompletionLoop({
-      initialState: { messages: [{ role: 'user', content: 'wait forever' } satisfies LLMChatMessage] },
+      initialState: {
+        messages: [{ role: 'user', content: 'wait for host cancellation' } satisfies LLMChatMessage] as LLMChatMessage[],
+      },
       emptyTextRetryLimit: 0,
-      maxWallTimeMs: 25,
+      abortSignal: hostAbortController.signal,
       callModel: vi.fn(async ({ abortSignal }) => {
         seenAbortSignal = abortSignal;
-        return await new Promise<LLMResponse>(() => undefined);
+        return await new Promise<LLMResponse>((_resolve, reject) => {
+          abortSignal?.addEventListener('abort', () => reject(abortSignal.reason), { once: true });
+        });
       }),
       buildMessages: async ({ state }) => state.messages,
       onTextResponse: async ({ state }) => ({ state }),
       onToolCallsResponse: async ({ state }) => ({ state }),
     });
 
-    await vi.advanceTimersByTimeAsync(25);
-    const result = await resultPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    hostAbortController.abort(abortReason);
 
-    expect(result.reason).toBe('timeout');
-    expect(result.response).toBeNull();
-    expect(result.stop).toEqual(expect.objectContaining({ reason: 'timeout', timedOutDuringIteration: 1 }));
-    expect(seenAbortSignal?.aborted).toBe(true);
-  });
-
-  it('returns final diagnostic text when timeout happens after completed tool work', async () => {
-    vi.useFakeTimers();
-
-    let seenAbortSignal: AbortSignal | undefined;
-    const responses = [toolCall('create_directory', { dirPath: 'agent-world-workflows' }, 'mkdir-1')];
-    const resultPromise = runCompletionLoop({
-      initialState: {
-        messages: [{ role: 'user', content: 'agent-world init' } satisfies LLMChatMessage] as LLMChatMessage[],
-        finalText: '',
-      },
-      emptyTextRetryLimit: 0,
-      maxWallTimeMs: 25,
-      callModel: vi.fn(async ({ abortSignal }) => {
-        seenAbortSignal = abortSignal;
-        const nextResponse = responses.shift();
-        if (nextResponse) {
-          return nextResponse;
-        }
-
-        return await new Promise<LLMResponse>(() => undefined);
-      }),
-      buildMessages: async ({ state }) => state.messages,
-      onTextResponse: async ({ state, responseText, response }) => ({
-        state: {
-          ...state,
-          messages: [...state.messages, response.assistantMessage],
-          finalText: responseText,
-        },
-      }),
-      onToolCallsResponse: async ({ state, response }) => ({
-        state: {
-          ...state,
-          messages: [
-            ...state.messages,
-            response.assistantMessage,
-            {
-              role: 'tool',
-              tool_call_id: response.tool_calls?.[0]?.id,
-              content: JSON.stringify({ success: true, path: 'agent-world-workflows' }),
-            } satisfies LLMChatMessage,
-          ],
-        },
-        next: { control: 'continue' as const },
-      }),
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-    const result = await resultPromise;
-
-    expect(result.reason).toBe('text_response');
-    expect(result.state.finalText).toBe(DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE);
-    expect(result.response).toEqual(expect.objectContaining({
-      content: DEFAULT_TIMEOUT_AFTER_TOOL_RESULT_MESSAGE,
-      providerStopReason: 'timeout_after_tool_result',
-    }));
-    expect(result.stop).toEqual(expect.objectContaining({
-      reason: 'text_response',
-      timedOutDuringIteration: 2,
-    }));
-    expect(result.steps.map((step) => step.branch)).toEqual([
-      'tool_calls_continue',
-      'text_response_stop',
-    ]);
+    await expect(resultPromise).rejects.toThrow('host cancelled completion');
     expect(seenAbortSignal?.aborted).toBe(true);
   });
 

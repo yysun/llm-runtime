@@ -95,6 +95,8 @@ The returned `LLMResponse` is either:
 
 Use `complete(...)` when the runtime should own repeated model calls, tool execution, and terminal control-tool handling.
 
+In short: `generate(...)` asks the model once; `complete(...)` keeps working until the runtime reaches a completion, user-input, blocked, or bounded-stop condition.
+
 Example:
 
 ```ts
@@ -152,6 +154,21 @@ await runtime.dispose();
 - `blocked`
 
 Those control tools are runtime-reserved. Do not define app tools with those names.
+
+The loop continues under these rules:
+
+- normal tool call: execute the tool, append the tool result, and call the model again
+- `final_answer`: stop with `status: 'completed'`
+- `need_user_input`: stop with `status: 'tool_calls'` so the host can ask/resume
+- `blocked`: stop with `status: 'failed'`
+- plain narration or intent text: keep going; narration is not completion
+- empty text: retry according to `emptyTextRetryLimit`
+- missing required action evidence: reject premature final text or `final_answer` and continue with recovery guidance
+- host mutating tool exposed: require a host mutating tool result before accepting final completion
+- repeated identical tool calls or `maxIterations`: stop with the corresponding bounded failure
+- host cancellation through `context.abortSignal`: abort the active model/tool path when the host decides the task should stop
+
+`builtIns` only changes which package-owned tools are available. It does not decide whether the loop itself runs. `builtIns: false` with host-supplied `extraTools` or `tools` still gives `complete(...)` a valid loop: host tools remain executable, and the runtime still injects `final_answer`, `need_user_input`, and `blocked`.
 
 `complete(...)` returns:
 

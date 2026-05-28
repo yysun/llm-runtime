@@ -22,7 +22,7 @@ source_paths:
   - "src/llm-config.ts"
   - "tests/llm/runtime-provider.test.ts"
   - "tests/llm/runtime.test.ts"
-updated_at: "2026-05-27"
+updated_at: "2026-05-28"
 ---
 
 `src/runtime.ts` is the main entry point when you want the package to wire providers, tools, and shared runtime state together for you.
@@ -40,10 +40,13 @@ Facts from source:
 - The root entrypoint exports only `generate(...)`, `complete(...)`, `streamComplete(...)`, `createRuntime(...)`, and a compact type set. Lower-level helpers in this file, including standalone tool resolution and cache cleanup functions, are internal extension points rather than root public API.
 - `runtime.complete(...)` and `runtime.streamComplete(...)` adapt [[src-completion-loop]] into the stable runtime-facade result and event shapes documented in [[src-runtime-complete-contract]].
 - The runtime facade now treats control-tool termination as the only supported agentic stop protocol. Plain assistant narration is retried or rejected; final answers should arrive through `final_answer`, missing user decisions through `need_user_input`, and hard blockers through `blocked`.
+- `generate(...)` is a single provider call. `complete(...)` is the runtime-owned loop: execute normal tools, append results, call the model again, and stop only through control tools or guardrails.
 - `runtime.streamComplete(...)` now emits provider text, reasoning, raw tool-call argument, and parsed `final_answer` answer deltas when adapters supply them, in addition to lifecycle events.
 - The `final_answer` streaming path keeps raw `tool_call_delta` events available for host parsers, then incrementally decodes the JSON string field named `answer` and emits displayable `final_answer_delta` chunks. This is deliberately scoped to the runtime's control-tool shape, not a general streaming JSON parser.
-- The runtime facade forwards explicit `maxConsecutiveToolTurns`, `maxWallTimeMs`, repeated-tool-call guard, rejected-text retry, and empty-text retry bounds into the hardened loop.
+- The runtime facade forwards explicit `maxIterations`, repeated-tool-call guard, rejected-text retry, and empty-text retry bounds into the hardened loop. It does not own host budget policy; hosts cancel with `context.abortSignal`.
 - When `builtIns` is omitted for runtime-facade completion, all package-owned built-ins are exposed. Callers use `builtIns: false` to disable them or a per-tool map to select a narrower surface.
+- `builtIns` changes package-owned tool availability, not loop ownership. With `builtIns: false`, host-supplied `extraTools` or `tools` still run inside `complete(...)`, and control tools are still injected.
+- Host mutating-tool requirements are host-owned. A package built-in write or shell result must not satisfy the evidence requirement created by a host tool with mutating `evidenceKind`.
 - If `ask_user_input` appears in a runtime completion response and the host did not supply an executable tool for it, the facade returns `status: "tool_calls"` with the assistant message and tool calls. It does not wait for a human, enforce a timeout, or translate the branch into a special human-wait state.
 - If the host supplies executable `ask_user_input`, runtime completion executes it like any other host tool and continues with the returned tool message.
 - Per-call `skillRoots` are honored even through a bound runtime environment, so a request can narrow or extend skill discovery without rebuilding the whole runtime.
@@ -59,4 +62,4 @@ Design boundary:
 - It owns lifecycle cleanup only for runtime-created registries and caches.
 - It does not own message persistence, queueing, transcript policy, human-input UI, or completion-loop state transitions; those remain in callers or in [[src-completion-loop]].
 
-Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For the preferred iterative API built on top of the runtime facade, see [[src-completion-loop]]. For runtime-facade result and stream event shapes, see [[src-runtime-complete-contract]]. For human-input ownership, see [[host-owned-ask-user-input]]. For provider streaming translation, see [[provider-adapters]]. For provider-specific search behavior, see [[web-search-across-providers]]. For system prompt layout, see [[system-prompt-schema]]. For cleanup boundaries, see [[turn-loop-safety-and-lifecycle]].
+Read this after [[environment-vs-per-call]] when you need to understand how a single API call becomes a fully resolved runtime surface. For the `generate(...)` versus `complete(...)` contract, see [[generate-vs-complete]]. For the preferred iterative API built on top of the runtime facade, see [[src-completion-loop]]. For runtime-facade result and stream event shapes, see [[src-runtime-complete-contract]]. For human-input ownership, see [[host-owned-ask-user-input]]. For provider streaming translation, see [[provider-adapters]]. For provider-specific search behavior, see [[web-search-across-providers]]. For system prompt layout, see [[system-prompt-schema]]. For cleanup boundaries, see [[turn-loop-safety-and-lifecycle]].

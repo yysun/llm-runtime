@@ -155,7 +155,6 @@ async function runPresentationE2E(dryRun: boolean) {
       },
       emptyTextRetryLimit: 0,
       rejectedTextRetryLimit: 2,
-      maxConsecutiveToolTurns: MAX_TOOL_TURNS,
       buildMessages: async ({ state, transientInstruction }) => {
         if (!transientInstruction) {
           return state.messages;
