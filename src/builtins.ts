@@ -15,13 +15,15 @@
  * - `ask_user_input` is the public HITL built-in.
  *
  * Recent changes:
+ * - 2026-05-28: Defaulted omitted `builtIns` to all built-ins; `true` is the explicit host shortcut for the same behavior.
+ * - 2026-05-27: Removed string shorthand built-in selection modes. Callers can pass `false`, `true`, or an explicit per-tool map.
  * - 2026-05-27: Clarified load_skill guidance to continue with structured file tools after loading.
  * - 2026-05-27: Strengthened shell/file tool descriptions so routine file reads, lists, and searches use structured tools instead of shell.
  * - 2026-05-27: Clarified read-only file tool descriptions for loaded-skill referenced paths.
  * - 2026-05-18: Aligned file-tool schema requirements with executor behavior and removed `read_file` wording that implied a fixed hard cap.
  * - 2026-05-15: Tightened HITL tool descriptions to direct the model to safe read-only inspection or lookup before asking the user.
  * - 2026-05-15: Removed deprecated HITL alias tools from the public built-in surface.
- * - 2026-05-15: Changed the default built-in exposure to a read-only set.
+ * - 2026-05-15: Previously changed the default built-in exposure to a read-only set.
  * - 2026-03-27: Added package-owned built-in tool catalog and selection helpers.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
@@ -55,16 +57,8 @@ export const BUILT_IN_TOOL_NAMES = [
 export const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES = [
   'ask_user_input',
 ] as const satisfies readonly BuiltInToolName[];
-export const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES = [
-  'load_skill',
-  'read_file',
-  'list_files',
-  'search_files',
-  'path_exists',
-] as const satisfies readonly BuiltInToolName[];
 const HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES);
 const BUILT_IN_TOOL_NAME_SET = new Set<string>(BUILT_IN_TOOL_NAMES);
-const DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAME_SET = new Set<BuiltInToolName>(DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAMES);
 
 type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 
@@ -321,6 +315,11 @@ function assertKnownBuiltInSelectionKeys(selection: Partial<Record<string, unkno
 
 function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolToggleMap {
   const resolved = {} as BuiltInToolToggleMap;
+  const rawSelection: unknown = selection;
+  if (typeof rawSelection === 'string') {
+    throw new Error('Built-in string shorthand modes are not supported. Pass true or an explicit builtIns map, for example { read_file: true }.');
+  }
+
   const selectionMap = selection && typeof selection === 'object' && !Array.isArray(selection)
     ? selection as Partial<Record<BuiltInToolName, boolean>>
     : undefined;
@@ -328,35 +327,18 @@ function toToggleMap(selection: BuiltInToolSelection | undefined): BuiltInToolTo
     assertKnownBuiltInSelectionKeys(selectionMap as Partial<Record<string, unknown>>);
   }
 
-  const selectionMode = selection === undefined
-    ? 'read-only'
-    : selection === true
-      ? 'all'
-      : selection === false
-        ? 'none'
-        : selection === 'all' || selection === 'read-only'
-          ? selection
-          : 'map';
-
-  const humanInterventionEnabled = selectionMode === 'all'
-    ? true
-    : selectionMode === 'read-only' || selectionMode === 'none'
-      ? false
-      : selectionMap?.ask_user_input === true;
-
   for (const toolName of BUILT_IN_TOOL_NAMES) {
-    if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {
-      resolved[toolName] = humanInterventionEnabled;
+    if (selection === undefined || selection === true) {
+      resolved[toolName] = true;
       continue;
     }
 
-    resolved[toolName] = selectionMode === 'all'
-      ? true
-      : selectionMode === 'read-only'
-        ? DEFAULT_READ_ONLY_BUILT_IN_TOOL_NAME_SET.has(toolName)
-        : selectionMode === 'none'
-          ? false
-          : selectionMap?.[toolName] === true;
+    if (HUMAN_INTERVENTION_BUILT_IN_TOOL_NAME_SET.has(toolName)) {
+      resolved[toolName] = selectionMap?.ask_user_input === true;
+      continue;
+    }
+
+    resolved[toolName] = selectionMap?.[toolName] === true;
   }
   return resolved;
 }
@@ -373,7 +355,7 @@ export function intersectBuiltInToolSelections(
 ): Record<BuiltInToolName, boolean> {
   const baselineMap = toToggleMap(baseline);
 
-  if (narrowing === undefined || narrowing === true) {
+  if (narrowing === undefined) {
     return baselineMap;
   }
 

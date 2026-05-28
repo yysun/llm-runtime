@@ -15,6 +15,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-28: Defaulted omitted `builtIns` to all package-owned built-ins for host convenience.
+ * - 2026-05-27: Previously removed implicit built-ins from runtime completion.
  * - 2026-05-27: Removed runtime-facade `agentControlMode` / `terminationMode` options; control-tool termination is the only supported behavior. Free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop.
  * - 2026-05-27: Added true text-delta streaming and opt-in control-tool termination for runtime completion.
  * - 2026-05-27: Honored per-call skill roots even when executing through a bound runtime environment.
@@ -22,7 +24,7 @@
  * - 2026-05-15: Rewired the runtime-facade `complete(...)` and `streamComplete(...)` methods to the hardened completion loop while preserving the existing runtime result and event contracts.
  * - 2026-05-15: Tightened the default HITL hint to prefer safe read-only lookup before asking the user to disambiguate.
  * - 2026-05-15: Added opt-in recoverable tool-execution artifacts for agent-loop use.
- * - 2026-05-15: Changed default built-in exposure to read-only and added package-owned tool execution helpers.
+ * - 2026-05-15: Previously changed default built-in exposure to read-only and added package-owned tool execution helpers.
  * - 2026-05-15: Added `createRuntime(...)` as the preferred runtime facade and `disposeRuntimeCaches()` as the preferred cache cleanup API.
  * - 2026-03-28: Added explicit environment injection and removed runtime-constructor dependency from the public API.
  */
@@ -32,7 +34,6 @@ import {
   HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES,
   assertNoBuiltInToolNameCollisions,
   createBuiltInToolDefinitions,
-  normalizeBuiltInToolSelection,
 } from './builtins.js';
 import {
   complete as runCompletionLoopComplete,
@@ -354,11 +355,8 @@ function isMutatingToolName(
 }
 
 function requestExposesMutatingTools(request: LLMRuntimeCompleteOptions): boolean {
-  const builtIns = normalizeBuiltInToolSelection(getCompleteBuiltIns(request.builtIns));
-  if ([...MUTATING_BUILT_IN_TOOL_NAMES].some((toolName) => builtIns[toolName as keyof typeof builtIns])) {
-    return true;
-  }
-
+  // Built-ins default to all tools, so their availability is not evidence that the task
+  // requires a write or external action. Only host tools can declare that requirement.
   for (const tool of request.extraTools ?? []) {
     if (isMutatingEvidenceKind(tool.evidenceKind)) {
       return true;

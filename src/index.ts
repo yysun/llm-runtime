@@ -30,7 +30,6 @@ export {
 export type {
   BuiltInToolName,
   BuiltInToolSelection,
-  BuiltInToolSelectionMode,
   LLMChatMessage,
   LLMEnvironment,
   LLMEnvironmentOptions,

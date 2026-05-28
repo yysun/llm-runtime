@@ -26,14 +26,15 @@ In plain terms, these are the tools that ship with `llm-runtime` itself. Callers
 
 Facts from source:
 - `src/builtins.ts` defines stable descriptions and JSON-schema parameter contracts for every built-in.
-- Selection can be boolean or per-tool; the runtime supports normalization and intersection so a caller can narrow a broader baseline safely.
+- Selection accepts `true`, `false`, or an explicit per-tool map. Omitted selection defaults to `true`, so hosts get every package-owned built-in unless they disable or narrow the surface.
+- There is no string `all` or `read-only` mode. A read-only host should spell out `load_skill`, `list_files`, `search_files`, `read_file`, and `path_exists`; a writing host should add only `create_directory` and `write_file` when needed; a command-running host should add `shell_cmd` only for command-specific work.
 - `search_files` is the package-owned file-discovery primitive, while `create_directory` and `path_exists` cover narrow filesystem mutation and existence checks inside the trusted working directory.
 - `search_files` replaced the older `grep` built-in name. Current unit coverage explicitly rejects `grep` as an unknown built-in selection key.
 - `ask_user_input` is the only public human-input built-in on the current package surface. Its description and JSON schema are shared from `src/human-input-contract.ts` so the catalog and runtime-facade helpers stay aligned.
 - The human-input schema requires `questions[]` with stable question ids and option ids. It supports `single-select`, `multiple-select`, and optional `allowSkip` for explicitly dismissible prompts.
-- Default `resolveTools(...)` exposure is read-only when callers omit `builtIns`, which means `load_skill`, `read_file`, `list_files`, `search_files`, and `path_exists` are exposed by default while write-oriented tools and `ask_user_input` stay opt-in.
-- Package-managed completion uses a broader model-visible default from `src/complete-defaults.ts`: the same read-only baseline plus `ask_user_input`, so the model knows how to request required human decisions without enabling general write tools.
-- Default `ask_user_input` visibility is contract advertisement, not UI ownership. Runtime completion returns a normal `tool_calls` result for host handling unless the host supplied an executable `ask_user_input` tool.
+- Default `resolveTools(...)` exposure includes every built-in when callers omit `builtIns`; callers use `builtIns: false` to disable all built-ins or a per-tool map to select a narrower surface.
+- Package-managed completion also defaults to every built-in through `src/complete-defaults.ts`.
+- `ask_user_input` visibility is contract advertisement, not UI ownership. Runtime completion returns a normal `tool_calls` result for host handling unless the host supplied an executable `ask_user_input` tool.
 - `read_file` and `write_file` both require `filePath` in the schema while validation preserves the `path` alias. `read_file` remains paginated through `offset` and `limit`, but the public contract no longer promises a fixed hard maximum line cap.
 - `list_files` and `search_files` exclude dot-prefixed paths unless `includeHidden: true` is passed. They no longer hard-exclude ordinary directories such as `node_modules` or `dist`.
 - `path_exists` is symlink-aware: it reports symlink presence separately from whether the symlink target resolves to a file or directory.

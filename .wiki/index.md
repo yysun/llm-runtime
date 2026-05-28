@@ -29,7 +29,7 @@ The core ownership rule is [[environment-vs-per-call]]: stable dependencies can 
 
 The root package entrypoint is deliberately small: `generate(...)`, `complete(...)`, `streamComplete(...)`, and `createRuntime(...)`. `generate(...)` performs one provider call and may return text or tool calls. `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add the bounded runtime-owned model/tool loop and terminate through control tools. `streamComplete(...)` can now surface streamed provider text, reasoning, raw tool-call argument deltas, and parsed `final_answer` answer deltas. Lower-level loop machinery still exists internally, but it is no longer root public API. See [[src-runtime]], [[src-completion-loop]], and [[public-types]].
 
-If the model calls `ask_user_input`, package-managed completion advertises the contract by default, but default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
+If the model calls `ask_user_input`, default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
 
 ## Where is data saved?
 
@@ -58,4 +58,4 @@ Risk pages: [[shell-command-safeguards]], [[turn-loop-safety-and-lifecycle]], [[
 
 For a public API question, start at [[public-types]] and [[src-runtime]]. For loop behavior, start at [[src-completion-loop]]. For tool behavior, start at [[src-builtins]], [[src-builtin-executors]], and [[src-tool-validation]]. For recent contract changes, read [[host-owned-ask-user-input]], [[file-tool-contract-hardening]], and [[timeout-after-tool-result]].
 
-Coverage note: this wiki reflects the current May 2026 package shape at commit `a6efd8d1ced45f9fd81cf2006644595a78fd4853`, including the narrowed root entrypoint, control-tool runtime completion, host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, safer read-only defaults, streamed text/reasoning/tool-call/final-answer deltas, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.
+Coverage note: this wiki reflects the current May 2026 package shape at commit `a6efd8d1ced45f9fd81cf2006644595a78fd4853`, including the narrowed root entrypoint, control-tool runtime completion, host-owned `ask_user_input`, file-tool contract hardening, timeout-after-tool-result diagnostics, default-all built-ins with explicit disable/narrowing, streamed text/reasoning/tool-call/final-answer deltas, shared prompt/provider-name helpers, provider stop metadata, and the legacy compatibility path in `src/turn-loop.ts`.

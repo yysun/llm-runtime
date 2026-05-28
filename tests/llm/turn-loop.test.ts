@@ -270,7 +270,7 @@ describe('llm-runtime completion loop', () => {
     expect(mockExecuteToolCall).not.toHaveBeenCalled();
   });
 
-  it('defaults complete() package-managed built-ins to read-only tools plus ask_user_input', async () => {
+  it('defaults package-managed built-ins to all tools', async () => {
     mockGenerate.mockResolvedValueOnce(toolCall('final_answer', { answer: 'done' }, 'fa-builtin-defaults'));
 
     await complete({
@@ -287,11 +287,7 @@ describe('llm-runtime completion loop', () => {
     expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'openai',
       model: 'gpt-5',
-      builtIns: expect.objectContaining({
-        ask_user_input: true,
-        read_file: true,
-        search_files: true,
-      }),
+      builtIns: true,
     }));
   });
 

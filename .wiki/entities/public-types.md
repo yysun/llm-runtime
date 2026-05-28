@@ -19,7 +19,7 @@ Key entities:
 - `LLMToolDefinition`, `LLMToolRegistry`, and `LLMToolExecutionContext` define callable tool surfaces and runtime context.
 - `LLMEnvironment`, `LLMEnvironmentOptions`, `MCPRegistry`, and `SkillRegistry` define the stable runtime dependencies described in [[environment-vs-per-call]]. `LLMRuntime` adds the preferred bound facade methods `generate(...)`, `complete(...)`, `streamComplete(...)`, `resolveTools(...)`, `executeToolCall(...)`, `executeToolCalls(...)`, and `dispose()`. Provider config types include first-class Azure support through `AzureConfig`, and MCP server definitions include `streamable-http` alongside `stdio` and `sse`.
 - `LLMWebSearchOptions` plus `webSearch?: boolean | LLMWebSearchOptions` on provider-call options define the public per-call search surface described in [[web-search-across-providers]].
-- `BuiltInToolName` includes the filesystem trio `search_files`, `create_directory`, and `path_exists`, and the package exposes `BuiltInToolSelectionMode = 'all' | 'read-only'` so callers can request the package's safer default surface explicitly.
+- `BuiltInToolName` includes the filesystem trio `search_files`, `create_directory`, and `path_exists`. `BuiltInToolSelection` supports boolean selection plus a per-tool map: omitted or `true` means every built-in, `false` means none, and a map narrows to selected tools.
 - Human-input public types now model structured choice prompts through `HitlSelectionType`, `HitlInputQuestion`, and `HitlInputOption`.
 - Runtime-facade completion types live in `src/runtime-complete-contract.ts`: `RuntimeCompleteResult`, `RuntimeCompleteStatus`, and `RuntimeStreamCompleteEvent`.
 

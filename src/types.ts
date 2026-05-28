@@ -60,8 +60,6 @@ export type BuiltInToolName =
   | 'create_directory'
   | 'path_exists';
 
-export type BuiltInToolSelectionMode = 'all' | 'read-only';
-
 export interface BaseLLMConfig {
   apiKey?: string;
   baseUrl?: string;
@@ -239,7 +237,7 @@ export interface LLMToolRegistry {
   resolveTools: (extraTools?: LLMToolDefinition[]) => Record<string, LLMToolDefinition>;
 }
 
-export type BuiltInToolSelection = boolean | BuiltInToolSelectionMode | Partial<Record<BuiltInToolName, boolean>>;
+export type BuiltInToolSelection = boolean | Partial<Record<BuiltInToolName, boolean>>;
 
 export interface LLMWebSearchOptions {
   searchContextSize?: WebSearchContextSize;

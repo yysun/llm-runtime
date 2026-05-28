@@ -20,7 +20,7 @@
  * - 2026-05-27: Added runtime completion coverage for empty-text recovery after loading a skill.
  * - 2026-05-27: Added regression coverage for read-only file tools resolving loaded-skill referenced paths from the skill root.
  * - 2026-05-18: Added focused contract coverage for file-tool validation, uncapped read pagination, hidden entry discovery, and symlink-aware path checks.
- * - 2026-05-15: Added coverage for read-only built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
+ * - 2026-05-15: Added coverage for built-in defaults, public tool execution helpers, clean HITL exposure, and abort-aware built-ins.
  * - 2026-05-15: Added `createRuntime(...)` facade coverage.
  * - 2026-03-27: Initial targeted coverage for the new `llm-runtime` package.
  * - 2026-03-27: Added runtime-scoped provider configuration regression coverage.
@@ -66,7 +66,7 @@ import {
   executeToolCalls,
   resolveTools,
 } from '../../src/runtime.js';
-import { intersectBuiltInToolSelections } from '../../src/builtins.js';
+import { BUILT_IN_TOOL_NAMES, intersectBuiltInToolSelections } from '../../src/builtins.js';
 import { parseMCPConfigJson } from '../../src/mcp.js';
 import type { LLMEnvironmentOptions } from '../../src/types.js';
 import type { SkillFileSystemAdapter } from '../../src/skills.js';
@@ -846,7 +846,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('returns default ask_user_input tool calls to the host without executing a runtime HITL wait', async () => {
+  it('returns explicit ask_user_input tool calls to the host without executing a runtime HITL wait', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const askToolCall = {
@@ -884,6 +884,9 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Ask me about scope.' }],
+      builtIns: {
+        ask_user_input: true,
+      },
     });
 
     expect(result.status).toBe('tool_calls');
@@ -1054,6 +1057,10 @@ describe('llm-runtime runtime', () => {
         model: 'gpt-5',
         messages: [{ role: 'user', content: 'agent world init' }],
         skillRoots: [skillRoot],
+        builtIns: {
+          load_skill: true,
+          read_file: true,
+        },
       });
 
       expect(result).toMatchObject({
@@ -1081,7 +1088,7 @@ describe('llm-runtime runtime', () => {
     }
   });
 
-  it('defaults runtime.complete to read-only plus ask_user_input built-ins and passes request context into completion-loop tools', async () => {
+  it('passes request context into runtime.complete tools with all built-ins enabled by default', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const abortController = new AbortController();
@@ -1184,6 +1191,173 @@ describe('llm-runtime runtime', () => {
     ]));
 
     await runtime.dispose();
+  });
+
+  it('preserves explicit built-in maps for runtime.complete so mutating built-ins remain executable', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      expect(request.tools).toEqual(expect.objectContaining({
+        ask_user_input: expect.objectContaining({ name: 'ask_user_input' }),
+        create_directory: expect.objectContaining({ name: 'create_directory' }),
+        shell_cmd: expect.objectContaining({ name: 'shell_cmd' }),
+        web_fetch: expect.objectContaining({ name: 'web_fetch' }),
+        write_file: expect.objectContaining({ name: 'write_file' }),
+      }));
+
+      const hasCreateDirectoryResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'explicit-builtins-mkdir-1'
+      ));
+      const hasWriteFileResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'explicit-builtins-write-1'
+      ));
+      const hasShellResult = request.messages.some((message: any) => (
+        message.role === 'tool' && message.tool_call_id === 'explicit-builtins-shell-1'
+      ));
+
+      if (!hasCreateDirectoryResult) {
+        const createDirectoryToolCall = {
+          id: 'explicit-builtins-mkdir-1',
+          type: 'function' as const,
+          function: {
+            name: 'create_directory',
+            arguments: '{"path":"nested"}',
+          },
+        };
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [createDirectoryToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [createDirectoryToolCall],
+          },
+        };
+      }
+
+      if (!hasWriteFileResult) {
+        const writeFileToolCall = {
+          id: 'explicit-builtins-write-1',
+          type: 'function' as const,
+          function: {
+            name: 'write_file',
+            arguments: JSON.stringify({
+              filePath: 'nested/output.txt',
+              content: 'hello from explicit builtIns',
+            }),
+          },
+        };
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [writeFileToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [writeFileToolCall],
+          },
+        };
+      }
+
+      if (!hasShellResult) {
+        const shellToolCall = {
+          id: 'explicit-builtins-shell-1',
+          type: 'function' as const,
+          function: {
+            name: 'shell_cmd',
+            arguments: '{"command":"pwd"}',
+          },
+        };
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [shellToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [shellToolCall],
+          },
+        };
+      }
+
+      const finalAnswerCall = {
+        id: 'explicit-builtins-final-1',
+        type: 'function' as const,
+        function: {
+          name: 'final_answer',
+          arguments: '{"answer":"done"}',
+        },
+      };
+
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      };
+    });
+
+    await withTempWorkspace(async (workspacePath) => {
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Run a command if needed.' }],
+        context: {
+          workingDirectory: workspacePath,
+          toolPermission: 'auto',
+        },
+        builtIns: {
+          create_directory: true,
+          shell_cmd: true,
+          web_fetch: true,
+          write_file: true,
+          ask_user_input: true,
+        },
+      });
+
+      expect(result).toEqual(expect.objectContaining({
+        status: 'completed',
+        output: 'done',
+      }));
+      expect(result.messages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'explicit-builtins-mkdir-1',
+          content: expect.stringContaining('"path"'),
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'explicit-builtins-write-1',
+          content: expect.stringContaining('"filePath"'),
+        }),
+        expect.objectContaining({
+          role: 'tool',
+          tool_call_id: 'explicit-builtins-shell-1',
+          content: expect.stringContaining(workspacePath),
+        }),
+      ]));
+      await expect(fs.readFile(path.join(workspacePath, 'nested', 'output.txt'), 'utf8'))
+        .resolves.toBe('hello from explicit builtIns');
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(4);
+
+      await runtime.dispose();
+    });
   });
 
   it('exports human-input result helpers for resuming ask_user_input runs', () => {
@@ -2251,14 +2425,8 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('includes only the read-only built-ins by default', () => {
-    expect(Object.keys(resolveTools()).sort()).toEqual([
-      'list_files',
-      'load_skill',
-      'path_exists',
-      'read_file',
-      'search_files',
-    ]);
+  it('includes all built-ins by default', () => {
+    expect(Object.keys(resolveTools()).sort()).toEqual([...BUILT_IN_TOOL_NAMES].sort());
   });
 
   it('exposes only ask_user_input for human input', () => {
@@ -2292,6 +2460,70 @@ describe('llm-runtime runtime', () => {
       'search_files',
       'shell_cmd',
     ].sort());
+  });
+
+  it('supports builtIns true as the all built-ins host shortcut', () => {
+    expect(Object.keys(resolveTools({ builtIns: true })).sort()).toEqual([...BUILT_IN_TOOL_NAMES].sort());
+  });
+
+  it('treats omitted builtIns and builtIns true equivalently for ordinary final answers', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const finalAnswerCall = {
+      id: 'default-all-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"done"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [finalAnswerCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [finalAnswerCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    await expect(runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Finish.' }],
+    })).resolves.toMatchObject({
+      status: 'completed',
+      output: 'done',
+    });
+
+    await expect(runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Finish.' }],
+      builtIns: true,
+    })).resolves.toMatchObject({
+      status: 'completed',
+      output: 'done',
+    });
+
+    await runtime.dispose();
+  });
+
+  it('rejects built-in string shorthand selection modes', () => {
+    expect(() => resolveTools({ builtIns: 'all' as any }))
+      .toThrow('Built-in string shorthand modes are not supported');
+    expect(() => resolveTools({ builtIns: 'read-only' as any }))
+      .toThrow('Built-in string shorthand modes are not supported');
   });
 
   it('rejects unknown built-in selection keys such as removed grep', () => {
@@ -3014,11 +3246,25 @@ describe('llm-runtime runtime', () => {
   it('keeps ask_user_input selection in built-in intersection helpers', () => {
     expect(intersectBuiltInToolSelections(true, {
       ask_user_input: true,
-    })).toMatchObject({
+    })).toEqual(expect.objectContaining({
       ask_user_input: true,
-    });
+      read_file: false,
+      shell_cmd: false,
+    }));
 
-    expect(() => intersectBuiltInToolSelections(true, {
+    expect(intersectBuiltInToolSelections({
+      ask_user_input: true,
+      read_file: true,
+    }, {
+      ask_user_input: true,
+    })).toEqual(expect.objectContaining({
+      ask_user_input: true,
+      read_file: false,
+    }));
+
+    expect(() => intersectBuiltInToolSelections({
+      ask_user_input: true,
+    }, {
       human_intervention_request: true,
     } as any)).toThrow('Unknown built-in tool name "human_intervention_request".');
   });

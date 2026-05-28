@@ -150,6 +150,9 @@ describe('llm-runtime mocked showcase', () => {
 
     const builtIns = resolveTools({
       environment: runtime,
+      builtIns: {
+        load_skill: true,
+      },
     });
     const skill = await runtime.skillRegistry.loadSkill('find-skills');
 

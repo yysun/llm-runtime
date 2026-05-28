@@ -222,7 +222,11 @@ for await (const event of runtime.streamComplete({
   messages: [
     { role: 'user', content: 'Use tools if needed, then give the final answer.' },
   ],
-  builtIns: 'read-only',
+  builtIns: {
+    read_file: true,
+    search_files: true,
+    path_exists: true,
+  },
 })) {
   if (event.type === 'text_delta' || event.type === 'final_answer_delta') {
     process.stdout.write(event.delta);
@@ -256,12 +260,59 @@ Built-in tool names are reserved:
 - `create_directory`
 - `path_exists`
 
-Default built-ins differ by call shape:
+Built-ins default to all package-owned tools for host convenience. Pass `false` to disable them, or pass a narrow map when the task should expose less:
 
-- `generate(...)` defaults to the read-only built-ins: `load_skill`, `read_file`, `list_files`, `search_files`, `path_exists`
-- `complete(...)` and `streamComplete(...)` default to the same read-only set plus model-visible `ask_user_input`
-- write-capable or external-action built-ins require explicit opt-in with `builtIns: true`, `builtIns: 'all'`, or a per-tool map
-- `builtIns: false` disables all built-ins for that call
+- omitting `builtIns` enables every built-in tool
+- `builtIns: false` enables no built-in tools
+- `builtIns: true` enables every built-in tool
+- pass an explicit per-tool map such as `{ read_file: true, search_files: true }`
+- string shorthand modes such as `builtIns: 'all'` and `builtIns: 'read-only'` are not supported
+
+Use small, task-specific maps:
+
+```ts
+const readOnlyBuiltIns = {
+  load_skill: true,
+  list_files: true,
+  search_files: true,
+  read_file: true,
+  path_exists: true,
+};
+
+const writeFileBuiltIns = {
+  ...readOnlyBuiltIns,
+  create_directory: true,
+  write_file: true,
+};
+
+const commandBuiltIns = {
+  ...writeFileBuiltIns,
+  shell_cmd: true,
+};
+```
+
+Opt into write or command tools only when the task needs them. Do not use a broad preset for ordinary file inspection:
+
+```ts
+const result = await runtime.complete({
+  provider: 'openai',
+  model: 'gpt-5',
+  messages: [
+    { role: 'user', content: 'Run the project test command and summarize the result.' },
+  ],
+  context: {
+    workingDirectory: process.cwd(),
+  },
+  builtIns: {
+    read_file: true,
+    search_files: true,
+    path_exists: true,
+    create_directory: true,
+    write_file: true,
+    shell_cmd: true,
+  },
+});
+```
 
 Prefer structured workspace tools over `shell_cmd` for routine file work:
 
@@ -321,6 +372,14 @@ Runtime instances also expose `resolveTools(...)`, `executeToolCall(...)`, and `
       description?: string;
     }>;
   }>;
+}
+```
+
+If you use a narrow `builtIns` map, include it when the model is allowed to ask the host for a human decision:
+
+```ts
+builtIns: {
+  ask_user_input: true,
 }
 ```
 
