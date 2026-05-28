@@ -6,6 +6,7 @@ language: "default"
 source_paths:
   - "README.md"
   - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
+  - ".docs/reqs/2026/05/28/req-host-owned-tool-calls.md"
   - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
   - "src/complete-defaults.ts"
   - "src/runtime.ts"
@@ -13,7 +14,7 @@ source_paths:
   - "src/builtins.ts"
   - "tests/llm/runtime.test.ts"
   - "tests/llm/turn-loop.test.ts"
-updated_at: "2026-05-27"
+updated_at: "2026-05-28"
 ---
 
 `ask_user_input` is a model-facing contract, not a runtime-owned UI loop.
@@ -22,15 +23,16 @@ The important decision is the split: the package should tell the model how to as
 
 Facts from source:
 - `src/complete-defaults.ts` exposes all package-owned built-ins by default, including `ask_user_input`.
-- `src/runtime.ts` treats `ask_user_input` calls as host-handled when the host did not provide an executable tool with that name. The runtime facade returns `status: "tool_calls"` with the assistant message and tool-call batch.
-- The runtime does not wait for human input, enforce a human-input timeout, or emit a `waiting_for_human` result.
+- `src/builtins.ts` keeps `ask_user_input` in the built-in catalog but does not attach a package executor to the default definition.
+- `src/runtime.ts` treats any known tool without an executor as host-owned. Default `ask_user_input` therefore stops `complete(...)` or `streamComplete(...)` with `status: "tool_calls"` and the pending tool call batch.
+- The runtime does not wait for human input, enforce a human-input timeout, emit a `waiting_for_human` result, or fabricate a tool result for default `ask_user_input`.
 - If the host supplies executable `ask_user_input` through `extraTools` or `tools`, runtime completion executes that host tool normally.
 - Hosts resume by appending a normal `tool` message with the pending tool call id and serialized answer, then calling `complete(...)` or `streamComplete(...)` again with the updated messages.
 - `src/runtime-complete-contract.ts` still contains helper functions for that message shape, but they are no longer exported from the root entrypoint.
 - `ask_user_input` is an interaction tool, not task-action evidence. The loop still requires later action evidence when the turn cannot be completed from human input alone.
 
 Why this matters:
-- Default `ask_user_input` visibility makes the human-interaction contract available to hosts without re-declaring the same schema on every call.
+- Default `ask_user_input` visibility makes the human-interaction contract available to hosts without re-declaring the same schema on every call, while the `tool_calls` stop makes ownership explicit instead of pretending the package can answer for the host.
 - Owning the wait inside the package would be worse: only the host knows the product UI, cancellation policy, timeout rules, and resume storage.
 
 Read this with [[src-runtime]], [[src-runtime-complete-contract]], [[src-completion-loop]], and [[approval-and-synthetic-tool-call-messages]].

@@ -13,6 +13,7 @@ source_paths:
   - ".docs/done/2026/05/27/skill-root-file-tools.md"
   - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
   - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
+  - ".docs/reqs/2026/05/28/req-host-owned-tool-calls.md"
   - "src/runtime.ts"
   - "src/complete-defaults.ts"
   - "src/index.ts"
@@ -39,7 +40,7 @@ Facts from source:
 - `generate(...)` and `stream(...)` share the same environment and tool-resolution pipeline, then dispatch into provider-specific helpers from [[provider-adapters]]. OpenAI, Azure, XAI, generic OpenAI-compatible backends, and Ollama all route through the OpenAI-compatible adapter; Anthropic and Google keep their own adapter paths.
 - The root entrypoint exports only `generate(...)`, `complete(...)`, `streamComplete(...)`, `createRuntime(...)`, and a compact type set. Lower-level helpers in this file, including standalone tool resolution and cache cleanup functions, are internal extension points rather than root public API.
 - `runtime.complete(...)` and `runtime.streamComplete(...)` adapt [[src-completion-loop]] into the stable runtime-facade result and event shapes documented in [[src-runtime-complete-contract]].
-- The runtime facade now treats control-tool termination as the only supported agentic stop protocol. Plain assistant narration is retried or rejected; final answers should arrive through `final_answer`, missing user decisions through `need_user_input`, and hard blockers through `blocked`.
+- The runtime facade now treats control-tool termination as the only supported agentic stop protocol. Plain assistant narration is retried or rejected; final answers should arrive through `final_answer`, missing user decisions through `ask_user_input` when that built-in is exposed, and hard blockers through `blocked`.
 - `generate(...)` is a single provider call. `complete(...)` is the runtime-owned loop: execute normal tools, append results, call the model again, and stop only through control tools or guardrails.
 - `runtime.streamComplete(...)` now emits provider text, reasoning, raw tool-call argument, and parsed `final_answer` answer deltas when adapters supply them, in addition to lifecycle events.
 - The `final_answer` streaming path keeps raw `tool_call_delta` events available for host parsers, then incrementally decodes the JSON string field named `answer` and emits displayable `final_answer_delta` chunks. This is deliberately scoped to the runtime's control-tool shape, not a general streaming JSON parser.
@@ -47,7 +48,7 @@ Facts from source:
 - When `builtIns` is omitted for runtime-facade completion, all package-owned built-ins are exposed. Callers use `builtIns: false` to disable them or a per-tool map to select a narrower surface.
 - `builtIns` changes package-owned tool availability, not loop ownership. With `builtIns: false`, host-supplied `extraTools` or `tools` still run inside `complete(...)`, and control tools are still injected.
 - Host mutating-tool requirements are host-owned. A package built-in write or shell result must not satisfy the evidence requirement created by a host tool with mutating `evidenceKind`.
-- If `ask_user_input` appears in a runtime completion response and the host did not supply an executable tool for it, the facade returns `status: "tool_calls"` with the assistant message and tool calls. It does not wait for a human, enforce a timeout, or translate the branch into a special human-wait state.
+- If default `ask_user_input` appears in runtime completion, the runtime returns `status: "tool_calls"` with the model's tool call so the host can ask and resume. It does not wait for a human, enforce a timeout, or fabricate a pending tool result.
 - If the host supplies executable `ask_user_input`, runtime completion executes it like any other host tool and continues with the returned tool message.
 - Per-call `skillRoots` are honored even through a bound runtime environment, so a request can narrow or extend skill discovery without rebuilding the whole runtime.
 - Before dispatch, the runtime can inject package-owned tool guidance into the first system message. Caller-owned system content, including any embedded AGENTS.md instructions or caller-defined tool policy, should therefore be assembled into one leading system block before the runtime appends its own guidance.

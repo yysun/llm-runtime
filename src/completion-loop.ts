@@ -15,11 +15,12 @@
  * - No Agent World-specific runtime types are referenced here.
  *
  * Recent changes:
+ * - 2026-05-28: Removed `need_user_input` as a control tool; `ask_user_input` is the single host-input path.
  * - 2026-05-28: Removed the consecutive tool-turn guard; changing tool work is valid progress and should not be capped by the runtime.
  * - 2026-05-28: Host task budgets now cancel with `abortSignal` while runtime keeps structural loop guards.
  * - 2026-05-28: Made repeated-tool guard exits remain guard stops instead of synthetic successful text responses.
  * - 2026-05-27: Removed `complete(...)` `rejectedTextRetryLimit` default of 2 in favor of `Number.MAX_SAFE_INTEGER` so narration responses keep looping until the model calls a control tool or `maxIterations` fires.
- * - 2026-05-27: Defaulted `complete(...)` to `agentControlMode: true` so free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop; callers must call `final_answer`, `need_user_input`, or `blocked` to stop. Opt out with `agentControlMode: false`.
+ * - 2026-05-27: Defaulted `complete(...)` to `agentControlMode: true` so free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop; callers must call `final_answer` or `blocked` to stop. Opt out with `agentControlMode: false`.
  * - 2026-05-27: Passed package-managed tool executors from the generic loop when `modelRequest` is provided.
  * - 2026-05-27: Added an explicit empty-text retry instruction so provider stop-without-content responses continue with tools instead of failing silently.
  * - 2026-05-15: Defaulted `complete(...)` to permissive text-response mode so general chat hosts accept conversational responses; strict callers opt in via `defaultTextResponseMode: 'require_tool_result'`. The post-interaction structural rejection still fires regardless of mode.
@@ -64,7 +65,6 @@ type ParsedToolIntent = {
 
 export const AGENT_CONTROL_TOOL_NAMES = [
   'final_answer',
-  'need_user_input',
   'blocked',
 ] as const;
 
@@ -97,7 +97,6 @@ export type TurnLoopControl =
 export type TurnLoopTerminalReason =
   | 'text_response'
   | 'final_answer'
-  | 'needs_user_input'
   | 'blocked'
   | 'tool_calls_response'
   | 'empty_text_stop'
@@ -110,7 +109,6 @@ export type TurnLoopStepBranch =
   | 'tool_calls_continue'
   | 'tool_calls_stop'
   | 'final_answer_stop'
-  | 'needs_user_input_stop'
   | 'blocked_stop'
   | 'text_response_continue'
   | 'text_response_stop'
@@ -250,13 +248,6 @@ export interface TurnLoopFinalAnswerControlOutput {
   evidenceRefs: string[];
 }
 
-export interface TurnLoopNeedUserInputControlOutput {
-  kind: 'need_user_input';
-  toolCallId: string;
-  question: string;
-  reason: string;
-}
-
 export interface TurnLoopBlockedControlOutput {
   kind: 'blocked';
   toolCallId: string;
@@ -265,7 +256,6 @@ export interface TurnLoopBlockedControlOutput {
 
 export type TurnLoopControlOutput =
   | TurnLoopFinalAnswerControlOutput
-  | TurnLoopNeedUserInputControlOutput
   | TurnLoopBlockedControlOutput;
 
 export interface TurnLoopControlToolCallEvent<TState, TMessage extends LLMChatMessage = LLMChatMessage> {
@@ -283,7 +273,7 @@ export const DEFAULT_UNSUPPORTED_EVIDENCE_CLAIM_RECOVERY_INSTRUCTION = 'The last
 export const DEFAULT_NON_PROGRESSING_TEXT_RECOVERY_INSTRUCTION = 'The last response did not complete the task with the required evidence. Continue now. If work is needed, call the appropriate tool. If prior tool results already contain enough evidence, provide the final answer based on those results.';
 export const DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION = 'The user already answered the interaction request. Do not ask the same question again and do not narrate unverified results. Use the user\'s answer now and call the appropriate task tool in this turn.';
 export const DEFAULT_WAITING_FOR_INTERACTION_RESOLUTION_INSTRUCTION = 'You already requested required user input. Do not repeat the same question in assistant text and do not call the same interaction tool again before the user answers. Wait for the user answer, then continue with the appropriate task tool.';
-export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace tool, or use final_answer, need_user_input, or blocked.';
+export const DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION = 'The last response did not follow the agent run loop protocol. Continue now. Call the appropriate workspace or user-input tool, or use final_answer or blocked.';
 export const DEFAULT_REPEATED_TOOL_CALL_RECOVERY_INSTRUCTION = 'You already called the same tool with the same arguments and have its tool result in the conversation. Do not call that same tool again. Use the existing tool result to continue now: provide the final answer, call a different necessary tool, or report what is blocked.';
 export const DEFAULT_EMPTY_TEXT_RECOVERY_INSTRUCTION = 'Your previous response had no final text and no tool calls. Continue now by calling the next required tool or providing the final answer if the task is complete. If you just loaded a skill and it instructs you to read a reference file, call read_file now. Do not narrate future intent.';
 export const DEFAULT_TURN_LOOP_MAX_ITERATIONS = 24;
@@ -386,7 +376,6 @@ export interface RunCompletionLoopOptions<TState, TMessage extends LLMChatMessag
     toolExecutor?: TurnLoopToolExecutor;
   }) => Promise<TurnLoopStepResult<TState> | void>;
   onFinalAnswerToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
-  onNeedUserInputToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
   onBlockedToolCall?: (params: TurnLoopControlToolCallEvent<TState, TMessage>) => Promise<TurnLoopStepResult<TState> | void>;
   onEmptyTextStop?: (params: {
     state: TState;
@@ -625,26 +614,6 @@ export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
       },
     },
     {
-      name: 'need_user_input',
-      description: 'Stop the agent run because required user input is missing.',
-      evidenceKind: 'none',
-      parameters: {
-        type: 'object',
-        properties: {
-          question: {
-            type: 'string',
-            description: 'Required user-facing question asking for the missing input.',
-          },
-          reason: {
-            type: 'string',
-            description: 'Required reason why the run cannot continue without the user input.',
-          },
-        },
-        required: ['question', 'reason'],
-        additionalProperties: false,
-      },
-    },
-    {
       name: 'blocked',
       description: 'Stop the agent run because a permission, safety, or external block prevents further progress.',
       parameters: {
@@ -727,19 +696,6 @@ function tryParseControlToolOutput(toolCall: LLMToolCall): TurnLoopControlOutput
       toolCallId: toolCall.id,
       answer: args.answer,
       evidenceRefs: toStringArray(args.evidenceRefs),
-    };
-  }
-
-  if (toolCall.function.name === 'need_user_input') {
-    if (!isNonEmptyString(args.question) || !isNonEmptyString(args.reason)) {
-      return null;
-    }
-
-    return {
-      kind: 'need_user_input',
-      toolCallId: toolCall.id,
-      question: args.question,
-      reason: args.reason,
     };
   }
 
@@ -1300,43 +1256,6 @@ export async function runCompletionLoop<TState, TMessage extends LLMChatMessage 
               controlOutput,
               stop: {
                 reason: 'final_answer',
-                iteration,
-                elapsedMs: getElapsedMs(),
-                maxIterations,
-                controlOutput,
-              },
-            });
-          }
-
-          if (controlOutput?.kind === 'need_user_input') {
-            const next = await options.onNeedUserInputToolCall?.({
-              state,
-              controlOutput,
-              response,
-              messages,
-              iteration,
-            });
-            state = next?.state ?? state;
-            if (next?.next?.control === 'continue') {
-              const guardStop = await stopForToolGuards();
-              if (guardStop) {
-                if (isTurnLoopToolGuardContinue(guardStop)) {
-                  continue;
-                }
-                return guardStop;
-              }
-              recordStep(iteration, response, 'tool_calls_continue');
-              transientInstruction = next.next.transientInstruction ?? DEFAULT_AGENT_CONTROL_PROTOCOL_VIOLATION_INSTRUCTION;
-              continue;
-            }
-
-            recordStep(iteration, response, 'needs_user_input_stop');
-            return await finalize({
-              reason: 'needs_user_input',
-              response,
-              controlOutput,
-              stop: {
-                reason: 'needs_user_input',
                 iteration,
                 elapsedMs: getElapsedMs(),
                 maxIterations,

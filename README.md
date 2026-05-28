@@ -150,7 +150,6 @@ await runtime.dispose();
 `complete(...)` owns a bounded model/tool loop. It retries weak non-progressing responses, executes known tools, injects the runtime completion contract, and terminates through internal control tools:
 
 - `final_answer`
-- `need_user_input`
 - `blocked`
 
 Those control tools are runtime-reserved. Do not define app tools with those names.
@@ -159,7 +158,8 @@ The loop continues under these rules:
 
 - normal tool call: execute the tool, append the tool result, and call the model again
 - `final_answer`: stop with `status: 'completed'`
-- `need_user_input`: stop with `status: 'tool_calls'` so the host can ask/resume
+- `ask_user_input`: stop with `status: 'tool_calls'` so the host can ask/resume
+- known custom tool without an executor: stop with `status: 'tool_calls'` so the host can run it and resume
 - `blocked`: stop with `status: 'failed'`
 - plain narration or intent text: keep going; narration is not completion
 - empty text: retry according to `emptyTextRetryLimit`
@@ -168,7 +168,7 @@ The loop continues under these rules:
 - repeated identical tool calls or `maxIterations`: stop with the corresponding bounded failure
 - host cancellation through `context.abortSignal`: abort the active model/tool path when the host decides the task should stop
 
-`builtIns` only changes which package-owned tools are available. It does not decide whether the loop itself runs. `builtIns: false` with host-supplied `extraTools` or `tools` still gives `complete(...)` a valid loop: host tools remain executable, and the runtime still injects `final_answer`, `need_user_input`, and `blocked`.
+`builtIns` only changes which package-owned tools are available. It does not decide whether the loop itself runs. `builtIns: false` with host-supplied `extraTools` or `tools` still gives `complete(...)` a valid loop: host tools remain executable, and the runtime still injects `final_answer` and `blocked`.
 
 `complete(...)` returns:
 
@@ -330,6 +330,8 @@ const result = await runtime.complete({
   },
 });
 ```
+
+`toolPermission: 'read'` is a hard read-only boundary for package-owned mutating tools. It blocks `write_file`, `create_directory`, and `shell_cmd` even if those built-ins are exposed.
 
 Prefer structured workspace tools over `shell_cmd` for routine file work:
 
@@ -508,5 +510,7 @@ Useful scripts:
 - `npm run test:e2e:turn-loop` runs runtime completion showcase coverage
 - `npm run test:e2e:turn-loop:dry-run` validates turn-loop showcase wiring
 - `npm run test:e2e:hardening` runs deterministic hardening coverage without a live provider
+- `npm run test:e2e:host-owned` runs deterministic host-owned tool-call coverage without a live provider
+- `npm run test:e2e:host-owned:gemini` runs the host-owned tool-call coverage against Gemini 2.5 Flash by default
 
 Live showcase runners expect a repo-local `.env` with the relevant provider credentials.

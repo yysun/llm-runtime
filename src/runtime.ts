@@ -15,6 +15,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-28: Stopped host-owned tool calls, including non-executable `ask_user_input`, as `tool_calls` results for host resume.
+ * - 2026-05-28: Removed the `need_user_input` control-tool result path; host input now flows through `ask_user_input`.
  * - 2026-05-28: Mapped repeated-tool guard stops to failed runtime results instead of completed diagnostic output.
  * - 2026-05-28: Kept host mutating-tool completion requirements independent from package built-in results.
  * - 2026-05-28: Defaulted omitted `builtIns` to all package-owned built-ins for host convenience.
@@ -257,18 +259,6 @@ type RuntimeCompletionState = {
   raw?: unknown;
 };
 
-function hasHostExecutableTool(
-  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools' | 'onToolCall'>,
-  toolName: string,
-): boolean {
-  if (typeof request.onToolCall === 'function') {
-    return true;
-  }
-  const extraTool = request.extraTools?.find((tool) => String(tool.name || '').trim() === toolName);
-  const directTool = request.tools?.[toolName];
-  return typeof extraTool?.execute === 'function' || typeof directTool?.execute === 'function';
-}
-
 function appendTransientInstruction(
   messages: LLMChatMessage[],
   transientInstruction?: string,
@@ -363,6 +353,15 @@ function requestExposesMutatingTools(request: LLMRuntimeCompleteOptions): boolea
   }
 
   return false;
+}
+
+function isKnownHostOwnedToolCall(
+  toolCall: LLMToolCall,
+  resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
+): boolean {
+  const toolName = String(toolCall.function.name || '').trim();
+  const definition = resolvedToolDefinitions[toolName];
+  return Boolean(definition && typeof definition.execute !== 'function');
 }
 
 function hasMutatingToolResult(
@@ -484,16 +483,6 @@ function adaptRuntimeCompleteResult(result: RunCompletionLoopResult<RuntimeCompl
       status: 'completed',
       messages: result.state.messages,
       output: result.controlOutput.answer,
-      raw: result.state.raw ?? result.response ?? undefined,
-    };
-  }
-
-  if (result.reason === 'needs_user_input' && result.controlOutput?.kind === 'need_user_input') {
-    const toolCall = result.response?.tool_calls?.find((candidate) => candidate.id === result.controlOutput?.toolCallId);
-    return {
-      status: 'tool_calls',
-      messages: result.state.messages,
-      toolCalls: toolCall ? [toolCall] : (result.response?.tool_calls ?? []),
       raw: result.state.raw ?? result.response ?? undefined,
     };
   }
@@ -789,65 +778,72 @@ async function runRuntimeCompletion(
   const streamToolCallStates = new Map<string, StreamToolCallDeltaState>();
   const mutatingToolRequired = requestExposesMutatingTools(request);
   const requestToolDefinitions = createRequestToolDefinitionMap(request);
+  const modelRequest = buildRuntimeCompletionModelRequest(environment, request, {
+    streamModel: options.streamModel,
+    onChunk: options.streamModel
+      ? (chunk) => {
+        if (chunk.reasoningContent) {
+          void emitEvent?.({
+            type: 'reasoning_delta',
+            delta: chunk.reasoningContent,
+            iteration: activeIteration,
+          });
+        }
+        if (chunk.content) {
+          void emitEvent?.({
+            type: 'text_delta',
+            delta: chunk.content,
+            iteration: activeIteration,
+          });
+        }
+        if (chunk.toolCallDelta?.argumentsDelta !== undefined) {
+          const stateKey = getStreamToolCallStateKey(activeIteration, chunk.toolCallDelta.index);
+          const state = streamToolCallStates.get(stateKey) ?? {
+            argumentsText: '',
+            emittedFinalAnswer: '',
+          };
+
+          state.argumentsText += chunk.toolCallDelta.argumentsDelta;
+          state.id = chunk.toolCallDelta.id ?? state.id;
+          state.name = chunk.toolCallDelta.name ?? state.name;
+          streamToolCallStates.set(stateKey, state);
+
+          void emitEvent?.({
+            type: 'tool_call_delta',
+            ...(state.id ? { toolCallId: state.id } : {}),
+            ...(state.name ? { toolName: state.name } : {}),
+            argumentsDelta: chunk.toolCallDelta.argumentsDelta,
+            index: chunk.toolCallDelta.index,
+            iteration: activeIteration,
+          });
+
+          if (state.name === 'final_answer') {
+            const answerPrefix = extractFinalAnswerPrefix(state.argumentsText);
+            const delta = answerPrefix.slice(state.emittedFinalAnswer.length);
+            if (delta) {
+              state.emittedFinalAnswer = answerPrefix;
+              void emitEvent?.({
+                type: 'answer_delta',
+                delta,
+                iteration: activeIteration,
+              });
+            }
+          }
+        }
+      }
+      : undefined,
+  });
+  const resolvedToolDefinitionsPromise = buildResolvedToolSetAsync({
+    environment,
+    builtIns: modelRequest.builtIns,
+    extraTools: modelRequest.extraTools,
+    tools: modelRequest.tools,
+  });
   const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
     initialState: {
       messages: request.messages,
     },
-    modelRequest: buildRuntimeCompletionModelRequest(environment, request, {
-      streamModel: options.streamModel,
-      onChunk: options.streamModel
-        ? (chunk) => {
-          if (chunk.reasoningContent) {
-            void emitEvent?.({
-              type: 'reasoning_delta',
-              delta: chunk.reasoningContent,
-              iteration: activeIteration,
-            });
-          }
-          if (chunk.content) {
-            void emitEvent?.({
-              type: 'text_delta',
-              delta: chunk.content,
-              iteration: activeIteration,
-            });
-          }
-          if (chunk.toolCallDelta?.argumentsDelta !== undefined) {
-            const stateKey = getStreamToolCallStateKey(activeIteration, chunk.toolCallDelta.index);
-            const state = streamToolCallStates.get(stateKey) ?? {
-              argumentsText: '',
-              emittedFinalAnswer: '',
-            };
-
-            state.argumentsText += chunk.toolCallDelta.argumentsDelta;
-            state.id = chunk.toolCallDelta.id ?? state.id;
-            state.name = chunk.toolCallDelta.name ?? state.name;
-            streamToolCallStates.set(stateKey, state);
-
-            void emitEvent?.({
-              type: 'tool_call_delta',
-              ...(state.id ? { toolCallId: state.id } : {}),
-              ...(state.name ? { toolName: state.name } : {}),
-              argumentsDelta: chunk.toolCallDelta.argumentsDelta,
-              index: chunk.toolCallDelta.index,
-              iteration: activeIteration,
-            });
-
-            if (state.name === 'final_answer') {
-              const answerPrefix = extractFinalAnswerPrefix(state.argumentsText);
-              const delta = answerPrefix.slice(state.emittedFinalAnswer.length);
-              if (delta) {
-                state.emittedFinalAnswer = answerPrefix;
-                void emitEvent?.({
-                  type: 'answer_delta',
-                  delta,
-                  iteration: activeIteration,
-                });
-              }
-            }
-          }
-        }
-        : undefined,
-    }),
+    modelRequest,
     maxIterations: request.maxIterations,
     emptyTextRetryLimit: request.emptyTextRetryLimit ?? DEFAULT_TURN_LOOP_MAX_ITERATIONS,
     repeatedToolCallGuard: request.repeatedToolCallGuard,
@@ -925,14 +921,6 @@ async function runRuntimeCompletion(
         },
       };
     },
-    onNeedUserInputToolCall: async ({ state, response }) => ({
-      state: {
-        ...state,
-        messages: [...state.messages, response.assistantMessage],
-        toolCalls: response.tool_calls ?? [],
-        raw: response,
-      },
-    }),
     onBlockedToolCall: async ({ state, response, controlOutput }) => {
       if (controlOutput.kind !== 'blocked') {
         return { state };
@@ -950,21 +938,7 @@ async function runRuntimeCompletion(
     onToolCallsResponse: async ({ state, response, toolExecutor, iteration }) => {
       const nextMessages = [...state.messages, response.assistantMessage];
       const toolCalls = response.tool_calls ?? [];
-      const hostHandledHumanInputToolCalls = toolCalls.filter((toolCall) => (
-        HUMAN_INTERVENTION_BUILT_IN_TOOL_NAMES.includes(toolCall.function.name as any)
-        && !hasHostExecutableTool(request, toolCall.function.name)
-      ));
-
-      if (hostHandledHumanInputToolCalls.length > 0) {
-        return {
-          state: {
-            ...state,
-            messages: nextMessages,
-            toolCalls,
-            raw: response,
-          },
-        };
-      }
+      const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
 
       if (!toolExecutor) {
         return {
@@ -978,6 +952,7 @@ async function runRuntimeCompletion(
       }
 
       const toolMessages = [...nextMessages];
+      const hostOwnedToolCalls: LLMToolCall[] = [];
       for (const toolCall of toolCalls) {
         const parsedArguments = parseToolCallArguments(toolCall);
         const parsedArgs = parsedArguments.ok ? parsedArguments.args : {};
@@ -985,6 +960,14 @@ async function runRuntimeCompletion(
           ...(request.context ?? {}),
           messages: toolMessages.map((message) => ({ ...message })),
         };
+        let toolResult: unknown;
+        const toolName = toolCall.function.name;
+        const knownHostOwnedToolCall = isKnownHostOwnedToolCall(toolCall, resolvedToolDefinitions);
+        if (knownHostOwnedToolCall && !request.onToolCall) {
+          hostOwnedToolCalls.push(toolCall);
+          continue;
+        }
+
         await emitEvent?.({
           type: 'tool_start',
           toolCall,
@@ -992,9 +975,23 @@ async function runRuntimeCompletion(
           iteration,
         });
 
-        let toolResult: unknown;
-        const toolName = toolCall.function.name;
-        if (request.onToolApproval) {
+        if (knownHostOwnedToolCall && request.onToolCall) {
+          const handled = await request.onToolCall({
+            toolCall,
+            toolName,
+            parsedArguments: parsedArgs,
+            context: executionContext,
+            executeDefault: () => toolExecutor.executeToolCall(toolCall, executionContext, { errorMode: 'return-artifact' }),
+          });
+          if (handled.handled && handled.result !== undefined) {
+            toolResult = handled.result;
+          } else {
+            hostOwnedToolCalls.push(toolCall);
+            continue;
+          }
+        }
+
+        if (toolResult === undefined && request.onToolApproval) {
           const approval = await request.onToolApproval({ toolCall, toolName, parsedArguments: parsedArgs });
           if (!approval.approved) {
             toolResult = createToolExecutionFailureArtifact({
@@ -1044,6 +1041,17 @@ async function runRuntimeCompletion(
           result: toolResult,
           iteration,
         });
+      }
+
+      if (hostOwnedToolCalls.length > 0) {
+        return {
+          state: {
+            ...state,
+            messages: toolMessages,
+            toolCalls: hostOwnedToolCalls,
+            raw: response,
+          },
+        };
       }
 
       return {

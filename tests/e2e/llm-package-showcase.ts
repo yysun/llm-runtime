@@ -47,7 +47,7 @@ import {
 } from './support/llm-showcase-fixtures.js';
 
 const MAX_ITERATIONS = 8;
-const CONTROL_TOOL_NAMES = new Set(['final_answer', 'need_user_input', 'blocked']);
+const CONTROL_TOOL_NAMES = new Set(['final_answer', 'blocked']);
 
 loadDotEnv({
   path: path.resolve(process.cwd(), '.env'),
@@ -75,11 +75,6 @@ function printHelp() {
   ].join('\n'));
 }
 
-function parseToolJsonResult(result: unknown, label: string): Record<string, unknown> {
-  assert.equal(typeof result, 'string', `${label} should return a JSON string`);
-  return JSON.parse(result) as Record<string, unknown>;
-}
-
 async function assertHitlStrictSchema(runtime: LLMRuntime) {
   const tools = runtime.resolveTools({
     builtIns: {
@@ -87,50 +82,13 @@ async function assertHitlStrictSchema(runtime: LLMRuntime) {
     },
   });
 
-  assert(tools.ask_user_input?.execute, 'ask_user_input should be executable');
-
-  const structuredResult = parseToolJsonResult(await tools.ask_user_input.execute({
-    type: 'multiple-select',
-    allowSkip: true,
-    questions: [{
-      header: 'Checks',
-      id: 'checks',
-      question: 'Which checks should run?',
-      options: [
-        { id: 'unit', label: 'Unit' },
-        { id: 'types', label: 'Types' },
-      ],
-    }],
-  }, {
-    toolCallId: 'e2e-hitl-structured',
-  }), 'structured ask_user_input');
-
-  assert.equal(structuredResult.status, 'pending');
-  assert.equal(structuredResult.type, 'multiple-select');
-  assert.equal(structuredResult.allowSkip, true);
-  assert.equal(structuredResult.requestId, 'e2e-hitl-structured');
-  assert.equal(structuredResult.question, undefined);
-  assert.equal(structuredResult.options, undefined);
-  assert.equal(structuredResult.defaultOption, undefined);
-  assert.equal(structuredResult.timeoutMs, undefined);
-  assert.equal(structuredResult.metadata, undefined);
-  assert.deepEqual((structuredResult.questions as any[])[0].options, [
-    { id: 'unit', label: 'Unit' },
-    { id: 'types', label: 'Types' },
-  ]);
-
-  const unknownFieldResult = parseToolJsonResult(await tools.ask_user_input.execute({
-    question: 'Continue?',
-    options: ['Yes', 'No'],
-  } as any), 'flat-field ask_user_input');
-  assert.equal(unknownFieldResult.errorType, 'tool_parameter_validation_failed');
-  assert.deepEqual((unknownFieldResult.issues as any[]).map((issue) => issue.path), [
-    'questions',
-    'question',
-    'options',
-  ]);
-  assert.equal((unknownFieldResult.issues as any[])[1].code, 'unknown_parameter');
-  assert.equal((unknownFieldResult.issues as any[])[2].code, 'unknown_parameter');
+  assert(tools.ask_user_input, 'ask_user_input should be model-visible');
+  assert.equal(tools.ask_user_input.execute, undefined, 'ask_user_input should be host-owned');
+  const askSchema = tools.ask_user_input.parameters as any;
+  assert.equal(askSchema.required[0], 'questions');
+  assert.equal(askSchema.properties.questions.type, 'array');
+  assert.equal(askSchema.properties.type.enum[0], 'single-select');
+  assert.equal(askSchema.properties.type.enum[1], 'multiple-select');
 }
 
 function collectToolNames(messages: LLMChatMessage[]): string[] {

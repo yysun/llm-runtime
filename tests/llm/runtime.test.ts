@@ -556,9 +556,9 @@ describe('llm-runtime runtime', () => {
     expect(firstProviderRequest.tools).toEqual(expect.objectContaining({
       project_lookup: expect.objectContaining({ name: 'project_lookup' }),
       final_answer: expect.objectContaining({ name: 'final_answer' }),
-      need_user_input: expect.objectContaining({ name: 'need_user_input' }),
       blocked: expect.objectContaining({ name: 'blocked' }),
     }));
+    expect(firstProviderRequest.tools).not.toHaveProperty('need_user_input');
     for (const builtInToolName of BUILT_IN_TOOL_NAMES) {
       expect(firstProviderRequest.tools).not.toHaveProperty(builtInToolName);
     }
@@ -855,7 +855,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('returns explicit ask_user_input tool calls to the host without executing a runtime HITL wait', async () => {
+  it('returns built-in ask_user_input tool calls to the host without executing a runtime HITL wait', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const askToolCall = {
@@ -869,6 +869,7 @@ describe('llm-runtime runtime', () => {
 
     mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
       expect(request.tools.ask_user_input).toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+      expect(request.tools.ask_user_input.execute).toBeUndefined();
       return {
         type: 'tool_calls',
         content: '',
@@ -893,9 +894,6 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Ask me about scope.' }],
-      builtIns: {
-        ask_user_input: true,
-      },
     });
 
     expect(result.status).toBe('tool_calls');
@@ -905,6 +903,382 @@ describe('llm-runtime runtime', () => {
       expect.objectContaining({ role: 'assistant', tool_calls: [askToolCall] }),
     ]);
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('returns known custom tools without executors as host-owned tool_calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const hostToolCall = {
+      id: 'host-tool-1',
+      type: 'function' as const,
+      function: {
+        name: 'host_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [hostToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [hostToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+    const onToolApproval = vi.fn(() => ({ approved: true }));
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find token.' }],
+      onToolApproval,
+      extraTools: [{
+        name: 'host_lookup',
+        description: 'Host-owned lookup.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([hostToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Find token.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [hostToolCall] }),
+    ]);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+    expect(onToolApproval).not.toHaveBeenCalled();
+
+    await runtime.dispose();
+  });
+
+  it('returns non-executable custom tools to the host when onToolCall declines them', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const hostToolCall = {
+      id: 'host-tool-unhandled-1',
+      type: 'function' as const,
+      function: {
+        name: 'host_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [hostToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [hostToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+    const onToolCall = vi.fn(() => ({ handled: false }));
+    const onToolApproval = vi.fn(() => ({ approved: false, reason: 'should not run' }));
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find token.' }],
+      onToolCall,
+      onToolApproval,
+      extraTools: [{
+        name: 'host_lookup',
+        description: 'Host-owned lookup.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([hostToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Find token.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [hostToolCall] }),
+    ]);
+    expect(onToolCall).toHaveBeenCalledTimes(1);
+    expect(onToolApproval).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('lets onToolCall execute a non-executable host-owned tool and continue the loop', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const hostToolCall = {
+      id: 'host-tool-handled-1',
+      type: 'function' as const,
+      function: {
+        name: 'host_lookup',
+        arguments: '{"query":"token"}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'control-final-host-handled-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"handled by host callback"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [hostToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [hostToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+    const onToolCall = vi.fn(() => ({ handled: true, result: { token: 'host-callback-token' } }));
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find token.' }],
+      onToolCall,
+      extraTools: [{
+        name: 'host_lookup',
+        description: 'Host-owned lookup.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('handled by host callback');
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'host-tool-handled-1',
+        content: JSON.stringify({ token: 'host-callback-token' }),
+      }),
+    ]));
+    expect(onToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
+  });
+
+  it('executes runtime-owned tools in a mixed batch before returning host-owned tool calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const runtimeToolCall = {
+      id: 'runtime-tool-1',
+      type: 'function' as const,
+      function: {
+        name: 'project_lookup',
+        arguments: '{"query":"runtime"}',
+      },
+    };
+    const hostToolCall = {
+      id: 'host-tool-mixed-1',
+      type: 'function' as const,
+      function: {
+        name: 'host_lookup',
+        arguments: '{"query":"host"}',
+      },
+    };
+    const executeRuntimeTool = vi.fn(async () => ({ token: 'runtime-token' }));
+
+    mockGenerateOpenAIResponse.mockResolvedValue({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [runtimeToolCall, hostToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [runtimeToolCall, hostToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+    const onToolApproval = vi.fn(() => ({ approved: true }));
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Find both tokens.' }],
+      onToolApproval,
+      extraTools: [{
+        name: 'project_lookup',
+        description: 'Runtime-owned lookup.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+        execute: executeRuntimeTool,
+      }, {
+        name: 'host_lookup',
+        description: 'Host-owned lookup.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string' },
+          },
+          required: ['query'],
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([hostToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Find both tokens.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [runtimeToolCall, hostToolCall] }),
+      {
+        role: 'tool',
+        tool_call_id: 'runtime-tool-1',
+        content: JSON.stringify({ token: 'runtime-token' }),
+      },
+    ]);
+    expect(executeRuntimeTool).toHaveBeenCalledTimes(1);
+    expect(onToolApproval).toHaveBeenCalledTimes(1);
+    expect(onToolApproval.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ toolName: 'project_lookup' }));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('keeps unknown tool calls on the runtime error path instead of host-owned tool_calls', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const unknownToolCall = {
+      id: 'unknown-tool-1',
+      type: 'function' as const,
+      function: {
+        name: 'not_registered',
+        arguments: '{"query":"token"}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'control-final-after-unknown-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"saw unknown tool error"}',
+      },
+    };
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [unknownToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [unknownToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Call an unknown tool.' }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('saw unknown tool error');
+    expect(result.toolCalls).toBeUndefined();
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'unknown-tool-1',
+        content: expect.stringContaining('"code":"unknown_tool"'),
+      }),
+    ]));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
 
     await runtime.dispose();
   });
@@ -2555,50 +2929,6 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('maps need_user_input control tool calls to host-actionable tool_calls', async () => {
-    mockGenerateOpenAIResponse.mockReset();
-
-    const needInputToolCall = {
-      id: 'control-input-1',
-      type: 'function' as const,
-      function: {
-        name: 'need_user_input',
-        arguments: '{"question":"Which account?","reason":"A target account is required."}',
-      },
-    };
-
-    mockGenerateOpenAIResponse.mockResolvedValue({
-      type: 'tool_calls',
-      content: '',
-      tool_calls: [needInputToolCall],
-      assistantMessage: {
-        role: 'assistant',
-        content: '',
-        tool_calls: [needInputToolCall],
-      },
-    });
-
-    const runtime = createRuntime({
-      providers: {
-        openai: {
-          apiKey: 'runtime-openai-key',
-        },
-      },
-    });
-
-    const result = await runtime.complete({
-      provider: 'openai',
-      model: 'gpt-5',
-      messages: [{ role: 'user', content: 'Find the account.' }],
-    });
-
-    expect(result.status).toBe('tool_calls');
-    expect(result.toolCalls).toEqual([needInputToolCall]);
-    expect(result.toolCalls?.[0]?.function.arguments).toContain('Which account?');
-
-    await runtime.dispose();
-  });
-
   it('maps blocked control tool calls to failed results with the reason preserved', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
@@ -2724,6 +3054,10 @@ describe('llm-runtime runtime', () => {
       status: 'completed',
       output: 'done',
     });
+    expect((mockGenerateOpenAIResponse.mock.calls[0]?.[0] as any).tools.ask_user_input)
+      .toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+    expect((mockGenerateOpenAIResponse.mock.calls[0]?.[0] as any).tools.read_file)
+      .toEqual(expect.objectContaining({ name: 'read_file' }));
 
     await expect(runtime.complete({
       provider: 'openai',
@@ -2734,6 +3068,8 @@ describe('llm-runtime runtime', () => {
       status: 'completed',
       output: 'done',
     });
+    expect((mockGenerateOpenAIResponse.mock.calls[1]?.[0] as any).tools.ask_user_input)
+      .toEqual(expect.objectContaining({ name: 'ask_user_input' }));
 
     await runtime.dispose();
   });
@@ -3412,6 +3748,29 @@ describe('llm-runtime runtime', () => {
     });
   });
 
+  it('blocks shell commands under read permission', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      const tools = resolveTools({
+        builtIns: {
+          shell_cmd: true,
+        },
+      });
+
+      const attemptedPath = path.join(workspacePath, 'shell-created.txt');
+      const result = await tools.shell_cmd?.execute?.({
+        command: process.execPath,
+        parameters: ['-e', "require('fs').writeFileSync('shell-created.txt', 'mutation')"],
+        output_format: 'json',
+      }, {
+        workingDirectory: workspacePath,
+        toolPermission: 'read',
+      });
+
+      expect(String(result)).toBe('Error: shell_cmd is blocked by the current permission level (read).');
+      await expect(fs.access(attemptedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
   it('reports symlink-aware path existence semantics', async () => {
     await withTempWorkspace(async (workspacePath) => {
       await fs.writeFile(path.join(workspacePath, 'target.txt'), 'ready');
@@ -3713,53 +4072,6 @@ describe('llm-runtime runtime', () => {
     });
   });
 
-  it('returns a pending HITL request artifact without requiring an adapter', async () => {
-    const tools = resolveTools({
-      builtIns: { ask_user_input: true },
-    });
-    const result = await tools.ask_user_input?.execute?.({
-      questions: [{
-        header: 'Approval',
-        id: 'approval',
-        question: 'Approve?',
-        options: [
-          { id: 'yes', label: 'Yes' },
-          { id: 'no', label: 'No' },
-        ],
-      }],
-    }, {
-      toolCallId: 'hitl-call-1',
-    });
-
-    expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"pending": true');
-    expect(result).toContain('"requestId": "hitl-call-1"');
-    expect(result).toContain('"type": "single-select"');
-    expect(result).toContain('"allowSkip": false');
-    expect(result).toContain('"questions": [');
-  });
-
-  it('lets ask_user_input execute the same HITL pending flow', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-    const result = await tools.ask_user_input?.execute?.({
-      questions: [{
-        header: 'Continue',
-        id: 'continue',
-        question: 'Continue?',
-        options: [
-          { id: 'yes', label: 'Yes' },
-          { id: 'no', label: 'No' },
-        ],
-      }],
-    }, {
-      toolCallId: 'hitl-call-ask-1',
-    });
-
-    expect(result).toContain('"status": "pending"');
-    expect(result).toContain('"requestId": "hitl-call-ask-1"');
-    expect(result).toContain('"question": "Continue?"');
-  });
-
   it('exposes the structured ask_user_input choice schema', () => {
     const tools = resolveTools({
       builtIns: { ask_user_input: true },
@@ -3789,130 +4101,7 @@ describe('llm-runtime runtime', () => {
       description: { type: 'string', description: expect.any(String) },
     });
     expect(askSchema.required).toEqual(['questions']);
-  });
-
-  it('returns structured single-select HITL artifacts by default', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-    const result = await tools.ask_user_input?.execute?.({
-      questions: [{
-        header: 'Mode',
-        id: 'mode',
-        question: 'Which mode?',
-        options: [
-          { id: 'fast', label: 'Fast', description: 'Use quicker defaults.' },
-          { id: 'careful', label: 'Careful' },
-        ],
-      }],
-    }, {
-      toolCallId: 'hitl-structured-1',
-    });
-
-    const parsed = JSON.parse(String(result));
-    expect(parsed).toMatchObject({
-      status: 'pending',
-      pending: true,
-      requestId: 'hitl-structured-1',
-      type: 'single-select',
-      allowSkip: false,
-    });
-    expect(parsed.selectedOption).toBeUndefined();
-    expect(parsed.selectedOptions).toBeUndefined();
-    expect(parsed.question).toBeUndefined();
-    expect(parsed.options).toBeUndefined();
-    expect(parsed.questions).toEqual([{
-      header: 'Mode',
-      id: 'mode',
-      question: 'Which mode?',
-      options: [
-        { id: 'fast', label: 'Fast', description: 'Use quicker defaults.' },
-        { id: 'careful', label: 'Careful' },
-      ],
-    }]);
-  });
-
-  it('preserves multiple-select and allowSkip in structured HITL artifacts', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-    const result = await tools.ask_user_input?.execute?.({
-      type: 'multiple-select',
-      allowSkip: true,
-      questions: [{
-        header: 'Tools',
-        id: 'tools',
-        question: 'Which tools?',
-        options: [
-          { id: 'lint', label: 'Lint' },
-          { id: 'test', label: 'Test' },
-        ],
-      }],
-    });
-
-    const parsed = JSON.parse(String(result));
-    expect(parsed.type).toBe('multiple-select');
-    expect(parsed.allowSkip).toBe(true);
-    expect(parsed.questions[0].options.map((option: { id: string }) => option.id)).toEqual(['lint', 'test']);
-  });
-
-  it('rejects invalid structured HITL questions and option ids', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-
-    const duplicateResult = await tools.ask_user_input?.execute?.({
-      questions: [{
-        header: 'Mode',
-        id: 'mode',
-        question: 'Which mode?',
-        options: [
-          { id: 'same', label: 'One' },
-          { id: 'same', label: 'Two' },
-        ],
-      }],
-    });
-
-    expect(duplicateResult).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(duplicateResult).toContain('questions[0].options[1].id must be unique');
-
-    const oneOptionResult = await tools.ask_user_input?.execute?.({
-      questions: [{
-        header: 'Mode',
-        id: 'mode',
-        question: 'Which mode?',
-        options: [
-          { id: 'one', label: 'One' },
-        ],
-      }],
-    });
-
-    expect(oneOptionResult).toContain('questions[0].options must include at least two options');
-  });
-
-  it('rejects unsupported HITL selection types', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-    const result = await tools.ask_user_input?.execute?.({
-      type: 'approval',
-      questions: [{
-        header: 'Decision',
-        id: 'decision',
-        question: 'Approve?',
-        options: [
-          { id: 'yes', label: 'Yes' },
-          { id: 'no', label: 'No' },
-        ],
-      }],
-    });
-
-    expect(result).toContain("Parameter 'type' must be one of single-select, multiple-select");
-  });
-
-  it('rejects flat HITL payload fields', async () => {
-    const tools = resolveTools({ builtIns: { ask_user_input: true } });
-    const result = await tools.ask_user_input?.execute?.({
-      question: 'Continue?',
-      options: ['Yes', 'No'],
-    } as any);
-
-    expect(result).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(result).toContain('"path": "question"');
-    expect(result).toContain('"code": "unknown_parameter"');
-    expect(result).toContain("Unknown parameter 'question' is not allowed");
+    expect(tools.ask_user_input?.execute).toBeUndefined();
   });
 
   it('rejects attempts to override reserved operational built-in tool names', () => {
@@ -3940,19 +4129,6 @@ describe('llm-runtime runtime', () => {
       name: 'ask_user_input',
       description: 'Host-owned user input tool.',
     }));
-  });
-
-  it('returns a durable validation artifact for missing required parameters', async () => {
-    const tools = resolveTools({
-      builtIns: { ask_user_input: true },
-    });
-
-    const missingQuestionsResult = await tools.ask_user_input?.execute?.({} as any);
-
-    expect(missingQuestionsResult).toContain('"errorType": "tool_parameter_validation_failed"');
-    expect(missingQuestionsResult).toContain('"path": "questions"');
-    expect(missingQuestionsResult).toContain('"code": "missing_required"');
-    expect(missingQuestionsResult).toContain("Required parameter 'questions' is missing or empty");
   });
 
   it('creates an explicit environment without relying on convenience caches', () => {

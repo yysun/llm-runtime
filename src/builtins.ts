@@ -7,14 +7,15 @@
  * Key features:
  * - Stable built-in tool names, descriptions, and parameter schemas.
  * - Constructor-time enable/disable control with optional per-call narrowing support.
- * - Internal built-in executors, including package-owned HITL pending-request generation.
+ * - Internal built-in executors for runtime-owned tools.
  *
  * Implementation notes:
  * - The package owns the built-in catalog and enablement policy.
  * - File, shell, web, and skill built-ins execute inside the package.
- * - `ask_user_input` is the public HITL built-in.
+ * - `ask_user_input` is model-visible but host-owned, so it has no package executor.
  *
  * Recent changes:
+ * - 2026-05-28: Made `ask_user_input` a host-owned built-in without a package executor.
  * - 2026-05-28: Defaulted omitted `builtIns` to all built-ins; `true` is the explicit host shortcut for the same behavior.
  * - 2026-05-27: Removed string shorthand built-in selection modes. Callers can pass `false`, `true`, or an explicit per-tool map.
  * - 2026-05-27: Clarified load_skill guidance to continue with structured file tools after loading.
@@ -375,7 +376,7 @@ export function createBuiltInToolDefinitions(options: {
   skillRegistry: SkillRegistry;
 }): Record<string, LLMToolDefinition> {
   const enabled = toToggleMap(options.builtIns);
-  const executors = createBuiltInExecutors({
+  const executors: Partial<Record<BuiltInToolName, LLMToolDefinition['execute']>> = createBuiltInExecutors({
     skillRegistry: options.skillRegistry,
   });
 
@@ -389,7 +390,7 @@ export function createBuiltInToolDefinitions(options: {
           name: toolName,
           description: catalogEntry.description,
           parameters: catalogEntry.parameters,
-          execute: executors[toolName],
+          ...(executors[toolName] ? { execute: executors[toolName] } : {}),
         });
 
         return [toolName, definition];

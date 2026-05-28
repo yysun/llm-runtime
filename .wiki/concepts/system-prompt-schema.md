@@ -39,7 +39,7 @@ Recommended schema:
 
 What the runtime adds today:
 - `generate(...)` can append the human-input hint and workspace-tool hint when those tools are enabled.
-- `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` append the agent run-loop contract so the model is reminded that narration is not completion and should stop through `final_answer`, `need_user_input`, or `blocked`.
+- `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` append the agent run-loop contract so the model is reminded that narration is not completion and should stop through `final_answer`, `blocked`, or an available user-input tool.
 - The managed block is inserted into the same first system message rather than as a separate transport field, which keeps cross-provider behavior stable.
 
 Suggested section layout:

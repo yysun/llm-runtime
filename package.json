@@ -50,6 +50,8 @@
     "test:e2e:gemini": "tsx tests/e2e/e2e-gemini.ts",
     "test:e2e:gemini:dry-run": "npm run test:e2e:gemini -- --dry-run",
     "test:e2e:hardening": "tsx tests/e2e/llm-turn-loop-hardening.ts",
+    "test:e2e:host-owned": "tsx tests/e2e/llm-host-owned-tool-calls.ts",
+    "test:e2e:host-owned:gemini": "npm run test:e2e:host-owned -- --gemini",
     "test:e2e:dry-run": "npm run test:e2e -- --dry-run",
     "test:e2e:turn-loop": "tsx tests/e2e/llm-turn-loop-showcase.ts",
     "test:e2e:turn-loop:dry-run": "npm run test:e2e:turn-loop -- --dry-run"

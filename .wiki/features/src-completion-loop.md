@@ -46,12 +46,12 @@ Facts from source:
 - Standalone lower-level `complete(...)` prepends a package-owned completion-loop system prompt and is used by the runtime facade. It remains useful for internal extension and tests, but it is no longer exported from the root entrypoint.
 - The package-managed `modelRequest` path defaults built-ins to all package-owned tools through `src/complete-defaults.ts`; callers use `builtIns: false` to disable them or a per-tool map to narrow the surface.
 - `ask_user_input` counts as interaction progress, not task-action evidence. Final text after human input still needs later read, write, external-action, or artifact evidence when the turn requires action evidence.
-- Runtime-facade completion now always uses control-tool termination. The model should call `final_answer`, `need_user_input`, or `blocked`; bare narration is retried or rejected instead of ending the run.
-- The loop injects internal control tools `final_answer`, `need_user_input`, and `blocked`, intercepts them before host tool execution, and returns structured `controlOutput` metadata instead of relying on bare assistant text.
+- Runtime-facade completion now always uses control-tool termination. The model should call `final_answer`, `blocked`, or an available user-input tool; bare narration is retried or rejected instead of ending the run.
+- The loop injects internal control tools `final_answer` and `blocked`, intercepts them before host tool execution, and returns structured `controlOutput` metadata instead of relying on bare assistant text.
 - Tool calls keep the loop alive: the runtime executes known normal tools, appends tool-result messages, and asks the model again. `generate(...)` does none of that; it returns after one provider response.
 - `builtIns: false` does not disable the loop. It only removes package-owned built-ins from the model-facing surface; host tools and control tools still make completion work.
 - When host tools declare mutating evidence, final completion is accepted only after a host mutating-tool result. Built-in mutating results do not satisfy that host-owned requirement.
-- Terminal reasons cover both text/tool branches and deterministic stops such as `final_answer`, `needs_user_input`, `blocked`, `max_iterations_exceeded`, and `repeated_tool_call_stopped`.
+- Terminal reasons cover both text/tool branches and deterministic stops such as `final_answer`, `blocked`, `max_iterations_exceeded`, and `repeated_tool_call_stopped`.
 - Task-duration budgets are not runtime loop guards. Hosts that need a task budget cancel with `abortSignal`.
 - The structural classifier is evidence-first rather than phrase-first: unsupported tool-backed claims and post-interaction narration are rejected as non-progressing based on observed run evidence rather than English-only regex heuristics.
 - The lower-level loop still leaves host policy in callbacks. If `onToolCallsResponse(...)` does not request continuation after handling tool calls, the loop stops with `tool_calls_response` by design.

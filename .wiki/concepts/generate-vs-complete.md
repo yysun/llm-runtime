@@ -31,7 +31,7 @@ updated_at: "2026-05-28"
 `complete(...)` stops when one of the explicit terminal paths fires:
 
 - `final_answer` returns completed output.
-- `need_user_input` returns a host-visible tool-call pause so the app can ask and later resume.
+- Default `ask_user_input` returns `status: "tool_calls"` so the host can ask and later resume.
 - `blocked` returns a failed/blocked result.
 - Repeated identical tool calls or `maxIterations` stop the loop with bounded failure metadata. Host cancellation uses `context.abortSignal`.
 
@@ -39,7 +39,7 @@ updated_at: "2026-05-28"
 
 `builtIns` controls only package-owned tools such as `read_file`, `write_file`, `shell_cmd`, `search_files`, and `ask_user_input`.
 
-It does not decide whether the loop exists. `builtIns: false` with host-supplied `extraTools` or `tools` is a valid completion setup: the model still sees the host tools plus the runtime control tools (`final_answer`, `need_user_input`, `blocked`), host tools remain executable, and the loop can continue through tool results.
+It does not decide whether the loop exists. `builtIns: false` with host-supplied `extraTools` or `tools` is a valid completion setup: the model still sees the host tools plus the runtime control tools (`final_answer`, `blocked`), host tools remain executable, and the loop can continue through tool results.
 
 This boundary matters because the host may want to disable every package tool while still letting the runtime own the model/tool/control loop. The loop is the priority; built-ins are just one possible tool source.
 

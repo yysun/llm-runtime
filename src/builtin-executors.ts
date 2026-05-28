@@ -6,7 +6,6 @@
  *
  * Key features:
  * - Internal executors for shell, file, web-fetch, and load-skill tools.
- * - Package-owned HITL pending request artifacts with no host adapter dependency.
  * - Trusted working-directory enforcement for file and shell operations.
  *
  * Implementation notes:
@@ -15,6 +14,7 @@
  * - Output contracts stay deterministic and string-based for compatibility with current callers.
  *
  * Recent changes:
+ * - 2026-05-28: Removed the package-owned `ask_user_input` executor; that tool is host-owned.
  * - 2026-05-27: Resolved skill-referenced files from the configured skill registry when tool-call message context is unavailable.
  * - 2026-05-27: Added loaded-skill file existence fallback and skill-root basename aliases for read-only file tools.
  * - 2026-05-27: Added explicit load-skill next-step guidance so models continue with structured tools immediately.
@@ -22,7 +22,7 @@
  * - 2026-05-27: Added loaded-skill provenance for read-only file tools while preserving workspace-root writes and creation.
  * - 2026-05-18: Removed the fixed `read_file` hard cap, kept reads workspace-scoped, made hidden entry discovery opt-in, and made `path_exists` symlink-aware.
  * - 2026-05-15: Propagated abort signals into package-owned shell, web-fetch, and directory-walk executors.
- * - 2026-05-15: Kept a single public HITL executor at `ask_user_input`.
+ * - 2026-05-15: Previously kept a single public HITL executor at `ask_user_input`.
  * - 2026-03-27: Added package-owned executors for built-in tools.
  * - 2026-05-14: Replaced `grep` with `search_files`, `create_directory`, and `path_exists`.
  */
@@ -30,16 +30,10 @@
 import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { formatToolValidationFailureArtifact } from './tool-validation.js';
 import type {
   BuiltInToolName,
-  HitlInputOption,
-  HitlInputQuestion,
-  HitlSelectionType,
   LLMToolExecutionContext,
-  PendingHitlToolResult,
   SkillRegistry,
-  ToolValidationIssue,
 } from './types.js';
 
 type BuiltInExecutor = (
@@ -1075,175 +1069,11 @@ async function createLoadSkillExecutor(options: BuiltInExecutorOptions, args: Re
   ].join('\n');
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-function normalizeSelectionType(value: unknown): HitlSelectionType | { error: string } {
-  if (value === undefined || value === null || value === '') {
-    return 'single-select';
-  }
-  if (value === 'single-select' || value === 'multiple-select') {
-    return value;
-  }
-  return { error: 'type must be one of single-select or multiple-select' };
-}
-
-function normalizeStructuredQuestion(rawQuestion: unknown, questionIndex: number): HitlInputQuestion | string {
-  const pathPrefix = `questions[${questionIndex}]`;
-  if (!isRecord(rawQuestion)) {
-    return `Error: ${pathPrefix} must be an object`;
-  }
-
-  const header = typeof rawQuestion.header === 'string' ? rawQuestion.header.trim() : '';
-  if (!header) {
-    return `Error: ${pathPrefix}.header is required`;
-  }
-
-  const id = typeof rawQuestion.id === 'string' ? rawQuestion.id.trim() : '';
-  if (!id) {
-    return `Error: ${pathPrefix}.id is required`;
-  }
-
-  const question = typeof rawQuestion.question === 'string' ? rawQuestion.question.trim() : '';
-  if (!question) {
-    return `Error: ${pathPrefix}.question is required`;
-  }
-
-  if (!Array.isArray(rawQuestion.options)) {
-    return `Error: ${pathPrefix}.options must be an array`;
-  }
-
-  if (rawQuestion.options.length < 2) {
-    return `Error: ${pathPrefix}.options must include at least two options`;
-  }
-
-  const optionIds = new Set<string>();
-  const options: HitlInputOption[] = [];
-  for (let optionIndex = 0; optionIndex < rawQuestion.options.length; optionIndex += 1) {
-    const rawOption = rawQuestion.options[optionIndex];
-    const optionPath = `${pathPrefix}.options[${optionIndex}]`;
-    if (!isRecord(rawOption)) {
-      return `Error: ${optionPath} must be an object`;
-    }
-
-    const optionId = typeof rawOption.id === 'string' ? rawOption.id.trim() : '';
-    if (!optionId) {
-      return `Error: ${optionPath}.id is required`;
-    }
-    if (optionIds.has(optionId)) {
-      return `Error: ${optionPath}.id must be unique within the question`;
-    }
-    optionIds.add(optionId);
-
-    const label = typeof rawOption.label === 'string' ? rawOption.label.trim() : '';
-    if (!label) {
-      return `Error: ${optionPath}.label is required`;
-    }
-
-    if (rawOption.description !== undefined && typeof rawOption.description !== 'string') {
-      return `Error: ${optionPath}.description must be a string`;
-    }
-
-    options.push({
-      id: optionId,
-      label,
-      ...(typeof rawOption.description === 'string' && rawOption.description.trim()
-        ? { description: rawOption.description.trim() }
-        : {}),
-    });
-  }
-
-  return {
-    header,
-    id,
-    question,
-    options,
-  };
-}
-
-function hitlIssueFromError(message: string): ToolValidationIssue {
-  const pathMatch = message.match(/^([a-zA-Z0-9_$.[\]-]+)\s/);
-  const pathValue = pathMatch?.[1] ?? '$';
-  return {
-    path: pathValue,
-    code: message.includes('required') ? 'missing_required' : 'invalid_type',
-    message,
-  };
-}
-
-function formatHitlValidationFailure(toolName: BuiltInToolName, error: string): string {
-  const message = error.replace(/^Error:\s*/, '');
-  const issue = hitlIssueFromError(message);
-  return formatToolValidationFailureArtifact({
-    toolName,
-    validation: {
-      valid: false,
-      error: issue.message,
-      issues: [issue],
-      corrections: [],
-    },
-  });
-}
-
-function normalizeHitlInput(args: Record<string, unknown>): {
-  type: HitlSelectionType;
-  allowSkip: boolean;
-  questions: HitlInputQuestion[];
-} | string {
-  const selectionType = normalizeSelectionType(args.type);
-  if (typeof selectionType === 'object') {
-    return `Error: ${selectionType.error}`;
-  }
-
-  if (args.allowSkip !== undefined && typeof args.allowSkip !== 'boolean') {
-    return 'Error: allowSkip must be a boolean';
-  }
-  const allowSkip = args.allowSkip === true;
-
-  if (!Array.isArray(args.questions)) {
-    return 'Error: questions must be an array';
-  }
-  if (args.questions.length === 0) {
-    return 'Error: questions must include at least one question';
-  }
-
-  const questions: HitlInputQuestion[] = [];
-  for (let questionIndex = 0; questionIndex < args.questions.length; questionIndex += 1) {
-    const normalizedQuestion = normalizeStructuredQuestion(args.questions[questionIndex], questionIndex);
-    if (typeof normalizedQuestion === 'string') {
-      return normalizedQuestion;
-    }
-    questions.push(normalizedQuestion);
-  }
-  return {
-    type: selectionType,
-    allowSkip,
-    questions,
-  };
-}
-
-async function createHitlExecutor(toolName: BuiltInToolName, _options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
-  const normalized = normalizeHitlInput(args);
-  if (typeof normalized === 'string') {
-    return formatHitlValidationFailure(toolName, normalized);
-  }
-
-  const pendingResult: PendingHitlToolResult = {
-    ok: false,
-    pending: true,
-    status: 'pending',
-    confirmed: false,
-    requestId: typeof context?.toolCallId === 'string' ? context.toolCallId : '',
-    type: normalized.type,
-    allowSkip: normalized.allowSkip,
-    questions: normalized.questions,
-  };
-
-  return JSON.stringify(pendingResult, null, 2);
-}
-
 async function createShellExecutor(_options: BuiltInExecutorOptions, args: Record<string, unknown>, context?: LLMToolExecutionContext): Promise<string> {
+  if (context?.toolPermission === 'read') {
+    return 'Error: shell_cmd is blocked by the current permission level (read).';
+  }
+
   try {
     throwIfAborted(context?.abortSignal);
   } catch (error) {
@@ -1329,11 +1159,10 @@ async function createShellExecutor(_options: BuiltInExecutorOptions, args: Recor
   });
 }
 
-export function createBuiltInExecutors(options: BuiltInExecutorOptions): Record<BuiltInToolName, BuiltInExecutor> {
+export function createBuiltInExecutors(options: BuiltInExecutorOptions): Partial<Record<BuiltInToolName, BuiltInExecutor>> {
   return {
     shell_cmd: (args, context) => createShellExecutor(options, args, context),
     load_skill: (args) => createLoadSkillExecutor(options, args),
-    ask_user_input: (args, context) => createHitlExecutor('ask_user_input', options, args, context),
     web_fetch: (args, context) => createWebFetchExecutor(options, args, context),
     read_file: (args, context) => createReadFileExecutor(options, args, context),
     write_file: (args, context) => createWriteFileExecutor(options, args, context),

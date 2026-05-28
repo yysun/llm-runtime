@@ -29,7 +29,7 @@ The core ownership rule is [[environment-vs-per-call]]: stable dependencies can 
 
 The root package entrypoint is deliberately small: `generate(...)`, `complete(...)`, `streamComplete(...)`, and `createRuntime(...)`. `generate(...)` performs one provider call and may return text or tool calls. `complete(...)`, `streamComplete(...)`, `runtime.complete(...)`, and `runtime.streamComplete(...)` add the bounded runtime-owned model/tool loop and terminate through control tools. `streamComplete(...)` can now surface streamed provider text, reasoning, raw tool-call argument deltas, and parsed `final_answer` answer deltas. Lower-level loop machinery still exists internally, but it is no longer root public API. See [[generate-vs-complete]], [[src-runtime]], [[src-completion-loop]], and [[public-types]].
 
-If the model calls `ask_user_input`, default runtime handling surfaces a normal `tool_calls` result for the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
+If the model calls default `ask_user_input`, runtime completion stops with `status: "tool_calls"` and returns the call to the host. The host owns whether to pause, render a prompt, wait, time out, cancel, or resume. See [[host-owned-ask-user-input]] and [[src-runtime-complete-contract]].
 
 ## Where is data saved?
 
@@ -48,7 +48,7 @@ The package itself does not own durable storage. It may cache provider stores, M
 ## What should I avoid breaking?
 
 - Do not blur package-owned orchestration with host-owned UI, persistence, or policy.
-- Do not make `ask_user_input` a runtime wait state again; keep it model-visible and host-handled by default.
+- Do not make `ask_user_input` a runtime wait state or fake executor again; keep it model-visible and host-owned.
 - Do not weaken the trusted working-directory boundary for structured file tools.
 - Do not treat human-input artifacts as action evidence for task completion.
 - Do not make `builtIns` control whether completion can loop; built-ins are only one tool source.

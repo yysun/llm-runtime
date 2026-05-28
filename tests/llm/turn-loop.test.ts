@@ -577,7 +577,6 @@ describe('llm-runtime completion loop', () => {
 
   it.each([
     ['final_answer', {}],
-    ['need_user_input', {}],
     ['blocked', {}],
   ] as const)('retries malformed %s control tool payloads with the protocol instruction', async (toolName, args) => {
     const seenInstructions: string[] = [];
@@ -678,10 +677,12 @@ describe('llm-runtime completion loop', () => {
     expect(mockGenerate).toHaveBeenCalledWith(expect.objectContaining({
       extraTools: expect.arrayContaining([
         expect.objectContaining({ name: 'final_answer' }),
-        expect.objectContaining({ name: 'need_user_input' }),
         expect.objectContaining({ name: 'blocked' }),
       ]),
     }));
+    expect(mockGenerate.mock.calls[0]?.[0].extraTools).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'need_user_input' })]),
+    );
   });
 
   it('complete passes a model-request-bound tool executor to tool callbacks', async () => {
@@ -747,7 +748,6 @@ describe('llm-runtime completion loop', () => {
       extraTools: expect.arrayContaining([
         extraTool,
         expect.objectContaining({ name: 'final_answer' }),
-        expect.objectContaining({ name: 'need_user_input' }),
         expect.objectContaining({ name: 'blocked' }),
       ]),
       tools: {
@@ -1273,36 +1273,6 @@ describe('llm-runtime completion loop', () => {
     expect(result.classifications).toEqual([
       expect.objectContaining({ classification: 'verified_final_response', requiresActionEvidence: true }),
     ]);
-  });
-
-  it('stops deterministically on need_user_input control tool calls', async () => {
-    const result = await runCompletionLoop({
-      initialState: {
-        messages: [{ role: 'user', content: 'continue' } satisfies LLMChatMessage],
-        missingQuestion: '',
-      },
-      emptyTextRetryLimit: 0,
-      agentControlMode: true,
-      callModel: vi.fn(async () => toolCall('need_user_input', {
-        question: 'Which environment should I use?',
-        reason: 'The target environment is missing.',
-      }, 'control-input-1')),
-      buildMessages: async ({ state }) => state.messages,
-      onToolCallsResponse: async ({ state }) => ({ state }),
-      onNeedUserInputToolCall: async ({ state, controlOutput }) => ({
-        state: { ...state, missingQuestion: controlOutput.question },
-      }),
-      onTextResponse: async ({ state }) => ({ state }),
-    });
-
-    expect(result.reason).toBe('needs_user_input');
-    expect(result.controlOutput).toEqual({
-      kind: 'need_user_input',
-      toolCallId: 'control-input-1',
-      question: 'Which environment should I use?',
-      reason: 'The target environment is missing.',
-    });
-    expect(result.state.missingQuestion).toBe('Which environment should I use?');
   });
 
   it('stops deterministically on blocked control tool calls', async () => {

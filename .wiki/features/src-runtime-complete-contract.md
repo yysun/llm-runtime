@@ -10,8 +10,9 @@ source_paths:
   - "src/types.ts"
   - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
   - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
+  - ".docs/reqs/2026/05/28/req-host-owned-tool-calls.md"
   - "tests/llm/runtime.test.ts"
-updated_at: "2026-05-27"
+updated_at: "2026-05-28"
 ---
 
 `src/runtime-complete-contract.ts` defines the stable public result and event shapes for the runtime facade's `complete(...)` and `streamComplete(...)` helpers.
@@ -30,4 +31,4 @@ Why this matters:
 - The runtime no longer exposes a special `waiting_for_human` status or event. Human waiting, timeout, cancellation, and UI rendering are host concerns.
 - Streaming harnesses can branch on event type instead of scraping mixed logs. Hosts that want immediate user-visible output should render both `text_delta` and `final_answer_delta`; hosts that need full control-tool reconstruction can consume raw `tool_call_delta`.
 
-Read this with [[src-runtime]] for the facade that emits these results, [[host-owned-ask-user-input]] for the ownership boundary, and [[approval-and-synthetic-tool-call-messages]] for pending artifacts versus loop-generated synthetic tool calls.
+Read this with [[src-runtime]] for the facade that emits these results, [[host-owned-ask-user-input]] for the ownership boundary, and [[approval-and-synthetic-tool-call-messages]] for host-owned tool calls versus loop-generated synthetic tool calls.

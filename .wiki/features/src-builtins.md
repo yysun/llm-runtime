@@ -11,13 +11,14 @@ source_paths:
   - ".docs/done/2026/05/18/file-tool-contract-hardening.md"
   - ".docs/reqs/2026/05/26/req-host-owned-ask-user-input.md"
   - ".docs/done/2026/05/26/host-owned-ask-user-input.md"
+  - ".docs/reqs/2026/05/28/req-host-owned-tool-calls.md"
   - "src/complete-defaults.ts"
   - "src/builtins.ts"
   - "src/builtin-executors.ts"
   - "src/human-input-contract.ts"
   - "src/tool-validation.ts"
   - "tests/llm/runtime.test.ts"
-updated_at: "2026-05-27"
+updated_at: "2026-05-28"
 ---
 
 The package owns ten reserved built-in tool names: `shell_cmd`, `load_skill`, `ask_user_input`, `web_fetch`, `read_file`, `write_file`, `list_files`, `search_files`, `create_directory`, and `path_exists`.
@@ -33,13 +34,13 @@ Facts from source:
 - `ask_user_input` is the only public human-input built-in on the current package surface. Its description and JSON schema are shared from `src/human-input-contract.ts` so the catalog and runtime-facade helpers stay aligned.
 - The human-input schema requires `questions[]` with stable question ids and option ids. It supports `single-select`, `multiple-select`, and optional `allowSkip` for explicitly dismissible prompts.
 - Default `resolveTools(...)` exposure includes every built-in when callers omit `builtIns`; callers use `builtIns: false` to disable all built-ins or a per-tool map to select a narrower surface.
-- Package-managed completion also defaults to every built-in through `src/complete-defaults.ts`.
-- `ask_user_input` visibility is contract advertisement, not UI ownership. Runtime completion returns a normal `tool_calls` result for host handling unless the host supplied an executable `ask_user_input` tool.
+- Package-managed completion defaults to every built-in through `src/complete-defaults.ts`.
+- `ask_user_input` visibility is contract advertisement, not UI ownership. The default built-in has no package executor, so runtime completion returns `status: "tool_calls"` for the host unless the host supplies an executable `ask_user_input` tool.
 - `read_file` and `write_file` both require `filePath` in the schema while validation preserves the `path` alias. `read_file` remains paginated through `offset` and `limit`, but the public contract no longer promises a fixed hard maximum line cap.
 - `list_files` and `search_files` exclude dot-prefixed paths unless `includeHidden: true` is passed. They no longer hard-exclude ordinary directories such as `node_modules` or `dist`.
 - `path_exists` is symlink-aware: it reports symlink presence separately from whether the symlink target resolves to a file or directory.
 - Every executable built-in is wrapped with [[src-tool-validation]] before exposure.
-- `src/builtin-executors.ts` keeps execution package-owned for package built-ins: file and shell tools enforce a trusted working directory, `load_skill` reads from the skill registry, and the package `ask_user_input` executor returns a pending artifact rather than owning UI.
+- `src/builtin-executors.ts` keeps execution package-owned for executable built-ins: file and shell tools enforce a trusted working directory, and `load_skill` reads from the skill registry. It does not provide a package executor for `ask_user_input`.
 - The `shell_cmd` contract itself is intentionally narrow: `command` is required, undeclared parameters are rejected, and the description says it should only be used when the user explicitly asked for command execution.
 - The `shell_cmd` description now explicitly steers callers toward the structured workspace tools (`list_files`, `search_files`, `read_file`, `path_exists`, `create_directory`) for routine workspace inspection.
 

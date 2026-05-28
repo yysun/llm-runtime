@@ -24,7 +24,7 @@
  * - 2026-05-15: Added recoverable tool-execution artifacts, safer built-in selection modes, and runtime-owned tool-execution helper types.
  * - 2026-03-27: Initial package-owned public API contracts for `packages/llm`.
  * - 2026-03-27: Added runtime-scoped provider store contracts and constructor-time provider config.
- * - 2026-03-27: Added built-in tool catalog, package-owned HITL pending artifacts, and additive extra-tool contracts.
+ * - 2026-03-27: Added built-in tool catalog, human-input artifact types, and additive extra-tool contracts.
  * - 2026-03-27: Added package-native message/response/provider invocation contracts.
  * - 2026-05-14: Replaced the built-in `grep` tool name with `search_files`, `create_directory`, and `path_exists`.
  * - 2026-05-15: Added runtime-facade types.
