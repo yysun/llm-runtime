@@ -5,7 +5,7 @@
 - Added explicit `completionGate.requireToolEvidence` support to runtime completion options.
 - Removed the old inference that exposed mutating host tools meant the task required mutation.
 - Mutation gates now reject final text and premature `final_answer` until a successful matching mutating tool result exists.
-- Host-owned tool batches are now atomic: any host-owned call returns `status: "tool_calls"` before runtime-owned tools execute.
+- Host-owned tool batches are now atomic: any host-owned call returns `status: "tool_calls"` with the full batch before runtime-owned tools execute.
 - Unknown tools stay on the runtime error-artifact path.
 
 ## Verification

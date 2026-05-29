@@ -1172,7 +1172,7 @@ describe('llm-runtime runtime', () => {
     });
 
     expect(result.status).toBe('tool_calls');
-    expect(result.toolCalls).toEqual([hostToolCall]);
+    expect(result.toolCalls).toEqual([runtimeToolCall, hostToolCall]);
     expect(result.messages).toEqual([
       { role: 'user', content: 'Find both tokens.' },
       expect.objectContaining({ role: 'assistant', tool_calls: [runtimeToolCall, hostToolCall] }),
@@ -1235,7 +1235,7 @@ describe('llm-runtime runtime', () => {
       });
 
       expect(result.status).toBe('tool_calls');
-      expect(result.toolCalls).toEqual([askToolCall]);
+      expect(result.toolCalls).toEqual([askToolCall, writeToolCall]);
       expect(result.messages).toEqual([
         { role: 'user', content: 'Ask, then write.' },
         expect.objectContaining({ role: 'assistant', tool_calls: [askToolCall, writeToolCall] }),

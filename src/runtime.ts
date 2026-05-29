@@ -952,15 +952,15 @@ async function runRuntimeCompletion(
         };
       }
 
-      const hostOwnedToolCalls = toolCalls.filter((toolCall) => (
+      const hasHostOwnedToolCall = toolCalls.some((toolCall) => (
         isKnownHostOwnedToolCall(toolCall, resolvedToolDefinitions)
       ));
-      if (hostOwnedToolCalls.length > 0) {
+      if (hasHostOwnedToolCall) {
         return {
           state: {
             ...state,
             messages: nextMessages,
-            toolCalls: hostOwnedToolCalls,
+            toolCalls,
             raw: response,
           },
         };

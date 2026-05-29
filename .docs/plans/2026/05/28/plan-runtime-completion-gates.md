@@ -17,4 +17,4 @@ AR passed: no blocking architecture flaws. The runtime facade already owns host-
 - Use resolved tool definitions for mutation evidence so built-ins and custom tools are handled consistently.
 - Treat successful evidence as a matching assistant tool call followed by a tool result that is not a tool-execution failure artifact.
 - Classify all tool calls in a batch before executing any of them.
-- Return the full assistant message in `messages` and only host-owned calls in `toolCalls` for host handling.
+- Return the full assistant message in `messages` and the full tool-call batch in `toolCalls` whenever any host-owned call makes the batch host-resumed.
