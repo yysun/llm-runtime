@@ -64,10 +64,12 @@ import {
   createHumanInputToolResult,
 } from '../../src/runtime-complete-contract.js';
 import {
+  complete,
   createRuntime,
   executeToolCall,
   executeToolCalls,
   resolveTools,
+  streamComplete,
 } from '../../src/runtime.js';
 import { BUILT_IN_TOOL_NAMES, intersectBuiltInToolSelections } from '../../src/builtins.js';
 import { parseMCPConfigJson } from '../../src/mcp.js';
@@ -906,6 +908,53 @@ describe('llm-runtime runtime', () => {
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
+  });
+
+  it('returns built-in ask_user_input tool calls from standalone complete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'standalone-hitl-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"header":"Scope","id":"scope","question":"Which scope?","options":[{"id":"all","label":"All"}]}]}',
+      },
+    };
+
+    mockGenerateOpenAIResponse.mockImplementation(async (request: any) => {
+      expect(request.tools.ask_user_input).toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+      expect(request.tools.ask_user_input.execute).toBeUndefined();
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [askToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [askToolCall],
+        },
+      };
+    });
+
+    const result = await complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+      messages: [{ role: 'user', content: 'Ask me about scope.' }],
+    });
+
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([askToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Ask me about scope.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [askToolCall] }),
+    ]);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
   });
 
   it('returns known custom tools without executors as host-owned tool_calls', async () => {
@@ -2041,6 +2090,67 @@ describe('llm-runtime runtime', () => {
     expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(2);
 
     await runtime.dispose();
+  });
+
+  it('emits built-in ask_user_input tool calls from standalone streamComplete', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'standalone-stream-hitl-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"header":"Format","id":"format","question":"Which format?","options":[{"id":"pdf","label":"PDF"}]}]}',
+      },
+    };
+
+    mockStreamOpenAIResponse.mockImplementation(async (request: any) => {
+      expect(request.tools.ask_user_input).toEqual(expect.objectContaining({ name: 'ask_user_input' }));
+      expect(request.tools.ask_user_input.execute).toBeUndefined();
+      return {
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [askToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [askToolCall],
+        },
+      };
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+    for await (const event of streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+      messages: [{ role: 'user', content: 'Ask me about format.' }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      { type: 'model_start', iteration: 1 },
+      expect.objectContaining({ type: 'assistant_message', iteration: 1 }),
+      expect.objectContaining({
+        type: 'tool_calls',
+        iteration: 1,
+        result: expect.objectContaining({
+          status: 'tool_calls',
+          toolCalls: [askToolCall],
+        }),
+      }),
+    ]);
+    expect(events).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'failed' }),
+    ]));
+    expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
   });
 
   it('emits text and reasoning deltas from runtime.streamComplete separately', async () => {
