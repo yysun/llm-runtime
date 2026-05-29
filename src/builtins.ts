@@ -15,6 +15,7 @@
  * - `ask_user_input` is model-visible but host-owned, so it has no package executor.
  *
  * Recent changes:
+ * - 2026-05-29: Attached evidence kinds to built-ins so generic completion evidence checks cover package-owned tools.
  * - 2026-05-28: Made `ask_user_input` a host-owned built-in without a package executor.
  * - 2026-05-28: Defaulted omitted `builtIns` to all built-ins; `true` is the explicit host shortcut for the same behavior.
  * - 2026-05-27: Removed string shorthand built-in selection modes. Callers can pass `false`, `true`, or an explicit per-tool map.
@@ -65,6 +66,7 @@ type BuiltInToolToggleMap = Record<BuiltInToolName, boolean>;
 
 const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'name' | 'execute'>> = {
   shell_cmd: {
+    evidenceKind: 'external_action',
     description:
       'Execute a user-requested shell command and capture output. Do not use this for routine file reads, directory listing, or file discovery such as `cat`, `ls`, `find`, or `grep`; use `read_file`, `list_files`, `search_files`, and `path_exists` instead, including for loaded skill files. Use this tool when the user explicitly asks to run a command, when you need git/build/test or other command-specific behavior, or when structured tools do not cover the task.',
     parameters: {
@@ -108,6 +110,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   load_skill: {
+    evidenceKind: 'read',
     description:
       'Load the full instructions for a known skill by `skill_id` and return the skill context payload. After this tool returns, continue immediately with the next required structured tool call, such as `read_file` for referenced skill files; do not stop after stating intent.',
     parameters: {
@@ -123,10 +126,12 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   ask_user_input: {
+    evidenceKind: 'interaction',
     description: ASK_USER_INPUT_TOOL_DESCRIPTION,
     parameters: ASK_USER_INPUT_TOOL_PARAMETERS,
   },
   web_fetch: {
+    evidenceKind: 'read',
     description:
       'Fetch a URL and convert response content to markdown. Supports lightweight SPA data extraction from embedded JSON state without running a browser renderer.',
     parameters: {
@@ -158,6 +163,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   read_file: {
+    evidenceKind: 'read',
     description:
       'Read file contents with line pagination. Use this instead of `shell_cmd cat`, `sed`, `head`, or `tail` for routine file inspection, including loaded skill files. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working directory.',
     parameters: {
@@ -185,6 +191,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   write_file: {
+    evidenceKind: 'write',
     description:
       'Write text content to a file inside the trusted working-directory scope.',
     parameters: {
@@ -213,6 +220,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   list_files: {
+    evidenceKind: 'read',
     description:
       'List file and directory names for quick exploration. Use this instead of `shell_cmd ls` or `find` for routine directory inspection, including loaded skill roots. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve from the trusted working-directory scope.',
     parameters: {
@@ -248,6 +256,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   search_files: {
+    evidenceKind: 'read',
     description:
       'Search for files by glob-like pattern. Use this instead of `shell_cmd find` or `grep` for routine file discovery, including loaded skill roots. Optional root paths referenced by loaded skill instructions resolve from that skill root; other roots resolve inside the trusted working-directory scope.',
     parameters: {
@@ -275,6 +284,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   create_directory: {
+    evidenceKind: 'write',
     description:
       'Create a directory path inside the trusted working-directory scope, including missing parent directories. Prefer this over `shell_cmd` for routine directory creation.',
     parameters: {
@@ -290,6 +300,7 @@ const BUILT_IN_TOOL_CATALOG: Record<BuiltInToolName, Omit<LLMToolDefinition, 'na
     },
   },
   path_exists: {
+    evidenceKind: 'read',
     description:
       'Check whether a file or directory path exists. Relative paths referenced by loaded skill instructions resolve from that skill root; other relative paths resolve inside the trusted working-directory scope.',
     parameters: {
@@ -389,6 +400,7 @@ export function createBuiltInToolDefinitions(options: {
         const definition = wrapToolWithValidation({
           name: toolName,
           description: catalogEntry.description,
+          evidenceKind: catalogEntry.evidenceKind,
           parameters: catalogEntry.parameters,
           ...(executors[toolName] ? { execute: executors[toolName] } : {}),
         });

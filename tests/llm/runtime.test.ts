@@ -463,6 +463,8 @@ describe('llm-runtime runtime', () => {
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
     expect(seenSystemPrompts[0]).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires user input.');
     expect(seenSystemPrompts[0]).toContain('Prefer action over explanation.');
+    expect(seenSystemPrompts[0]).toContain('call them in the same assistant tool-call batch');
+    expect(seenSystemPrompts[0]).toContain('finish by calling `final_answer`');
 
     await runtime.dispose();
   });
@@ -1294,6 +1296,264 @@ describe('llm-runtime runtime', () => {
 
       await runtime.dispose();
     });
+  });
+
+  it('does not accept final_answer immediately after a resumed ask_user_input result', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'ask-before-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const prematureFinalAnswerCall = {
+      id: 'final-before-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Configured the project."}',
+      },
+    };
+    const writeToolCall = {
+      id: 'write-after-ask-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const acceptedFinalAnswerCall = {
+      id: 'final-after-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Configured the project."}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [prematureFinalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [prematureFinalAnswerCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [acceptedFinalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [acceptedFinalAnswerCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'ask-before-action-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.output).toBe('Configured the project.');
+    expect(result.messages).toContainEqual(expect.objectContaining({
+      role: 'tool',
+      tool_call_id: 'write-after-ask-1',
+      content: JSON.stringify({ ok: true, path: 'config.json' }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('accepts plain final text after successful mutating built-in evidence', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      mockGenerateOpenAIResponse.mockReset();
+
+      const writeToolCall = {
+        id: 'plain-text-after-write-1',
+        type: 'function' as const,
+        function: {
+          name: 'write_file',
+          arguments: JSON.stringify({
+            filePath: 'config.json',
+            content: '{"ok":true}',
+          }),
+        },
+      };
+
+      mockGenerateOpenAIResponse
+        .mockResolvedValueOnce({
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [writeToolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [writeToolCall],
+          },
+        })
+        .mockResolvedValueOnce({
+          type: 'text',
+          content: 'Configured the project.',
+          stopKind: 'natural_stop',
+          providerStopReason: 'stop',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Configured the project.',
+          },
+        });
+
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        context: { workingDirectory: workspacePath },
+        messages: [{ role: 'user', content: 'Write the config.' }],
+      });
+
+      expect(result).toMatchObject({
+        status: 'completed',
+        output: 'Configured the project.',
+      });
+      await expect(fs.readFile(path.join(workspacePath, 'config.json'), 'utf8'))
+        .resolves.toBe('{"ok":true}');
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+      await runtime.dispose();
+    });
+  });
+
+  it('accepts plain final text after resumed ask_user_input and successful write evidence', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'ask-before-plain-text-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const writeToolCall = {
+      id: 'write-before-plain-text-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: 'Configured the project.',
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Configured the project.',
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'ask-before-plain-text-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'Configured the project.',
+    });
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+
+    await runtime.dispose();
   });
 
   it('executes a pure runtime-owned batch and continues', async () => {
@@ -2326,6 +2586,386 @@ describe('llm-runtime runtime', () => {
     ]);
     expect(mockGenerateOpenAIResponse).not.toHaveBeenCalled();
     expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('defers streamed final_answer deltas under mutation gates until write evidence exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const prematureFinalAnswerCall = {
+      id: 'stream-final-before-write-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Agent World initialized before writes."}',
+      },
+    };
+    const writeToolCall = {
+      id: 'stream-write-world-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_world_file',
+        arguments: '{"path":".agent-world/world.json"}',
+      },
+    };
+    const acceptedFinalAnswerCall = {
+      id: 'stream-final-after-write-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Agent World initialized after write."}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: '.agent-world/world.json' }));
+
+    mockStreamOpenAIResponse
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({
+          toolCallDelta: {
+            id: 'stream-final-before-write-1',
+            index: 0,
+            name: 'final_answer',
+            argumentsDelta: '{"answer":"Agent World initialized before writes."}',
+          },
+        });
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [prematureFinalAnswerCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [prematureFinalAnswerCall],
+          },
+        };
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({
+          toolCallDelta: {
+            id: 'stream-final-after-write-1',
+            index: 0,
+            name: 'final_answer',
+            argumentsDelta: '{"answer":"Agent World initialized after write."}',
+          },
+        });
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [acceptedFinalAnswerCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [acceptedFinalAnswerCall],
+          },
+        };
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      completionGate: {
+        requireToolEvidence: {
+          kind: 'mutation',
+          toolNames: ['write_world_file'],
+        },
+      },
+      extraTools: [{
+        name: 'write_world_file',
+        description: 'Write Agent World files.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events
+      .filter((event) => event.type === 'answer_delta')
+      .map((event) => event.delta)).toEqual(['Agent World initialized after write.']);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      toolCall: writeToolCall,
+      result: { ok: true, path: '.agent-world/world.json' },
+    }));
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      type: 'completed',
+      result: expect.objectContaining({
+        status: 'completed',
+        output: 'Agent World initialized after write.',
+      }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('defers streamed final_answer deltas after resumed ask_user_input until action evidence exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'stream-ask-before-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const prematureFinalAnswerCall = {
+      id: 'stream-final-before-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Configured before action."}',
+      },
+    };
+    const writeToolCall = {
+      id: 'stream-write-after-ask-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const acceptedFinalAnswerCall = {
+      id: 'stream-final-after-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"Configured after action."}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockStreamOpenAIResponse
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({
+          toolCallDelta: {
+            id: 'stream-final-before-action-1',
+            index: 0,
+            name: 'final_answer',
+            argumentsDelta: '{"answer":"Configured before action."}',
+          },
+        });
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [prematureFinalAnswerCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [prematureFinalAnswerCall],
+          },
+        };
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({
+          toolCallDelta: {
+            id: 'stream-final-after-action-1',
+            index: 0,
+            name: 'final_answer',
+            argumentsDelta: '{"answer":"Configured after action."}',
+          },
+        });
+
+        return {
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [acceptedFinalAnswerCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [acceptedFinalAnswerCall],
+          },
+        };
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'stream-ask-before-action-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events
+      .filter((event) => event.type === 'answer_delta')
+      .map((event) => event.delta)).toEqual(['Configured after action.']);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      toolCall: writeToolCall,
+      result: { ok: true, path: 'config.json' },
+    }));
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      type: 'completed',
+      result: expect.objectContaining({
+        status: 'completed',
+        output: 'Configured after action.',
+      }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('emits accepted plain final text after resumed ask_user_input and write evidence', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'stream-ask-before-plain-text-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const writeToolCall = {
+      id: 'stream-write-before-plain-text-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockStreamOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({ content: 'Configured ' });
+        request.onChunk({ content: 'the project.' });
+
+        return {
+          type: 'text',
+          content: 'Configured the project.',
+          stopKind: 'natural_stop',
+          providerStopReason: 'stop',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Configured the project.',
+          },
+        };
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'stream-ask-before-plain-text-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events
+      .filter((event) => event.type === 'text_delta')
+      .map((event) => event.delta)).toEqual(['Configured the project.']);
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      type: 'completed',
+      result: expect.objectContaining({
+        status: 'completed',
+        output: 'Configured the project.',
+      }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(2);
 
     await runtime.dispose();
   });

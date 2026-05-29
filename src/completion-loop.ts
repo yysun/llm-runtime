@@ -594,7 +594,7 @@ export function createAgentControlToolDefinitions(): LLMToolDefinition[] {
   return [
     {
       name: 'final_answer',
-      description: 'End the agent run with the final answer. Use this only when the answer is complete and supported by run evidence.',
+      description: 'End the agent run with the final answer. Use this only after every required tool action is complete and supported by run evidence. For multi-file or setup tasks, do not call this until every known required file and directory has been written.',
       evidenceKind: 'none',
       parameters: {
         type: 'object',

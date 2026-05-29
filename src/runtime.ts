@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-29: Deferred streamed final-answer deltas behind evidence checks so rejected completions do not leak to hosts.
  * - 2026-05-28: Added explicit completionGate mutation evidence checks and made host-owned tool batches atomic.
  * - 2026-05-28: Stopped host-owned tool calls, including non-executable `ask_user_input`, as `tool_calls` results for host resume.
  * - 2026-05-28: Removed the `need_user_input` control-tool result path; host input now flows through `ask_user_input`.
@@ -42,6 +43,7 @@ import {
 } from './builtins.js';
 import {
   complete as runCompletionLoopComplete,
+  DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
   DEFAULT_TURN_LOOP_MAX_ITERATIONS,
   type RunCompletionLoopResult,
 } from './completion-loop.js';
@@ -94,6 +96,7 @@ import type {
   LLMStreamOptions,
   LLMToolCall,
   LLMToolDefinition,
+  LLMToolEvidenceKind,
   LLMToolExecutionContext,
   LLMWarning,
   LLMWebSearchOptions,
@@ -123,6 +126,28 @@ const WORKSPACE_GUIDANCE_BUILT_IN_TOOL_NAMES = [
   'path_exists',
   'create_directory',
 ] as const;
+const INTERACTION_TOOL_NAME_SET = new Set<string>([
+  'ask_user_input',
+]);
+const AGENT_CONTROL_TOOL_NAME_SET = new Set<string>([
+  'final_answer',
+  'blocked',
+]);
+const READ_EVIDENCE_TOOL_NAME_SET = new Set<string>([
+  'load_skill',
+  'web_fetch',
+  'read_file',
+  'list_files',
+  'search_files',
+  'path_exists',
+]);
+const WRITE_EVIDENCE_TOOL_NAME_SET = new Set<string>([
+  'write_file',
+  'create_directory',
+]);
+const EXTERNAL_ACTION_TOOL_NAME_SET = new Set<string>([
+  'shell_cmd',
+]);
 type RuntimeDefaults = Readonly<{
   reasoningEffort: ReasoningEffort;
   toolPermission: ToolPermission;
@@ -305,10 +330,53 @@ function isToolExecutionFailureArtifact(value: unknown): value is LLMToolExecuti
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function isMutatingEvidenceKind(evidenceKind: LLMToolDefinition['evidenceKind']): boolean {
   return evidenceKind === 'write'
     || evidenceKind === 'external_action'
     || evidenceKind === 'artifact';
+}
+
+function isActionEvidenceKind(evidenceKind: LLMToolEvidenceKind | undefined): boolean {
+  return evidenceKind === 'read'
+    || evidenceKind === 'write'
+    || evidenceKind === 'external_action'
+    || evidenceKind === 'artifact';
+}
+
+function classifyRuntimeToolEvidence(
+  toolName: string,
+  resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
+): LLMToolEvidenceKind {
+  const configuredKind = resolvedToolDefinitions[toolName]?.evidenceKind;
+  if (configuredKind) {
+    return configuredKind;
+  }
+
+  if (INTERACTION_TOOL_NAME_SET.has(toolName)) {
+    return 'interaction';
+  }
+
+  if (AGENT_CONTROL_TOOL_NAME_SET.has(toolName)) {
+    return 'none';
+  }
+
+  if (READ_EVIDENCE_TOOL_NAME_SET.has(toolName)) {
+    return 'read';
+  }
+
+  if (WRITE_EVIDENCE_TOOL_NAME_SET.has(toolName)) {
+    return 'write';
+  }
+
+  if (EXTERNAL_ACTION_TOOL_NAME_SET.has(toolName)) {
+    return 'external_action';
+  }
+
+  return 'external_action';
 }
 
 function isKnownHostOwnedToolCall(
@@ -335,9 +403,12 @@ function isSuccessfulToolResultMessage(message: LLMChatMessage): boolean {
   const content = String(message.content ?? '');
   try {
     const parsed = JSON.parse(content);
+    if (isRecord(parsed) && parsed.ok === false) {
+      return false;
+    }
     return !isToolExecutionFailureArtifact(parsed);
   } catch {
-    return true;
+    return !content.trim().startsWith('Error:');
   }
 }
 
@@ -354,7 +425,65 @@ function isMatchingMutatingTool(
   }
 
   const definition = resolvedToolDefinitions[toolName];
-  return Boolean(definition && isMutatingEvidenceKind(definition.evidenceKind));
+  return Boolean(definition && isMutatingEvidenceKind(
+    classifyRuntimeToolEvidence(toolName, resolvedToolDefinitions),
+  ));
+}
+
+function hasPendingInteractionToolResultAwaitingAction(
+  messages: LLMChatMessage[],
+  resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
+): boolean {
+  const toolCallEvidenceById = new Map<string, { evidenceKind: LLMToolEvidenceKind; batchIndex: number }>();
+  const batchesWithSuccessfulActionResult = new Set<number>();
+  let latestActionResultIndex = -1;
+
+  messages.forEach((message, messageIndex) => {
+    if (message.role === 'assistant') {
+      for (const toolCall of message.tool_calls ?? []) {
+        toolCallEvidenceById.set(
+          toolCall.id,
+          {
+            evidenceKind: classifyRuntimeToolEvidence(toolCall.function.name, resolvedToolDefinitions),
+            batchIndex: messageIndex,
+          },
+        );
+      }
+    }
+  });
+
+  messages.forEach((message, messageIndex) => {
+    if (message.role !== 'tool' || !message.tool_call_id || !isSuccessfulToolResultMessage(message)) {
+      return;
+    }
+
+    const evidence = toolCallEvidenceById.get(message.tool_call_id);
+    const evidenceKind = evidence?.evidenceKind;
+    if (isActionEvidenceKind(evidenceKind)) {
+      if (evidence) {
+        batchesWithSuccessfulActionResult.add(evidence.batchIndex);
+      }
+      latestActionResultIndex = messageIndex;
+    }
+  });
+
+  let latestInteractionResultIndex = -1;
+  messages.forEach((message, messageIndex) => {
+    if (message.role !== 'tool' || !message.tool_call_id || !isSuccessfulToolResultMessage(message)) {
+      return;
+    }
+
+    const evidence = toolCallEvidenceById.get(message.tool_call_id);
+    const evidenceKind = evidence?.evidenceKind;
+    if (evidenceKind === 'interaction') {
+      if (evidence && batchesWithSuccessfulActionResult.has(evidence.batchIndex)) {
+        return;
+      }
+      latestInteractionResultIndex = messageIndex;
+    }
+  });
+
+  return latestInteractionResultIndex > latestActionResultIndex;
 }
 
 function hasSuccessfulMutatingToolResult(
@@ -775,6 +904,7 @@ async function runRuntimeCompletion(
   let activeIteration = 0;
   const streamToolCallStates = new Map<string, StreamToolCallDeltaState>();
   const mutationCompletionGate = getMutationCompletionGate(request);
+  let deferPotentialFinalDeltas = Boolean(options.streamModel && mutationCompletionGate);
   const modelRequest = buildRuntimeCompletionModelRequest(environment, request, {
     streamModel: options.streamModel,
     onChunk: options.streamModel
@@ -786,7 +916,7 @@ async function runRuntimeCompletion(
             iteration: activeIteration,
           });
         }
-        if (chunk.content) {
+        if (chunk.content && !deferPotentialFinalDeltas) {
           void emitEvent?.({
             type: 'text_delta',
             delta: chunk.content,
@@ -819,11 +949,13 @@ async function runRuntimeCompletion(
             const delta = answerPrefix.slice(state.emittedFinalAnswer.length);
             if (delta) {
               state.emittedFinalAnswer = answerPrefix;
-              void emitEvent?.({
-                type: 'answer_delta',
-                delta,
-                iteration: activeIteration,
-              });
+              if (!deferPotentialFinalDeltas) {
+                void emitEvent?.({
+                  type: 'answer_delta',
+                  delta,
+                  iteration: activeIteration,
+                });
+              }
             }
           }
         }
@@ -836,6 +968,11 @@ async function runRuntimeCompletion(
     extraTools: modelRequest.extraTools,
     tools: modelRequest.tools,
   });
+  if (options.streamModel) {
+    const initialResolvedToolDefinitions = await resolvedToolDefinitionsPromise;
+    deferPotentialFinalDeltas = deferPotentialFinalDeltas
+      || hasPendingInteractionToolResultAwaitingAction(request.messages, initialResolvedToolDefinitions);
+  }
   const loopResult = await runCompletionLoopComplete<RuntimeCompletionState>({
     initialState: {
       messages: request.messages,
@@ -859,14 +996,24 @@ async function runRuntimeCompletion(
         iteration,
       });
     },
-    onTextResponse: async ({ state, responseText, response }) => ({
-      state: {
-        ...state,
-        messages: [...state.messages, response.assistantMessage],
-        output: responseText,
-        raw: response,
-      },
-    }),
+    onTextResponse: async ({ state, responseText, response }) => {
+      if (deferPotentialFinalDeltas && responseText) {
+        await emitEvent?.({
+          type: 'text_delta',
+          delta: responseText,
+          iteration: activeIteration,
+        });
+      }
+
+      return {
+        state: {
+          ...state,
+          messages: [...state.messages, response.assistantMessage],
+          output: responseText,
+          raw: response,
+        },
+      };
+    },
     onRejectedTextResponse: async ({ state, response, responseText }) => ({
       state: {
         ...state,
@@ -876,8 +1023,15 @@ async function runRuntimeCompletion(
       },
     }),
     classifyTextResponse: async ({ messages }) => {
+      const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
+      if (hasPendingInteractionToolResultAwaitingAction(messages, resolvedToolDefinitions)) {
+        return {
+          classification: 'non_progressing',
+          transientInstruction: DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
+        };
+      }
+
       if (mutationCompletionGate) {
-        const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
         if (!hasSuccessfulMutatingToolResult(messages, resolvedToolDefinitions, mutationCompletionGate)) {
           return {
             classification: 'non_progressing',
@@ -886,14 +1040,33 @@ async function runRuntimeCompletion(
         }
         return 'verified_final_response';
       }
+
+      if (hasSuccessfulMutatingToolResult(messages, resolvedToolDefinitions, { kind: 'mutation' })) {
+        return 'verified_final_response';
+      }
     },
     onFinalAnswerToolCall: async ({ state, response, controlOutput }) => {
       if (controlOutput.kind !== 'final_answer') {
         return { state };
       }
 
+      const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
+      if (hasPendingInteractionToolResultAwaitingAction(state.messages, resolvedToolDefinitions)) {
+        deferPotentialFinalDeltas = Boolean(options.streamModel);
+        return {
+          state: {
+            ...state,
+            messages: [...state.messages, response.assistantMessage],
+            raw: response,
+          },
+          next: {
+            control: 'continue',
+            transientInstruction: DEFAULT_POST_INTERACTION_RECOVERY_INSTRUCTION,
+          },
+        };
+      }
+
       if (mutationCompletionGate) {
-        const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
         if (!hasSuccessfulMutatingToolResult(state.messages, resolvedToolDefinitions, mutationCompletionGate)) {
           return {
             state: {
@@ -907,6 +1080,14 @@ async function runRuntimeCompletion(
             },
           };
         }
+      }
+
+      if (deferPotentialFinalDeltas && controlOutput.answer) {
+        await emitEvent?.({
+          type: 'answer_delta',
+          delta: controlOutput.answer,
+          iteration: activeIteration,
+        });
       }
 
       return {
