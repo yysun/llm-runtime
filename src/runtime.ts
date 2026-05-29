@@ -8,6 +8,7 @@
  * - Supports explicit `LLMEnvironment` injection for provider/MCP/skill dependencies.
  * - Retains a convenience per-call path backed by internal caches when no environment is supplied.
  * - Keeps one shared orchestration engine for buffered and streaming calls.
+ * - Uses a Copilot-style completion split: mechanical loop state plus optional semantic `final_answer`.
  *
  * Implementation notes:
  * - The primary public model is per-call plus optional explicit environment injection.
@@ -23,7 +24,8 @@
  * - 2026-05-28: Kept host mutating-tool completion requirements independent from package built-in results.
  * - 2026-05-28: Defaulted omitted `builtIns` to all package-owned built-ins for host convenience.
  * - 2026-05-27: Previously removed implicit built-ins from runtime completion.
- * - 2026-05-27: Removed runtime-facade `agentControlMode` / `terminationMode` options; control-tool termination is the only supported behavior. Free-text responses (e.g. "I will ...", "Proceeding ...") never terminate the loop.
+ * - 2026-05-29: Adopted the Copilot-style completion pattern: `final_answer` is preferred, while generic evidence can authorize no-tool plain text completion.
+ * - 2026-05-27: Removed runtime-facade `agentControlMode` / `terminationMode` options; runtime-managed evidence classification now decides whether plain text can terminate.
  * - 2026-05-27: Added true text-delta streaming and opt-in control-tool termination for runtime completion.
  * - 2026-05-27: Honored per-call skill roots even when executing through a bound runtime environment.
  * - 2026-05-27: Defaulted runtime completion to one empty-text retry so provider empty stops after tool results can recover.

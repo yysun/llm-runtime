@@ -6,7 +6,7 @@
  *
  * Key features:
  * - One-shot `generate(...)` for a single model call.
- * - Agentic `complete(...)` and `streamComplete(...)` that own the tool-loop and terminate on control tools.
+ * - Agentic `complete(...)` and `streamComplete(...)` that own the tool-loop and prefer control-tool termination while accepting evidence-backed plain completion.
  * - Optional `createRuntime(...)` for callers that want to reuse providers/MCP/skills across many calls.
  * - Compact type set covering messages, tool definitions, results, and provider configuration.
  *
@@ -15,6 +15,7 @@
  *   are intentionally not re-exported here. Import them from internal paths only when extending the package.
  *
  * Recent changes:
+ * - 2026-05-29: Documented the Copilot-style completion contract for the public runtime facade.
  * - 2026-05-27: Reduced the public surface to `complete`, `streamComplete`, `generate`, `createRuntime`,
  *   and the minimum type set needed to use them. Internal helpers, turn-loop hooks, recovery prompts,
  *   and direct provider clients are no longer re-exported.

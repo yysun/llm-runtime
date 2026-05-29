@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-29: Added Copilot-pattern coverage for preferred `final_answer` plus evidence-backed plain completion.
  * - 2026-05-28: Added explicit completionGate and atomic host-owned tool-batch coverage.
  * - 2026-05-28: Updated repeated-tool guard coverage to expect failed runtime results.
  * - 2026-05-28: Added host-only loop coverage for `builtIns: false` and host mutating-tool evidence isolation.
@@ -464,7 +465,7 @@ describe('llm-runtime runtime', () => {
     expect(seenSystemPrompts[0]).toContain('Your job is to continue until the user\'s task is complete, blocked, or requires user input.');
     expect(seenSystemPrompts[0]).toContain('Prefer action over explanation.');
     expect(seenSystemPrompts[0]).toContain('call them in the same assistant tool-call batch');
-    expect(seenSystemPrompts[0]).toContain('finish by calling `final_answer`');
+    expect(seenSystemPrompts[0]).toContain('prefer finishing by calling `final_answer`');
 
     await runtime.dispose();
   });
@@ -1401,6 +1402,103 @@ describe('llm-runtime runtime', () => {
     expect(result.messages).toContainEqual(expect.objectContaining({
       role: 'tool',
       tool_call_id: 'write-after-ask-1',
+      content: JSON.stringify({ ok: true, path: 'config.json' }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('does not accept plain final text immediately after a resumed ask_user_input result', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'ask-before-plain-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const writeToolCall = {
+      id: 'write-after-plain-ask-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: 'Configured the project.',
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Configured the project.',
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'text',
+        content: 'Configured the project.',
+        stopKind: 'natural_stop',
+        providerStopReason: 'stop',
+        assistantMessage: {
+          role: 'assistant',
+          content: 'Configured the project.',
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'ask-before-plain-action-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'Configured the project.',
+    });
+    expect(result.messages).toContainEqual(expect.objectContaining({
+      role: 'tool',
+      tool_call_id: 'write-after-plain-ask-1',
       content: JSON.stringify({ ok: true, path: 'config.json' }),
     }));
     expect(executeWrite).toHaveBeenCalledTimes(1);
@@ -2864,6 +2962,120 @@ describe('llm-runtime runtime', () => {
       result: expect.objectContaining({
         status: 'completed',
         output: 'Configured after action.',
+      }),
+    }));
+    expect(executeWrite).toHaveBeenCalledTimes(1);
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(3);
+
+    await runtime.dispose();
+  });
+
+  it('defers streamed plain final text after resumed ask_user_input until action evidence exists', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+
+    const askToolCall = {
+      id: 'stream-ask-before-plain-action-1',
+      type: 'function' as const,
+      function: {
+        name: 'ask_user_input',
+        arguments: '{"questions":[{"id":"pattern","question":"Which pattern?","options":[]}]}',
+      },
+    };
+    const writeToolCall = {
+      id: 'stream-write-after-plain-ask-1',
+      type: 'function' as const,
+      function: {
+        name: 'write_config',
+        arguments: '{"path":"config.json"}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true, path: 'config.json' }));
+
+    mockStreamOpenAIResponse
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({ content: 'Configured before write.' });
+        return {
+          type: 'text',
+          content: 'Configured before write.',
+          stopKind: 'natural_stop',
+          providerStopReason: 'stop',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Configured before write.',
+          },
+        };
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [writeToolCall],
+        },
+      })
+      .mockImplementationOnce(async (request: any) => {
+        request.onChunk({ content: 'Configured after write.' });
+        return {
+          type: 'text',
+          content: 'Configured after write.',
+          stopKind: 'natural_stop',
+          providerStopReason: 'stop',
+          assistantMessage: {
+            role: 'assistant',
+            content: 'Configured after write.',
+          },
+        };
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [
+        { role: 'user', content: 'Configure the project after I pick a pattern.' },
+        { role: 'assistant', content: '', tool_calls: [askToolCall] },
+        {
+          role: 'tool',
+          tool_call_id: 'stream-ask-before-plain-action-1',
+          content: JSON.stringify({ ok: true, status: 'answered', selections: [{ id: 'pattern', value: 'broadcast' }] }),
+        },
+      ],
+      extraTools: [{
+        name: 'write_config',
+        description: 'Write config.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events
+      .filter((event) => event.type === 'text_delta')
+      .map((event) => event.delta)).toEqual(['Configured after write.']);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      toolCall: writeToolCall,
+      result: { ok: true, path: 'config.json' },
+    }));
+    expect(events.at(-1)).toEqual(expect.objectContaining({
+      type: 'completed',
+      result: expect.objectContaining({
+        status: 'completed',
+        output: 'Configured after write.',
       }),
     }));
     expect(executeWrite).toHaveBeenCalledTimes(1);

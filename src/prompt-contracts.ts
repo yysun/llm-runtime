@@ -1,3 +1,22 @@
+/**
+ * LLM Package Managed Prompt Contracts
+ *
+ * Purpose:
+ * - Own package-managed prompt text inserted into runtime completion requests.
+ *
+ * Key features:
+ * - Agent run-loop guidance for tool use, user input, and completion.
+ * - Human-intervention and workspace-tool hints shared by runtime entrypoints.
+ * - Stable managed-prompt block tags so package text can be replaced without disturbing host prompts.
+ *
+ * Implementation notes:
+ * - The prompt contract stays host-agnostic and must not encode CLI, Agent World, or repo-specific process.
+ * - `final_answer` is described as the preferred semantic completion signal, while runtime evidence remains the mechanical stop guard.
+ *
+ * Recent changes:
+ * - 2026-05-29: Reworded final-answer guidance for the Copilot-style completion pattern.
+ */
+
 import type { LLMChatMessage } from './types.js';
 
 const AGENT_RUN_LOOP_PROMPT_MARKER = 'You are operating inside an agent run loop.';
@@ -32,11 +51,12 @@ const AGENT_RUN_LOOP_PROMPT_BLOCK = [
   '',
   'For file-generation or setup tasks, write every known required file and directory before the final answer. Do not claim completion after only part of a generated bundle has been written.',
   '',
-  'When the `final_answer` tool is available, finish by calling `final_answer`; do not send the final answer as plain assistant text.',
+  'When the `final_answer` tool is available, prefer finishing by calling `final_answer`; plain final text is only appropriate when no further tool work remains.',
   '',
   'You may stop only by:',
   '- calling a tool,',
   '- calling `final_answer` with a complete final answer,',
+  '- providing a complete final answer when no further tool work remains,',
   '- calling an available user-input tool for required input,',
   '- or reporting a real permission, capability, or safety block.',
 ].join('\n');
