@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-05-28: Added explicit completionGate and atomic host-owned tool-batch coverage.
  * - 2026-05-28: Updated repeated-tool guard coverage to expect failed runtime results.
  * - 2026-05-28: Added host-only loop coverage for `builtIns: false` and host mutating-tool evidence isolation.
  * - 2026-05-27: Removed runtime `agentControlMode`/`terminationMode` opt-outs; tests rely on the new control-tool termination default.
@@ -1029,14 +1030,14 @@ describe('llm-runtime runtime', () => {
       { role: 'user', content: 'Find token.' },
       expect.objectContaining({ role: 'assistant', tool_calls: [hostToolCall] }),
     ]);
-    expect(onToolCall).toHaveBeenCalledTimes(1);
+    expect(onToolCall).not.toHaveBeenCalled();
     expect(onToolApproval).not.toHaveBeenCalled();
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
   });
 
-  it('lets onToolCall execute a non-executable host-owned tool and continue the loop', async () => {
+  it('returns non-executable host-owned tool calls even when onToolCall is provided', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const hostToolCall = {
@@ -1047,36 +1048,16 @@ describe('llm-runtime runtime', () => {
         arguments: '{"query":"token"}',
       },
     };
-    const finalAnswerCall = {
-      id: 'control-final-host-handled-1',
-      type: 'function' as const,
-      function: {
-        name: 'final_answer',
-        arguments: '{"answer":"handled by host callback"}',
-      },
-    };
-
-    mockGenerateOpenAIResponse
-      .mockResolvedValueOnce({
-        type: 'tool_calls',
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [hostToolCall],
+      assistantMessage: {
+        role: 'assistant',
         content: '',
         tool_calls: [hostToolCall],
-        assistantMessage: {
-          role: 'assistant',
-          content: '',
-          tool_calls: [hostToolCall],
-        },
-      })
-      .mockResolvedValueOnce({
-        type: 'tool_calls',
-        content: '',
-        tool_calls: [finalAnswerCall],
-        assistantMessage: {
-          role: 'assistant',
-          content: '',
-          tool_calls: [finalAnswerCall],
-        },
-      });
+      },
+    });
 
     const runtime = createRuntime({
       providers: {
@@ -1106,22 +1087,19 @@ describe('llm-runtime runtime', () => {
       }],
     });
 
-    expect(result.status).toBe('completed');
-    expect(result.output).toBe('handled by host callback');
-    expect(result.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        role: 'tool',
-        tool_call_id: 'host-tool-handled-1',
-        content: JSON.stringify({ token: 'host-callback-token' }),
-      }),
-    ]));
-    expect(onToolCall).toHaveBeenCalledTimes(1);
-    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe('tool_calls');
+    expect(result.toolCalls).toEqual([hostToolCall]);
+    expect(result.messages).toEqual([
+      { role: 'user', content: 'Find token.' },
+      expect.objectContaining({ role: 'assistant', tool_calls: [hostToolCall] }),
+    ]);
+    expect(onToolCall).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
 
     await runtime.dispose();
   });
 
-  it('executes runtime-owned tools in a mixed batch before returning host-owned tool calls', async () => {
+  it('returns a mixed host-owned custom and runtime-owned batch without executing anything', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const runtimeToolCall = {
@@ -1198,16 +1176,173 @@ describe('llm-runtime runtime', () => {
     expect(result.messages).toEqual([
       { role: 'user', content: 'Find both tokens.' },
       expect.objectContaining({ role: 'assistant', tool_calls: [runtimeToolCall, hostToolCall] }),
-      {
-        role: 'tool',
-        tool_call_id: 'runtime-tool-1',
-        content: JSON.stringify({ token: 'runtime-token' }),
-      },
     ]);
-    expect(executeRuntimeTool).toHaveBeenCalledTimes(1);
-    expect(onToolApproval).toHaveBeenCalledTimes(1);
-    expect(onToolApproval.mock.calls[0]?.[0]).toEqual(expect.objectContaining({ toolName: 'project_lookup' }));
+    expect(executeRuntimeTool).not.toHaveBeenCalled();
+    expect(onToolApproval).not.toHaveBeenCalled();
     expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('returns a mixed ask_user_input and write_file batch without executing write_file', async () => {
+    await withTempWorkspace(async (workspacePath) => {
+      mockGenerateOpenAIResponse.mockReset();
+
+      const askToolCall = {
+        id: 'ask-user-before-write-1',
+        type: 'function' as const,
+        function: {
+          name: 'ask_user_input',
+          arguments: '{"questions":[{"id":"confirm","question":"Proceed?","options":[]}]}',
+        },
+      };
+      const writeToolCall = {
+        id: 'write-file-mixed-with-ask-1',
+        type: 'function' as const,
+        function: {
+          name: 'write_file',
+          arguments: JSON.stringify({
+            filePath: 'should-not-exist.txt',
+            content: 'side effect',
+          }),
+        },
+      };
+
+      mockGenerateOpenAIResponse.mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [askToolCall, writeToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [askToolCall, writeToolCall],
+        },
+      });
+
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        context: { workingDirectory: workspacePath },
+        messages: [{ role: 'user', content: 'Ask, then write.' }],
+      });
+
+      expect(result.status).toBe('tool_calls');
+      expect(result.toolCalls).toEqual([askToolCall]);
+      expect(result.messages).toEqual([
+        { role: 'user', content: 'Ask, then write.' },
+        expect.objectContaining({ role: 'assistant', tool_calls: [askToolCall, writeToolCall] }),
+      ]);
+      await expect(fs.access(path.join(workspacePath, 'should-not-exist.txt'))).rejects.toThrow();
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+      await runtime.dispose();
+    });
+  });
+
+  it('executes a pure runtime-owned batch and continues', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const firstToolCall = {
+      id: 'runtime-batch-first-1',
+      type: 'function' as const,
+      function: {
+        name: 'first_lookup',
+        arguments: '{"query":"first"}',
+      },
+    };
+    const secondToolCall = {
+      id: 'runtime-batch-second-1',
+      type: 'function' as const,
+      function: {
+        name: 'second_lookup',
+        arguments: '{"query":"second"}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'runtime-batch-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"runtime batch complete"}',
+      },
+    };
+    const executeFirst = vi.fn(async () => ({ value: 'first' }));
+    const executeSecond = vi.fn(async () => ({ value: 'second' }));
+
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [firstToolCall, secondToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [firstToolCall, secondToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Run both lookups.' }],
+      extraTools: [{
+        name: 'first_lookup',
+        description: 'First lookup.',
+        parameters: { type: 'object' },
+        execute: executeFirst,
+      }, {
+        name: 'second_lookup',
+        description: 'Second lookup.',
+        parameters: { type: 'object' },
+        execute: executeSecond,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'runtime batch complete',
+    });
+    expect(executeFirst).toHaveBeenCalledTimes(1);
+    expect(executeSecond).toHaveBeenCalledTimes(1);
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'runtime-batch-first-1',
+        content: JSON.stringify({ value: 'first' }),
+      }),
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: 'runtime-batch-second-1',
+        content: JSON.stringify({ value: 'second' }),
+      }),
+    ]));
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
 
     await runtime.dispose();
   });
@@ -2459,7 +2594,62 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('does not accept successful initialization text before a mutating tool result exists', async () => {
+  it('does not require mutation evidence just because a mutating host tool is exposed', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+
+    const finalAnswerToolCall = {
+      id: 'control-final-read-only-with-write-tool-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"No write needed."}',
+      },
+    };
+    const executeWrite = vi.fn(async () => ({ ok: true }));
+
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [finalAnswerToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [finalAnswerToolCall],
+      },
+    });
+
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Answer a read-only question.' }],
+      extraTools: [{
+        name: 'write_world_file',
+        description: 'Write world files.',
+        evidenceKind: 'write',
+        parameters: { type: 'object' },
+        execute: executeWrite,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'completed',
+      output: 'No write needed.',
+    });
+    expect(executeWrite).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+
+    await runtime.dispose();
+  });
+
+  it('rejects final text before an explicit mutation gate has matching evidence', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const inspectToolCall = {
@@ -2554,6 +2744,11 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      completionGate: {
+        requireToolEvidence: {
+          kind: 'mutation',
+        },
+      },
       extraTools: [{
         name: 'inspect_world',
         description: 'Inspect world state.',
@@ -2578,7 +2773,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('does not accept final_answer before a mutating tool result exists', async () => {
+  it('rejects final_answer before an explicit mutation gate has matching evidence', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const prematureFinalToolCall = {
@@ -2651,6 +2846,11 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      completionGate: {
+        requireToolEvidence: {
+          kind: 'mutation',
+        },
+      },
       extraTools: [{
         name: 'write_world_file',
         description: 'Write world files.',
@@ -2670,7 +2870,7 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
-  it('does not let a mutating built-in result satisfy a host mutating tool requirement', async () => {
+  it('honors mutation gate toolNames when matching evidence', async () => {
     await withTempWorkspace(async (workspacePath) => {
       mockGenerateOpenAIResponse.mockReset();
 
@@ -2788,6 +2988,12 @@ describe('llm-runtime runtime', () => {
         context: { workingDirectory: workspacePath },
         messages: [{ role: 'user', content: 'Initialize Agent World.' }],
         builtIns: true,
+        completionGate: {
+          requireToolEvidence: {
+            kind: 'mutation',
+            toolNames: ['write_world_file'],
+          },
+        },
         extraTools: [{
           name: 'write_world_file',
           description: 'Write world files.',
@@ -2810,7 +3016,7 @@ describe('llm-runtime runtime', () => {
     });
   });
 
-  it('accepts final text after a mutating tool result exists', async () => {
+  it('accepts final text after explicit mutation gate evidence exists', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
     const writeToolCall = {
@@ -2857,6 +3063,11 @@ describe('llm-runtime runtime', () => {
       provider: 'openai',
       model: 'gpt-5',
       messages: [{ role: 'user', content: 'Initialize Agent World.' }],
+      completionGate: {
+        requireToolEvidence: {
+          kind: 'mutation',
+        },
+      },
       extraTools: [{
         name: 'write_world_file',
         description: 'Write world files.',

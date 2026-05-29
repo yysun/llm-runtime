@@ -15,6 +15,7 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-05-28: Added explicit completionGate mutation evidence checks and made host-owned tool batches atomic.
  * - 2026-05-28: Stopped host-owned tool calls, including non-executable `ask_user_input`, as `tool_calls` results for host resume.
  * - 2026-05-28: Removed the `need_user_input` control-tool result path; host input now flows through `ask_user_input`.
  * - 2026-05-28: Mapped repeated-tool guard stops to failed runtime results instead of completed diagnostic output.
@@ -84,6 +85,7 @@ import type {
   LLMResolveToolsOptions,
   LLMResponse,
   LLMRuntime,
+  LLMRuntimeCompletionMutationEvidenceGate,
   LLMRuntimeCompleteOptions,
   LLMRuntimeCompleteResult,
   LLMRuntimeStreamCompleteEvent,
@@ -309,52 +311,6 @@ function isMutatingEvidenceKind(evidenceKind: LLMToolDefinition['evidenceKind'])
     || evidenceKind === 'artifact';
 }
 
-function createRequestToolDefinitionMap(
-  request: Pick<LLMRuntimeCompleteOptions, 'extraTools' | 'tools'>,
-): ReadonlyMap<string, LLMToolDefinition> {
-  const definitions = new Map<string, LLMToolDefinition>();
-
-  for (const tool of request.extraTools ?? []) {
-    definitions.set(tool.name, tool);
-  }
-
-  for (const [toolName, tool] of Object.entries(request.tools ?? {})) {
-    definitions.set(toolName, tool);
-  }
-
-  return definitions;
-}
-
-function isHostMutatingToolName(
-  toolName: string,
-  requestToolDefinitions: ReadonlyMap<string, LLMToolDefinition>,
-): boolean {
-  const definition = requestToolDefinitions.get(toolName);
-  if (!definition) {
-    return false;
-  }
-
-  return isMutatingEvidenceKind(definition.evidenceKind);
-}
-
-function requestExposesMutatingTools(request: LLMRuntimeCompleteOptions): boolean {
-  // Built-ins default to all tools, so their availability is not evidence that the task
-  // requires a write or external action. Only host tools can declare that requirement.
-  for (const tool of request.extraTools ?? []) {
-    if (isMutatingEvidenceKind(tool.evidenceKind)) {
-      return true;
-    }
-  }
-
-  for (const tool of Object.values(request.tools ?? {})) {
-    if (isMutatingEvidenceKind(tool.evidenceKind)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 function isKnownHostOwnedToolCall(
   toolCall: LLMToolCall,
   resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
@@ -364,9 +320,47 @@ function isKnownHostOwnedToolCall(
   return Boolean(definition && typeof definition.execute !== 'function');
 }
 
-function hasMutatingToolResult(
+function getMutationCompletionGate(
+  request: LLMRuntimeCompleteOptions,
+): LLMRuntimeCompletionMutationEvidenceGate | null {
+  const gate = request.completionGate?.requireToolEvidence;
+  if (!gate || gate.kind !== 'mutation') {
+    return null;
+  }
+
+  return gate;
+}
+
+function isSuccessfulToolResultMessage(message: LLMChatMessage): boolean {
+  const content = String(message.content ?? '');
+  try {
+    const parsed = JSON.parse(content);
+    return !isToolExecutionFailureArtifact(parsed);
+  } catch {
+    return true;
+  }
+}
+
+function isMatchingMutatingTool(
+  toolName: string,
+  resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
+  gate: LLMRuntimeCompletionMutationEvidenceGate,
+): boolean {
+  const allowedToolNames = new Set((gate.toolNames ?? [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean));
+  if (allowedToolNames.size > 0 && !allowedToolNames.has(toolName)) {
+    return false;
+  }
+
+  const definition = resolvedToolDefinitions[toolName];
+  return Boolean(definition && isMutatingEvidenceKind(definition.evidenceKind));
+}
+
+function hasSuccessfulMutatingToolResult(
   messages: LLMChatMessage[],
-  requestToolDefinitions: ReadonlyMap<string, LLMToolDefinition>,
+  resolvedToolDefinitions: Readonly<Record<string, LLMToolDefinition>>,
+  gate: LLMRuntimeCompletionMutationEvidenceGate,
 ): boolean {
   const toolCallNamesById = new Map<string, string>();
 
@@ -383,7 +377,11 @@ function hasMutatingToolResult(
     }
 
     const toolName = toolCallNamesById.get(message.tool_call_id);
-    if (toolName && isHostMutatingToolName(toolName, requestToolDefinitions)) {
+    if (
+      toolName
+      && isMatchingMutatingTool(toolName, resolvedToolDefinitions, gate)
+      && isSuccessfulToolResultMessage(message)
+    ) {
       return true;
     }
   }
@@ -776,8 +774,7 @@ async function runRuntimeCompletion(
 ): Promise<LLMRuntimeCompleteResult> {
   let activeIteration = 0;
   const streamToolCallStates = new Map<string, StreamToolCallDeltaState>();
-  const mutatingToolRequired = requestExposesMutatingTools(request);
-  const requestToolDefinitions = createRequestToolDefinitionMap(request);
+  const mutationCompletionGate = getMutationCompletionGate(request);
   const modelRequest = buildRuntimeCompletionModelRequest(environment, request, {
     streamModel: options.streamModel,
     onChunk: options.streamModel
@@ -878,9 +875,10 @@ async function runRuntimeCompletion(
         raw: response,
       },
     }),
-    classifyTextResponse: ({ messages }) => {
-      if (mutatingToolRequired) {
-        if (!hasMutatingToolResult(messages, requestToolDefinitions)) {
+    classifyTextResponse: async ({ messages }) => {
+      if (mutationCompletionGate) {
+        const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
+        if (!hasSuccessfulMutatingToolResult(messages, resolvedToolDefinitions, mutationCompletionGate)) {
           return {
             classification: 'non_progressing',
             transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
@@ -894,18 +892,21 @@ async function runRuntimeCompletion(
         return { state };
       }
 
-      if (mutatingToolRequired && !hasMutatingToolResult(state.messages, requestToolDefinitions)) {
-        return {
-          state: {
-            ...state,
-            messages: [...state.messages, response.assistantMessage],
-            raw: response,
-          },
-          next: {
-            control: 'continue',
-            transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
-          },
-        };
+      if (mutationCompletionGate) {
+        const resolvedToolDefinitions = await resolvedToolDefinitionsPromise;
+        if (!hasSuccessfulMutatingToolResult(state.messages, resolvedToolDefinitions, mutationCompletionGate)) {
+          return {
+            state: {
+              ...state,
+              messages: [...state.messages, response.assistantMessage],
+              raw: response,
+            },
+            next: {
+              control: 'continue',
+              transientInstruction: DEFAULT_MUTATING_TOOL_RECOVERY_INSTRUCTION,
+            },
+          };
+        }
       }
 
       return {
@@ -951,8 +952,21 @@ async function runRuntimeCompletion(
         };
       }
 
+      const hostOwnedToolCalls = toolCalls.filter((toolCall) => (
+        isKnownHostOwnedToolCall(toolCall, resolvedToolDefinitions)
+      ));
+      if (hostOwnedToolCalls.length > 0) {
+        return {
+          state: {
+            ...state,
+            messages: nextMessages,
+            toolCalls: hostOwnedToolCalls,
+            raw: response,
+          },
+        };
+      }
+
       const toolMessages = [...nextMessages];
-      const hostOwnedToolCalls: LLMToolCall[] = [];
       for (const toolCall of toolCalls) {
         const parsedArguments = parseToolCallArguments(toolCall);
         const parsedArgs = parsedArguments.ok ? parsedArguments.args : {};
@@ -962,11 +976,6 @@ async function runRuntimeCompletion(
         };
         let toolResult: unknown;
         const toolName = toolCall.function.name;
-        const knownHostOwnedToolCall = isKnownHostOwnedToolCall(toolCall, resolvedToolDefinitions);
-        if (knownHostOwnedToolCall && !request.onToolCall) {
-          hostOwnedToolCalls.push(toolCall);
-          continue;
-        }
 
         await emitEvent?.({
           type: 'tool_start',
@@ -974,22 +983,6 @@ async function runRuntimeCompletion(
           args: parsedArguments.ok ? parsedArguments.args : undefined,
           iteration,
         });
-
-        if (knownHostOwnedToolCall && request.onToolCall) {
-          const handled = await request.onToolCall({
-            toolCall,
-            toolName,
-            parsedArguments: parsedArgs,
-            context: executionContext,
-            executeDefault: () => toolExecutor.executeToolCall(toolCall, executionContext, { errorMode: 'return-artifact' }),
-          });
-          if (handled.handled && handled.result !== undefined) {
-            toolResult = handled.result;
-          } else {
-            hostOwnedToolCalls.push(toolCall);
-            continue;
-          }
-        }
 
         if (toolResult === undefined && request.onToolApproval) {
           const approval = await request.onToolApproval({ toolCall, toolName, parsedArguments: parsedArgs });
@@ -1041,17 +1034,6 @@ async function runRuntimeCompletion(
           result: toolResult,
           iteration,
         });
-      }
-
-      if (hostOwnedToolCalls.length > 0) {
-        return {
-          state: {
-            ...state,
-            messages: toolMessages,
-            toolCalls: hostOwnedToolCalls,
-            raw: response,
-          },
-        };
       }
 
       return {

@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-05-28: Added explicit runtime completion gates so tool availability does not imply task requirements.
  * - 2026-05-27: Removed `agentControlMode` and `terminationMode` opt-outs from runtime completion options; control-tool termination is the only supported mode.
  * - 2026-05-27: Added `agentControlMode` as a runtime-facade compatibility alias for control-tool termination.
  * - 2026-05-27: Added opt-in runtime control-tool termination mode for agentic runs.
@@ -370,6 +371,13 @@ export type LLMRuntimeDefaultTextResponseMode = 'permissive' | 'require_tool_res
 export interface LLMRuntimeRepeatedToolCallGuard {
   maxConsecutiveSameBatches?: number;
 }
+export interface LLMRuntimeCompletionMutationEvidenceGate {
+  kind: 'mutation';
+  toolNames?: string[];
+}
+export interface LLMRuntimeCompletionGate {
+  requireToolEvidence?: false | LLMRuntimeCompletionMutationEvidenceGate;
+}
 export interface LLMRuntimeToolApprovalRequest {
   toolCall: LLMToolCall;
   toolName: string;
@@ -396,6 +404,7 @@ export interface LLMRuntimeCompleteOptions extends LLMPerCallProviderOptions {
   repeatedToolCallGuard?: false | LLMRuntimeRepeatedToolCallGuard;
   defaultTextResponseMode?: LLMRuntimeDefaultTextResponseMode;
   rejectedTextRetryLimit?: number;
+  completionGate?: LLMRuntimeCompletionGate;
   onToolApproval?: (request: LLMRuntimeToolApprovalRequest) => Promise<LLMRuntimeToolApprovalResponse> | LLMRuntimeToolApprovalResponse;
   onToolCall?: (request: LLMRuntimeToolHandlerRequest) => Promise<LLMRuntimeToolHandlerResponse> | LLMRuntimeToolHandlerResponse;
 }
