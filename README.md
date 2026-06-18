@@ -232,7 +232,16 @@ if (result.status === 'tool_calls') {
 - `failed`
 - `raw`
 
+Do not concatenate `text_delta` and `answer_delta` into one user-visible message. They are different channels:
+
+- `text_delta` is raw assistant text emitted by the provider. In agentic runs that use the `final_answer` control tool, it can be draft or recovery text and should usually be treated as internal/debug output.
+- `answer_delta` is streamed from the `final_answer` control tool arguments. Hosts using the runtime's control protocol should display this as the final assistant answer.
+
+For chat UIs that use `final_answer`, stream `answer_delta` to the visible assistant bubble. If no `answer_delta` arrives, use `completed.result.output` once as the fallback final text.
+
 ```ts
+let streamedAnswer = '';
+
 for await (const event of runtime.streamComplete({
   provider: 'openai',
   model: 'gpt-5',
@@ -245,12 +254,15 @@ for await (const event of runtime.streamComplete({
     path_exists: true,
   },
 })) {
-  if (event.type === 'text_delta' || event.type === 'answer_delta') {
+  if (event.type === 'answer_delta') {
+    streamedAnswer += event.delta;
     process.stdout.write(event.delta);
   }
 
   if (event.type === 'completed') {
-    console.log(event.result.output);
+    if (!streamedAnswer && event.result.output) {
+      process.stdout.write(event.result.output);
+    }
   }
 }
 ```
