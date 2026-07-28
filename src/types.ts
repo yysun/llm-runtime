@@ -15,6 +15,7 @@
  * - Leaves room for future provider invocation APIs without breaking current contracts.
  *
  * Recent changes:
+ * - 2026-07-28: Replaced truthy tool approval with an explicit approve-or-cancel decision.
  * - 2026-05-28: Added explicit runtime completion gates so tool availability does not imply task requirements.
  * - 2026-05-27: Removed `agentControlMode` and `terminationMode` opt-outs from runtime completion options; control-tool termination is the only supported mode.
  * - 2026-05-27: Added `agentControlMode` as a runtime-facade compatibility alias for control-tool termination.
@@ -254,6 +255,7 @@ export interface HitlInputQuestion {
   header: string;
   id: string;
   question: string;
+  allowOther?: boolean;
   options: HitlInputOption[];
 }
 
@@ -293,6 +295,7 @@ export type LLMToolExecutionFailureCode =
   | 'invalid_arguments_shape'
   | 'unknown_tool'
   | 'non_executable_tool'
+  | 'batch_preflight_failed'
   | 'execution_failed';
 
 export interface LLMToolExecutionFailureArtifact {
@@ -383,10 +386,19 @@ export interface LLMRuntimeToolApprovalRequest {
   toolName: string;
   parsedArguments: Record<string, unknown>;
 }
-export interface LLMRuntimeToolApprovalResponse {
-  approved: boolean;
-  reason?: string;
-}
+export type LLMRuntimeToolApprovalCancelReason =
+  | 'rejected'
+  | 'dismissed'
+  | 'timeout';
+export type LLMRuntimeToolApprovalResponse =
+  | {
+    decision: 'approve';
+  }
+  | {
+    decision: 'cancel';
+    reason: LLMRuntimeToolApprovalCancelReason;
+    message?: string;
+  };
 export interface LLMRuntimeToolHandlerRequest {
   toolCall: LLMToolCall;
   toolName: string;

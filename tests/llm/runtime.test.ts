@@ -15,6 +15,7 @@
  * - Uses temporary directories for built-in filesystem executor coverage while avoiding network or provider calls.
  *
  * Recent changes:
+ * - 2026-07-28: Added fail-closed human-input and executable approval coverage.
  * - 2026-05-29: Added Copilot-pattern coverage for preferred `final_answer` plus evidence-backed plain completion.
  * - 2026-05-28: Added explicit completionGate and atomic host-owned tool-batch coverage.
  * - 2026-05-28: Updated repeated-tool guard coverage to expect failed runtime results.
@@ -63,6 +64,7 @@ import {
   type RuntimeStreamCompleteEvent,
   createAskUserInputResult,
   createHumanInputToolResult,
+  normalizeAskUserInputOutcome,
 } from '../../src/runtime-complete-contract.js';
 import {
   complete,
@@ -990,7 +992,7 @@ describe('llm-runtime runtime', () => {
         },
       },
     });
-    const onToolApproval = vi.fn(() => ({ approved: true }));
+    const onToolApproval = vi.fn(() => ({ decision: 'approve' as const }));
 
     const result = await runtime.complete({
       provider: 'openai',
@@ -1054,7 +1056,11 @@ describe('llm-runtime runtime', () => {
       },
     });
     const onToolCall = vi.fn(() => ({ handled: false }));
-    const onToolApproval = vi.fn(() => ({ approved: false, reason: 'should not run' }));
+    const onToolApproval = vi.fn(() => ({
+      decision: 'cancel' as const,
+      reason: 'rejected' as const,
+      message: 'should not run',
+    }));
 
     const result = await runtime.complete({
       provider: 'openai',
@@ -1190,7 +1196,7 @@ describe('llm-runtime runtime', () => {
         },
       },
     });
-    const onToolApproval = vi.fn(() => ({ approved: true }));
+    const onToolApproval = vi.fn(() => ({ decision: 'approve' as const }));
 
     const result = await runtime.complete({
       provider: 'openai',
@@ -1754,6 +1760,660 @@ describe('llm-runtime runtime', () => {
     await runtime.dispose();
   });
 
+  it('preflights explicit approval before executing and preserves automatic execution when omitted', async () => {
+    const toolCall = {
+      id: 'approval-explicit-1',
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{"target":"config"}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'approval-explicit-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"approved mutation complete"}',
+      },
+    };
+
+    for (const withApproval of [true, false]) {
+      mockGenerateOpenAIResponse.mockReset();
+      mockGenerateOpenAIResponse
+        .mockResolvedValueOnce({
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [toolCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [toolCall],
+          },
+        })
+        .mockResolvedValueOnce({
+          type: 'tool_calls',
+          content: '',
+          tool_calls: [finalAnswerCall],
+          assistantMessage: {
+            role: 'assistant',
+            content: '',
+            tool_calls: [finalAnswerCall],
+          },
+        });
+      const execute = vi.fn(async () => ({ ok: true }));
+      const onToolApproval = vi.fn(() => ({ decision: 'approve' as const }));
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Mutate the project.' }],
+        ...(withApproval ? { onToolApproval } : {}),
+        extraTools: [{
+          name: 'mutate_project',
+          description: 'Mutate project.',
+          parameters: {
+            type: 'object',
+            properties: {
+              target: { type: 'string' },
+            },
+            required: ['target'],
+            additionalProperties: false,
+          },
+          execute,
+        }],
+      });
+
+      expect(result).toMatchObject({
+        status: 'completed',
+        output: 'approved mutation complete',
+      });
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(onToolApproval).toHaveBeenCalledTimes(withApproval ? 1 : 0);
+      if (withApproval) {
+        expect(onToolApproval).toHaveBeenCalledWith(expect.objectContaining({
+          toolCall,
+          toolName: 'mutate_project',
+          parsedArguments: { target: 'config' },
+        }));
+      }
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+      await runtime.dispose();
+    }
+  });
+
+  it.each([
+    {
+      name: 'explicit rejection',
+      response: { decision: 'cancel', reason: 'rejected' },
+      expectedReason: 'approval_rejected',
+    },
+    {
+      name: 'dismissal',
+      response: { decision: 'cancel', reason: 'dismissed' },
+      expectedReason: 'approval_dismissed',
+    },
+    {
+      name: 'host timeout',
+      response: { decision: 'cancel', reason: 'timeout' },
+      expectedReason: 'approval_timeout',
+    },
+    {
+      name: 'legacy boolean',
+      response: true,
+      expectedReason: 'approval_invalid',
+    },
+    {
+      name: 'legacy object',
+      response: { approved: true },
+      expectedReason: 'approval_invalid',
+    },
+    {
+      name: 'truthy malformed decision',
+      response: { decision: 'approve', extra: true },
+      expectedReason: 'approval_invalid',
+    },
+  ])('cancels without execution for $name approval response', async ({
+    response,
+    expectedReason,
+  }) => {
+    mockGenerateOpenAIResponse.mockReset();
+    const toolCall = {
+      id: `approval-cancel-${expectedReason}`,
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{"target":"config"}',
+      },
+    };
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [toolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [toolCall],
+      },
+    });
+    const execute = vi.fn(async () => ({ ok: true }));
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval: vi.fn(() => response as any),
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      cancellation: {
+        kind: 'tool_approval',
+        reason: expectedReason,
+        toolCall,
+      },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+  });
+
+  it('rejects inherited, non-enumerable, accessor, and symbol-backed approval objects', async () => {
+    const inheritedApproval = Object.create({ decision: 'approve' });
+    const nonEnumerableApproval = Object.defineProperty({}, 'decision', {
+      enumerable: false,
+      value: 'approve',
+    });
+    const accessorApproval = Object.defineProperty({}, 'decision', {
+      enumerable: true,
+      get: () => 'approve',
+    });
+    const symbolApproval = {
+      decision: 'approve',
+      [Symbol('unexpected')]: true,
+    };
+
+    for (const response of [
+      inheritedApproval,
+      nonEnumerableApproval,
+      accessorApproval,
+      symbolApproval,
+    ]) {
+      mockGenerateOpenAIResponse.mockReset();
+      const toolCall = {
+        id: 'approval-object-shape-1',
+        type: 'function' as const,
+        function: {
+          name: 'mutate_project',
+          arguments: '{}',
+        },
+      };
+      mockGenerateOpenAIResponse.mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [toolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall],
+        },
+      });
+      const execute = vi.fn(async () => ({ ok: true }));
+      const runtime = createRuntime({
+        providers: {
+          openai: {
+            apiKey: 'runtime-openai-key',
+          },
+        },
+      });
+
+      const result = await runtime.complete({
+        provider: 'openai',
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'Mutate the project.' }],
+        onToolApproval: (() => response) as any,
+        extraTools: [{
+          name: 'mutate_project',
+          description: 'Mutate project.',
+          parameters: { type: 'object' },
+          execute,
+        }],
+      });
+
+      expect(result).toMatchObject({
+        status: 'cancelled',
+        cancellation: {
+          reason: 'approval_invalid',
+        },
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+      await runtime.dispose();
+    }
+  });
+
+  it('executes the immutable tool-call snapshot presented for approval', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    const toolCall = {
+      id: 'approval-immutable-snapshot-1',
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{"target":"config","nested":{"environment":"test"}}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'approval-immutable-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"immutable approval complete"}',
+      },
+    };
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [toolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+    const execute = vi.fn(async (args) => args);
+    const onToolApproval = vi.fn(({ toolCall: approvedCall, parsedArguments }) => {
+      expect(Object.isFrozen(approvedCall)).toBe(true);
+      expect(Object.isFrozen(approvedCall.function)).toBe(true);
+      expect(Object.isFrozen(parsedArguments)).toBe(true);
+      expect(Object.isFrozen(parsedArguments.nested)).toBe(true);
+
+      try {
+        approvedCall.function.arguments = '{"target":"production"}';
+      } catch {
+        // Expected for the frozen approval snapshot.
+      }
+      try {
+        (parsedArguments.nested as Record<string, unknown>).environment = 'production';
+      } catch {
+        // Expected for the deeply frozen parsed argument snapshot.
+      }
+      return { decision: 'approve' as const };
+    });
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval,
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(execute).toHaveBeenCalledWith({
+      target: 'config',
+      nested: {
+        environment: 'test',
+      },
+    }, expect.any(Object));
+    expect(toolCall.function.arguments).toBe('{"target":"config","nested":{"environment":"test"}}');
+    expect(onToolApproval).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    await runtime.dispose();
+  });
+
+  it('preserves mutable onToolCall arguments when approval is not configured', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    const toolCall = {
+      id: 'handler-mutable-arguments-1',
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{"target":"config"}',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'handler-mutable-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"handler normalization complete"}',
+      },
+    };
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [toolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [toolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+    const execute = vi.fn(async () => ({ ok: true }));
+    const onToolCall = vi.fn(({ parsedArguments }) => {
+      expect(Object.isFrozen(parsedArguments)).toBe(false);
+      parsedArguments.target = 'normalized-config';
+      return {
+        handled: true,
+        result: {
+          target: parsedArguments.target,
+        },
+      };
+    });
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolCall,
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify({ target: 'normalized-config' }),
+      }),
+    ]));
+    expect(onToolCall).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    await runtime.dispose();
+  });
+
+  it('cancels when the approval callback throws', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    const toolCall = {
+      id: 'approval-callback-error-1',
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{}',
+      },
+    };
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [toolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [toolCall],
+      },
+    });
+    const execute = vi.fn(async () => ({ ok: true }));
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval: () => {
+        throw new Error('approval UI failed');
+      },
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      cancellation: {
+        reason: 'approval_callback_error',
+        message: 'approval UI failed',
+      },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+  });
+
+  it('preflights all batch approvals before executing any tool', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    const firstToolCall = {
+      id: 'approval-batch-first-1',
+      type: 'function' as const,
+      function: {
+        name: 'first_mutation',
+        arguments: '{"step":1}',
+      },
+    };
+    const secondToolCall = {
+      id: 'approval-batch-second-1',
+      type: 'function' as const,
+      function: {
+        name: 'second_mutation',
+        arguments: '{"step":2}',
+      },
+    };
+    mockGenerateOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [firstToolCall, secondToolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [firstToolCall, secondToolCall],
+      },
+    });
+    const executeFirst = vi.fn(async () => ({ ok: true }));
+    const executeSecond = vi.fn(async () => ({ ok: true }));
+    const onToolApproval = vi.fn()
+      .mockReturnValueOnce({ decision: 'approve' })
+      .mockReturnValueOnce({ decision: 'cancel', reason: 'rejected' });
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Run both mutations.' }],
+      onToolApproval,
+      extraTools: [{
+        name: 'first_mutation',
+        description: 'First mutation.',
+        parameters: { type: 'object' },
+        execute: executeFirst,
+      }, {
+        name: 'second_mutation',
+        description: 'Second mutation.',
+        parameters: { type: 'object' },
+        execute: executeSecond,
+      }],
+    });
+
+    expect(result).toMatchObject({
+      status: 'cancelled',
+      cancellation: {
+        reason: 'approval_rejected',
+        toolCall: secondToolCall,
+      },
+    });
+    expect(onToolApproval).toHaveBeenCalledTimes(2);
+    expect(executeFirst).not.toHaveBeenCalled();
+    expect(executeSecond).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+  });
+
+  it('aborts a malformed argument batch before approval or execution', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    const validToolCall = {
+      id: 'preflight-valid-1',
+      type: 'function' as const,
+      function: {
+        name: 'first_mutation',
+        arguments: '{"step":1}',
+      },
+    };
+    const malformedToolCall = {
+      id: 'preflight-malformed-1',
+      type: 'function' as const,
+      function: {
+        name: 'second_mutation',
+        arguments: '{bad-json',
+      },
+    };
+    const finalAnswerCall = {
+      id: 'preflight-final-1',
+      type: 'function' as const,
+      function: {
+        name: 'final_answer',
+        arguments: '{"answer":"batch rejected"}',
+      },
+    };
+    mockGenerateOpenAIResponse
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [validToolCall, malformedToolCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [validToolCall, malformedToolCall],
+        },
+      })
+      .mockResolvedValueOnce({
+        type: 'tool_calls',
+        content: '',
+        tool_calls: [finalAnswerCall],
+        assistantMessage: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [finalAnswerCall],
+        },
+      });
+    const executeFirst = vi.fn(async () => ({ ok: true }));
+    const executeSecond = vi.fn(async () => ({ ok: true }));
+    const onToolApproval = vi.fn(() => ({ decision: 'approve' as const }));
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+
+    const result = await runtime.complete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Run malformed batch.' }],
+      onToolApproval,
+      extraTools: [{
+        name: 'first_mutation',
+        description: 'First mutation.',
+        parameters: { type: 'object' },
+        execute: executeFirst,
+      }, {
+        name: 'second_mutation',
+        description: 'Second mutation.',
+        parameters: { type: 'object' },
+        execute: executeSecond,
+      }],
+    });
+
+    expect(result.status).toBe('completed');
+    expect(result.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: validToolCall.id,
+        content: expect.stringContaining('"code":"batch_preflight_failed"'),
+      }),
+      expect.objectContaining({
+        role: 'tool',
+        tool_call_id: malformedToolCall.id,
+        content: expect.stringContaining('"code":"invalid_arguments_json"'),
+      }),
+    ]));
+    expect(onToolApproval).not.toHaveBeenCalled();
+    expect(executeFirst).not.toHaveBeenCalled();
+    expect(executeSecond).not.toHaveBeenCalled();
+    expect(mockGenerateOpenAIResponse).toHaveBeenCalledTimes(2);
+    await runtime.dispose();
+  });
+
   it('keeps unknown tool calls on the runtime error path instead of host-owned tool_calls', async () => {
     mockGenerateOpenAIResponse.mockReset();
 
@@ -2289,9 +2949,22 @@ describe('llm-runtime runtime', () => {
     const pending = {
       toolCallId: 'hitl-1',
       toolName: 'ask_user_input',
-      request: { questions: [] },
+      request: {
+        questions: [{
+          header: 'Scope',
+          id: 'scope',
+          question: 'Which scope?',
+          options: [
+            { id: 'all', label: 'All' },
+            { id: 'one', label: 'One' },
+          ],
+        }],
+      },
     };
-    const answer = { answers: { scope: 'all' } };
+    const answer = {
+      status: 'answered' as const,
+      answers: { scope: 'all' },
+    };
 
     expect(createHumanInputToolResult(pending, answer)).toEqual({
       role: 'tool',
@@ -2300,6 +2973,224 @@ describe('llm-runtime runtime', () => {
       content: JSON.stringify(answer),
     });
     expect(createAskUserInputResult(pending, answer)).toEqual(createHumanInputToolResult(pending, answer));
+  });
+
+  it('normalizes declared and explicitly enabled free-form human answers', () => {
+    const declaredPending = {
+      toolCallId: 'hitl-declared-1',
+      toolName: 'ask_user_input',
+      request: {
+        questions: [{
+          header: 'Scope',
+          id: 'scope',
+          question: 'Which scope?',
+          options: [
+            { id: 'all', label: 'All' },
+            { id: 'one', label: 'One' },
+          ],
+        }],
+      },
+    };
+    const freeFormPending = {
+      ...declaredPending,
+      toolCallId: 'hitl-other-1',
+      request: {
+        questions: [{
+          ...(declaredPending.request.questions[0]),
+          allowOther: true,
+        }],
+      },
+    };
+
+    expect(normalizeAskUserInputOutcome(declaredPending, {
+      status: 'answered',
+      answers: { scope: 'all' },
+    })).toEqual({
+      status: 'answered',
+      answers: { scope: 'all' },
+    });
+    expect(normalizeAskUserInputOutcome(freeFormPending, {
+      status: 'answered',
+      answers: { scope: 'a custom scope' },
+    })).toEqual({
+      status: 'answered',
+      answers: { scope: 'a custom scope' },
+    });
+  });
+
+  it('normalizes host cancellation and fails closed for malformed human input', () => {
+    const pending = {
+      toolCallId: 'hitl-invalid-1',
+      toolName: 'ask_user_input',
+      request: {
+        questions: [{
+          header: 'Scope',
+          id: 'scope',
+          question: 'Which scope?',
+          options: [
+            { id: 'all', label: 'All' },
+            { id: 'one', label: 'One' },
+          ],
+        }],
+      },
+    };
+
+    for (const reason of ['rejected', 'skipped', 'dismissed', 'timeout'] as const) {
+      expect(normalizeAskUserInputOutcome(pending, {
+        status: 'cancelled',
+        reason,
+      })).toEqual({
+        status: 'cancelled',
+        reason,
+      });
+    }
+
+    const invalidResponses = [
+      { status: 'answered', answers: {} },
+      { status: 'answered', answers: { scope: 'custom' } },
+      { status: 'answered', answers: { scope: 'all', extra: 'one' } },
+      { answers: { scope: 'all' } },
+      Object.create({
+        status: 'answered',
+        answers: { scope: 'all' },
+      }),
+      Object.defineProperty({}, 'status', {
+        enumerable: false,
+        value: 'answered',
+      }),
+      Object.defineProperty({
+        answers: { scope: 'all' },
+      }, 'status', {
+        enumerable: true,
+        get: () => 'answered',
+      }),
+      {
+        status: 'answered',
+        answers: { scope: 'all' },
+        [Symbol('unexpected')]: true,
+      },
+      null,
+    ];
+    for (const response of invalidResponses) {
+      expect(normalizeAskUserInputOutcome(pending, response)).toEqual(expect.objectContaining({
+        status: 'cancelled',
+        reason: 'invalid',
+      }));
+    }
+  });
+
+  it('preserves special question ids without prototype mutation', () => {
+    const pending = {
+      toolCallId: 'hitl-special-id-1',
+      toolName: 'ask_user_input',
+      request: JSON.parse(`{
+        "questions": [{
+          "header": "Special",
+          "id": "__proto__",
+          "question": "Which?",
+          "options": [
+            { "id": "constructor", "label": "Constructor" },
+            { "id": "prototype", "label": "Prototype" }
+          ]
+        }]
+      }`),
+    };
+    const outcome = normalizeAskUserInputOutcome(
+      pending,
+      JSON.parse(`{
+        "status": "answered",
+        "answers": {
+          "__proto__": "constructor"
+        }
+      }`),
+    );
+
+    expect(outcome.status).toBe('answered');
+    if (outcome.status === 'answered') {
+      expect(Object.hasOwn(outcome.answers, '__proto__')).toBe(true);
+      expect(outcome.answers.__proto__).toBe('constructor');
+      expect(Object.getPrototypeOf(outcome.answers)).toBeNull();
+    }
+  });
+
+  it('rejects duplicate request ids and invalid multiple-select answers', () => {
+    const duplicateQuestions = {
+      toolCallId: 'hitl-duplicate-question-1',
+      toolName: 'ask_user_input',
+      request: {
+        questions: [
+          {
+            header: 'One',
+            id: 'scope',
+            question: 'First?',
+            options: [{ id: 'all', label: 'All' }, { id: 'one', label: 'One' }],
+          },
+          {
+            header: 'Two',
+            id: 'scope',
+            question: 'Second?',
+            options: [{ id: 'yes', label: 'Yes' }, { id: 'no', label: 'No' }],
+          },
+        ],
+      },
+    };
+    const duplicateOptions = {
+      toolCallId: 'hitl-duplicate-option-1',
+      toolName: 'ask_user_input',
+      request: {
+        questions: [{
+          header: 'Scope',
+          id: 'scope',
+          question: 'Which?',
+          options: [{ id: 'all', label: 'All' }, { id: 'all', label: 'Again' }],
+        }],
+      },
+    };
+    const multipleWithOther = {
+      toolCallId: 'hitl-multiple-other-1',
+      toolName: 'ask_user_input',
+      request: {
+        type: 'multiple-select',
+        questions: [{
+          header: 'Scopes',
+          id: 'scopes',
+          question: 'Which?',
+          allowOther: true,
+          options: [{ id: 'all', label: 'All' }, { id: 'one', label: 'One' }],
+        }],
+      },
+    };
+    const multiple = {
+      ...multipleWithOther,
+      toolCallId: 'hitl-multiple-1',
+      request: {
+        ...multipleWithOther.request,
+        questions: [{
+          ...multipleWithOther.request.questions[0],
+          allowOther: false,
+        }],
+      },
+    };
+
+    expect(normalizeAskUserInputOutcome(duplicateQuestions, {
+      status: 'answered',
+      answers: { scope: 'all' },
+    })).toEqual(expect.objectContaining({ status: 'cancelled', reason: 'invalid' }));
+    expect(normalizeAskUserInputOutcome(duplicateOptions, {
+      status: 'answered',
+      answers: { scope: 'all' },
+    })).toEqual(expect.objectContaining({ status: 'cancelled', reason: 'invalid' }));
+    expect(normalizeAskUserInputOutcome(multipleWithOther, {
+      status: 'answered',
+      answers: { scopes: ['all'] },
+    })).toEqual(expect.objectContaining({ status: 'cancelled', reason: 'invalid' }));
+
+    for (const answer of [[], ['all', 'all'], ['custom']]) {
+      expect(normalizeAskUserInputOutcome(multiple, {
+        status: 'answered',
+        answers: { scopes: answer },
+      })).toEqual(expect.objectContaining({ status: 'cancelled', reason: 'invalid' }));
+    }
   });
 
   it('exports the runtime completion contract types from the package root', () => {
@@ -2329,6 +3220,73 @@ describe('llm-runtime runtime', () => {
     expect(tool).toBeDefined();
     expect(ASK_USER_INPUT_TOOL_DESCRIPTION).toBe(tool?.description);
     expect(ASK_USER_INPUT_TOOL_PARAMETERS).toEqual(tool?.parameters);
+  });
+
+  it('emits one cancelled stream terminal without tool lifecycle events', async () => {
+    mockGenerateOpenAIResponse.mockReset();
+    mockStreamOpenAIResponse.mockReset();
+    const toolCall = {
+      id: 'approval-stream-cancel-1',
+      type: 'function' as const,
+      function: {
+        name: 'mutate_project',
+        arguments: '{"target":"config"}',
+      },
+    };
+    mockStreamOpenAIResponse.mockResolvedValueOnce({
+      type: 'tool_calls',
+      content: '',
+      tool_calls: [toolCall],
+      assistantMessage: {
+        role: 'assistant',
+        content: '',
+        tool_calls: [toolCall],
+      },
+    });
+    const execute = vi.fn(async () => ({ ok: true }));
+    const runtime = createRuntime({
+      providers: {
+        openai: {
+          apiKey: 'runtime-openai-key',
+        },
+      },
+    });
+    const events: RuntimeStreamCompleteEvent[] = [];
+
+    for await (const event of runtime.streamComplete({
+      provider: 'openai',
+      model: 'gpt-5',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval: () => ({ decision: 'cancel', reason: 'rejected' }),
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    })) {
+      events.push(event);
+    }
+
+    expect(events.filter((event) => event.type === 'cancelled')).toHaveLength(1);
+    expect(events.some((event) => (
+      event.type === 'failed'
+      || event.type === 'tool_start'
+      || event.type === 'tool_result'
+      || event.type === 'tool_error'
+    ))).toBe(false);
+    expect(events.find((event) => event.type === 'cancelled')).toMatchObject({
+      result: {
+        status: 'cancelled',
+        cancellation: {
+          reason: 'approval_rejected',
+          toolCall,
+        },
+      },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(mockStreamOpenAIResponse).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
   });
 
   it('streams agentic lifecycle events through runtime.streamComplete', async () => {
@@ -5252,15 +6210,17 @@ describe('llm-runtime runtime', () => {
     const askSchema = tools.ask_user_input?.parameters as any;
 
     expect(tools.ask_user_input?.description).toContain('Use questions[]');
-    expect(tools.ask_user_input?.description).toContain('do not use allowSkip for approval-gated or otherwise blocking decisions');
+    expect(tools.ask_user_input?.description).toContain('does not authorize execution');
+    expect(tools.ask_user_input?.description).toContain('dismissal never implies consent');
+    expect(tools.ask_user_input?.description).toContain('allowOther true only on a single-select question');
     expect(tools.ask_user_input?.description).toContain('Do not add a kind field');
     expect(tools.ask_user_input?.description).toContain('Flat question/options payloads are not supported');
     expect(askSchema.description).toContain('Flat question/options payloads are not supported');
     expect(askSchema.properties.type.enum).toEqual(['single-select', 'multiple-select']);
     expect(askSchema.properties.type.description).toContain('Do not use kind or approval');
     expect(askSchema.properties.allowSkip.type).toBe('boolean');
-    expect(askSchema.properties.allowSkip.description).toContain('explicitly dismissible, non-blocking prompts');
-    expect(askSchema.properties.allowSkip.description).toContain('Do not use allowSkip for approval-gated or otherwise blocking decisions');
+    expect(askSchema.properties.allowSkip.description).toContain('cancelled outcome');
+    expect(askSchema.properties.allowSkip.description).toContain('never implies consent');
     expect(askSchema.properties.questions.type).toBe('array');
     expect(askSchema.properties.questions.description).toContain('at least two options');
     expect(askSchema.properties.question).toBeUndefined();
@@ -5272,6 +6232,10 @@ describe('llm-runtime runtime', () => {
       id: { type: 'string', description: expect.any(String) },
       label: { type: 'string', description: expect.any(String) },
       description: { type: 'string', description: expect.any(String) },
+    });
+    expect(askSchema.properties.questions.items.properties.allowOther).toMatchObject({
+      type: 'boolean',
+      description: expect.stringContaining('single-select'),
     });
     expect(askSchema.required).toEqual(['questions']);
     expect(tools.ask_user_input?.execute).toBeUndefined();

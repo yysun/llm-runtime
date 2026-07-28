@@ -3,6 +3,10 @@
  *
  * Keep the runtime helper and built-in catalog aligned on one canonical
  * description and parameter schema.
+ *
+ * Recent changes:
+ * - 2026-07-28: Separated preference input from executable approval and added
+ *   explicit per-question free-form answer support.
  */
 
 export const ASK_USER_INPUT_TOOL_PARAMETERS = {
@@ -19,7 +23,7 @@ export const ASK_USER_INPUT_TOOL_PARAMETERS = {
     allowSkip: {
       type: 'boolean',
       description:
-        'Set true only for explicitly dismissible, non-blocking prompts when it is acceptable for the human to skip without choosing. Do not use allowSkip for approval-gated or otherwise blocking decisions. Omit or false when an answer is required before continuing.',
+        'Set true when the host may dismiss the prompt. Dismissal is a cancelled outcome and never implies consent or execution authorization. Omit or false when the host UI must require an answer.',
     },
     questions: {
       type: 'array',
@@ -43,6 +47,11 @@ export const ASK_USER_INPUT_TOOL_PARAMETERS = {
             type: 'string',
             description:
               'Clear question shown to the human. Ask for the missing decision or input directly.',
+          },
+          allowOther: {
+            type: 'boolean',
+            description:
+              'Set true only for a single-select question that accepts a non-empty free-form answer outside the declared option ids. Omit or false to require a declared option id.',
           },
           options: {
             type: 'array',
@@ -83,4 +92,4 @@ export const ASK_USER_INPUT_TOOL_PARAMETERS = {
 } as const;
 
 export const ASK_USER_INPUT_TOOL_DESCRIPTION =
-  'Ask a human one or more structured choice questions. Use this tool only after safe read-only inspection or lookup cannot supply the missing information, or when the next step requires approval, a user preference, or another human-only decision such as a required confirmation. Do not ask the human to disambiguate before performing a safe broad search. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true only for explicitly dismissible, non-blocking prompts when skipping is acceptable; do not use allowSkip for approval-gated or otherwise blocking decisions. Do not add a kind field or approval type. Flat question/options payloads are not supported.';
+  'Ask a human one or more structured clarification or preference questions. Use this tool only after safe read-only inspection or lookup cannot supply the missing information, or when a human-only preference or workflow decision is required. This tool does not authorize execution of a later tool call; executable approval belongs to the host approval gate for the exact tool call and arguments. Do not ask the human to disambiguate before performing a safe broad search. Use questions[] with stable lowercase question and option ids. Use type: single-select or multiple-select; omit type to default to single-select. Set allowSkip true when dismissal should produce a cancelled outcome; dismissal never implies consent. Set allowOther true only on a single-select question that accepts free-form input. Do not add a kind field or approval type. Flat question/options payloads are not supported.';

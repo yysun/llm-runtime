@@ -160,6 +160,7 @@ The loop continues under these rules:
 - `final_answer`: stop with `status: 'completed'`
 - `ask_user_input`: stop with `status: 'tool_calls'` so the host can ask/resume
 - known custom tool without an executor: stop with `status: 'tool_calls'` so the host can run it and resume
+- configured executable-tool approval cancellation: stop with `status: 'cancelled'` before executing the batch
 - `blocked`: stop with `status: 'failed'`
 - plain narration or intent text: keep going; narration is not completion
 - empty text: retry according to `emptyTextRetryLimit`
@@ -174,6 +175,7 @@ The loop continues under these rules:
 
 - `status: 'completed'` with `output` when the model reaches `final_answer`
 - `status: 'tool_calls'` when the host must handle a tool call, commonly required user input
+- `status: 'cancelled'` when configured executable-tool approval fails closed
 - `status: 'failed'` when the run is blocked, invalid, or otherwise cannot complete
 - `status: 'max_iterations'` when loop bounds stop the run
 
@@ -228,6 +230,7 @@ if (result.status === 'tool_calls') {
 - `tool_result`
 - `tool_error`
 - `tool_calls`
+- `cancelled`
 - `completed`
 - `failed`
 - `raw`
@@ -397,6 +400,7 @@ Runtime instances also expose `resolveTools(...)`, `executeToolCall(...)`, and `
     header: string;
     id: string;
     question: string;
+    allowOther?: boolean;
     options: Array<{
       id: string;
       label: string;
@@ -417,19 +421,98 @@ builtIns: {
 When completion needs host-owned user input, it returns `status: 'tool_calls'`. The host should surface the question, then resume by appending a normal tool-result message for the pending tool call and calling `complete(...)` again with the updated message list.
 
 ```ts
+import {
+  createAskUserInputResult,
+  normalizeAskUserInputOutcome,
+} from "llm-runtime";
+
+const pending = {
+  toolCallId: result.toolCalls![0].id,
+  toolName: "ask_user_input",
+  request: JSON.parse(result.toolCalls![0].function.arguments),
+};
+const outcome = normalizeAskUserInputOutcome(pending, {
+  status: "answered",
+  answers: {
+    scope: "all",
+  },
+});
+
+if (outcome.status === "cancelled") {
+  // Stop this host workflow. Do not resume the model.
+  return outcome;
+}
+
 const resumedMessages = [
   ...result.messages,
-  {
-    role: 'tool',
-    tool_call_id: result.toolCalls![0].id,
-    content: JSON.stringify({
-      answers: {
-        scope: 'all',
-      },
-    }),
-  },
+  createAskUserInputResult(pending, outcome),
 ];
 ```
+
+The host owns rendering, waiting, timeout clocks, dismissal, and raw input
+collection. `llm-runtime` owns the request contract and normalization:
+
+- `allowSkip: true` means the host may dismiss the prompt. Dismissal is a
+  cancelled outcome and never implies consent.
+- `allowOther: true` permits a non-empty free-form answer for that
+  single-select question.
+- Multiple-select answers must contain one or more unique declared option IDs.
+- Invalid, partial, extra, skipped, dismissed, rejected, or timed-out responses
+  normalize to `status: "cancelled"`.
+
+`ask_user_input` collects clarification and preferences. It does not authorize
+execution of a later tool call.
+
+## Tool Approval
+
+Use `onToolApproval` when the host must authorize executable tools. The
+callback receives the exact model-issued tool call and successfully parsed
+arguments:
+
+```ts
+const result = await runtime.complete({
+  provider: "openai",
+  model: "gpt-5",
+  messages,
+  onToolApproval: async ({ toolName, parsedArguments }) => {
+    const decision = await showApprovalUI(toolName, parsedArguments);
+    return decision === "approve"
+      ? { decision: "approve" }
+      : {
+          decision: "cancel",
+          reason: decision, // "rejected" | "dismissed" | "timeout"
+        };
+  },
+});
+
+if (result.status === "cancelled") {
+  console.log(result.cancellation);
+}
+```
+
+Approval is opt-in. When `onToolApproval` is omitted, executable tools retain
+automatic execution. When it is configured, only the exact
+`{ decision: "approve" }` shape permits execution. Legacy booleans,
+`{ approved: true }`, malformed values, callback errors, rejection, dismissal,
+and host-reported timeout all cancel without another model turn.
+
+Approvals are collected for the complete executable tool-call batch before any
+tool in that batch runs. If one call is cancelled, none execute. The runtime
+does not start approval timers; a host-owned timeout must settle the callback
+with `{ decision: "cancel", reason: "timeout" }`.
+
+This is a breaking change from the pre-0.7 callback:
+
+```ts
+// Before
+return { approved: true };
+
+// 0.7+
+return { decision: "approve" };
+```
+
+`streamComplete(...)` emits one `cancelled` terminal event for this outcome,
+not a `failed` event.
 
 ## MCP And Skills
 

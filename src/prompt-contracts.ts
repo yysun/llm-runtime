@@ -14,6 +14,7 @@
  * - `final_answer` is described as the preferred semantic completion signal, while runtime evidence remains the mechanical stop guard.
  *
  * Recent changes:
+ * - 2026-07-28: Separated ask_user_input preferences from exact-call tool approval.
  * - 2026-05-29: Reworded final-answer guidance for the Copilot-style completion pattern.
  */
 
@@ -39,9 +40,9 @@ const AGENT_RUN_LOOP_PROMPT_BLOCK = [
   'Use an available user-input tool only when:',
   '- the missing input cannot be safely discovered,',
   '- the user must choose a preference,',
-  '- approval is required,',
-  '- the next step causes a side effect,',
-  '- or safety/permission rules require it.',
+  '- or another human-only workflow decision is required.',
+  '',
+  'Do not use a user-input tool to authorize a later executable tool call. Call the exact task tool with its real arguments; the host approval gate owns execution authorization when configured.',
   '',
   'If you call a user-input tool, do not repeat the same question in plain assistant text.',
   '',
@@ -66,8 +67,9 @@ export const COMPLETION_LOOP_SYSTEM_PROMPT_SECTION_TAG = 'llm-runtime-loop-contr
 export const DEFAULT_HUMAN_INTERVENTION_TOOL_HINT = [
   'Use `ask_user_input` only for required human decisions. Do not use it as a substitute for safe read-only lookup, search, or inspection.',
   'Do not ask the user to disambiguate before performing a safe broad read-only search. If ambiguity can be resolved safely through read-only tools, search first and present matches.',
-  'Treat phrases such as "ask the user", "request approval", or "HITL" as referring to this tool when present.',
-  'Use `allowSkip` only for non-blocking prompts, not required approvals or blocking decisions.',
+  'Treat phrases such as "ask the user" or "HITL" as referring to this tool when present, but do not use it to authorize a later executable tool call.',
+  'For execution approval, call the exact task tool and let the configured host approval gate decide from the real tool name and arguments.',
+  'Use `allowSkip` when dismissal should cancel the human-input request; dismissal never implies consent.',
   'Do not invent human answers.',
 ].join(' ');
 

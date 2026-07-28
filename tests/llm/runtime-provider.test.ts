@@ -14,6 +14,7 @@
  * - Avoids real filesystem, network, and provider clients.
  *
  * Recent changes:
+ * - 2026-07-28: Updated human-input guidance coverage for exact-call approval.
  * - 2026-05-15: Added provider-dispatch coverage for search-plus-HITL tool exposure on lookup-style requests.
  * - 2026-03-27: Initial provider-dispatch coverage for the publishable `llm-runtime` runtime.
  */
@@ -374,7 +375,9 @@ describe('llm-runtime runtime provider dispatch', () => {
   it('injects ask_user_input guidance when the built-in is available', async () => {
     const { DEFAULT_HUMAN_INTERVENTION_TOOL_HINT, generate } = await import('../../src/runtime.js');
 
-    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Use `allowSkip` only for non-blocking prompts');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('dismissal should cancel');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('exact task tool');
+    expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('host approval gate');
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not invent human answers.');
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not use it as a substitute for safe read-only lookup, search, or inspection');
     expect(DEFAULT_HUMAN_INTERVENTION_TOOL_HINT).toContain('Do not ask the user to disambiguate before performing a safe broad read-only search');

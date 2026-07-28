@@ -8,6 +8,11 @@
  * - Starts a local OpenAI-compatible chat-completions server.
  * - Exercises `createRuntime(...).complete(...)` without live provider credentials.
  * - Verifies default `ask_user_input`, custom tools without executors, and normal message-based resume.
+ * - Verifies fail-closed executable approval and batch atomicity.
+ *
+ * Recent changes:
+ * - 2026-07-28: Added explicit approval, cancellation, malformed response,
+ *   atomic batch, and streaming cancellation scenarios.
  */
 
 import assert from 'node:assert/strict';
@@ -98,6 +103,42 @@ async function startOpenAICompatibleServer(responses: unknown[]) {
       recordedRequests.push({ method: request.method, url: request.url, body });
       const nextResponse = pendingResponses.shift();
       assert(nextResponse, 'Local provider received more requests than expected.');
+      if (body.stream === true) {
+        const completion = nextResponse as any;
+        const choice = completion.choices?.[0];
+        const toolCalls = choice?.message?.tool_calls;
+        response.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        response.write(`data: ${JSON.stringify({
+          id: completion.id,
+          object: 'chat.completion.chunk',
+          created: completion.created,
+          model: completion.model,
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              ...(Array.isArray(toolCalls) ? {
+                tool_calls: toolCalls.map((toolCall: any, index: number) => ({
+                  index,
+                  id: toolCall.id,
+                  type: 'function',
+                  function: toolCall.function,
+                })),
+              } : {}),
+              ...(typeof choice?.message?.content === 'string'
+                ? { content: choice.message.content }
+                : {}),
+            },
+            finish_reason: choice?.finish_reason ?? null,
+          }],
+        })}\n\n`);
+        response.end('data: [DONE]\n\n');
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify(nextResponse));
     } catch (error) {
@@ -225,11 +266,15 @@ async function assertHostResumeUsesNormalToolMessage() {
       ],
     }],
   });
+  const recordScopeCall = toolCall('record-scope-e2e-1', 'record_scope', {
+    scope: 'all',
+  });
   const finalAnswerCall = toolCall('final-resume-e2e-1', 'final_answer', {
     answer: 'resumed after host tool result',
   });
   const { runtime, server } = await createLocalRuntime([
     chatToolResponse([askCall]),
+    chatToolResponse([recordScopeCall]),
     chatToolResponse([finalAnswerCall]),
   ]);
 
@@ -247,23 +292,227 @@ async function assertHostResumeUsesNormalToolMessage() {
       {
         role: 'tool',
         tool_call_id: askCall.id,
-        content: JSON.stringify({ answers: { scope: 'all' } }),
+        content: JSON.stringify({
+          status: 'answered',
+          answers: { scope: 'all' },
+        }),
       },
     ];
     const second = await runtime.complete({
       provider: 'openai-compatible',
       model: 'host-owned-e2e',
       messages: resumedMessages,
+      extraTools: [{
+        name: 'record_scope',
+        description: 'Record the selected scope.',
+        parameters: { type: 'object' },
+        execute: async ({ scope }) => ({ recorded: scope }),
+      }],
     });
 
     assert.equal(second.status, 'completed');
     assert.equal(second.output, 'resumed after host tool result');
-    assert.equal(server.recordedRequests.length, 2);
+    assert.equal(server.recordedRequests.length, 3);
     assert(server.recordedRequests[1]?.body.messages.some((message: any) => (
       message.role === 'tool'
       && message.tool_call_id === askCall.id
-      && message.content === JSON.stringify({ answers: { scope: 'all' } })
+      && message.content === JSON.stringify({
+        status: 'answered',
+        answers: { scope: 'all' },
+      })
     )));
+  } finally {
+    await runtime.dispose().catch(() => undefined);
+    await server.close();
+  }
+}
+
+async function assertExplicitApprovalCompletes() {
+  const mutationCall = toolCall('approval-e2e-1', 'mutate_project', {
+    target: 'config',
+  });
+  const finalAnswerCall = toolCall('approval-e2e-final-1', 'final_answer', {
+    answer: 'approved mutation complete',
+  });
+  const { runtime, server } = await createLocalRuntime([
+    chatToolResponse([mutationCall]),
+    chatToolResponse([finalAnswerCall]),
+  ]);
+  const execute = async () => ({ ok: true });
+
+  try {
+    const result = await runtime.complete({
+      provider: 'openai-compatible',
+      model: 'host-owned-e2e',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval: () => ({ decision: 'approve' }),
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute,
+      }],
+    });
+
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output, 'approved mutation complete');
+    assert.equal(server.recordedRequests.length, 2);
+    assert(server.recordedRequests[1]?.body.messages.some((message: any) => (
+      message.role === 'tool'
+      && message.tool_call_id === mutationCall.id
+      && message.content === JSON.stringify({ ok: true })
+    )));
+  } finally {
+    await runtime.dispose().catch(() => undefined);
+    await server.close();
+  }
+}
+
+async function assertApprovalCancellationStops() {
+  const cases = [{
+    name: 'explicit',
+    response: { decision: 'cancel', reason: 'rejected' },
+    expectedReason: 'approval_rejected',
+  }, {
+    name: 'legacy-boolean',
+    response: true,
+    expectedReason: 'approval_invalid',
+  }, {
+    name: 'legacy-object',
+    response: { approved: true },
+    expectedReason: 'approval_invalid',
+  }] as const;
+
+  for (const testCase of cases) {
+    const mutationCall = toolCall(`approval-${testCase.name}-e2e-1`, 'mutate_project', {
+      target: 'config',
+    });
+    const { runtime, server } = await createLocalRuntime([
+      chatToolResponse([mutationCall]),
+    ]);
+    let executionCount = 0;
+
+    try {
+      const result = await runtime.complete({
+        provider: 'openai-compatible',
+        model: 'host-owned-e2e',
+        messages: [{ role: 'user', content: 'Mutate the project.' }],
+        onToolApproval: (() => testCase.response) as any,
+        extraTools: [{
+          name: 'mutate_project',
+          description: 'Mutate project.',
+          parameters: { type: 'object' },
+          execute: async () => {
+            executionCount += 1;
+            return { ok: true };
+          },
+        }],
+      });
+
+      assert.equal(result.status, 'cancelled');
+      assert.equal(result.cancellation?.reason, testCase.expectedReason);
+      assert.equal(executionCount, 0);
+      assert.equal(server.recordedRequests.length, 1);
+    } finally {
+      await runtime.dispose().catch(() => undefined);
+      await server.close();
+    }
+  }
+}
+
+async function assertApprovalBatchCancellationIsAtomic() {
+  const firstCall = toolCall('approval-batch-first-e2e-1', 'first_mutation', {
+    step: 1,
+  });
+  const secondCall = toolCall('approval-batch-second-e2e-1', 'second_mutation', {
+    step: 2,
+  });
+  const { runtime, server } = await createLocalRuntime([
+    chatToolResponse([firstCall, secondCall]),
+  ]);
+  let executionCount = 0;
+  let approvalCount = 0;
+
+  try {
+    const result = await runtime.complete({
+      provider: 'openai-compatible',
+      model: 'host-owned-e2e',
+      messages: [{ role: 'user', content: 'Run both mutations.' }],
+      onToolApproval: () => {
+        approvalCount += 1;
+        return approvalCount === 1
+          ? { decision: 'approve' }
+          : { decision: 'cancel', reason: 'rejected' };
+      },
+      extraTools: [{
+        name: 'first_mutation',
+        description: 'First mutation.',
+        parameters: { type: 'object' },
+        execute: async () => {
+          executionCount += 1;
+          return { ok: true };
+        },
+      }, {
+        name: 'second_mutation',
+        description: 'Second mutation.',
+        parameters: { type: 'object' },
+        execute: async () => {
+          executionCount += 1;
+          return { ok: true };
+        },
+      }],
+    });
+
+    assert.equal(result.status, 'cancelled');
+    assert.equal(result.cancellation?.reason, 'approval_rejected');
+    assert.equal(result.cancellation?.toolCall.id, secondCall.id);
+    assert.equal(approvalCount, 2);
+    assert.equal(executionCount, 0);
+    assert.equal(server.recordedRequests.length, 1);
+  } finally {
+    await runtime.dispose().catch(() => undefined);
+    await server.close();
+  }
+}
+
+async function assertStreamingApprovalCancellationHasOneTerminal() {
+  const mutationCall = toolCall('approval-stream-e2e-1', 'mutate_project', {
+    target: 'config',
+  });
+  const { runtime, server } = await createLocalRuntime([
+    chatToolResponse([mutationCall]),
+  ]);
+  let executionCount = 0;
+  const eventTypes: string[] = [];
+
+  try {
+    for await (const event of runtime.streamComplete({
+      provider: 'openai-compatible',
+      model: 'host-owned-e2e',
+      messages: [{ role: 'user', content: 'Mutate the project.' }],
+      onToolApproval: () => ({ decision: 'cancel', reason: 'rejected' }),
+      extraTools: [{
+        name: 'mutate_project',
+        description: 'Mutate project.',
+        parameters: { type: 'object' },
+        execute: async () => {
+          executionCount += 1;
+          return { ok: true };
+        },
+      }],
+    })) {
+      eventTypes.push(event.type);
+    }
+
+    assert.equal(eventTypes.filter((type) => type === 'cancelled').length, 1);
+    assert(!eventTypes.some((type) => (
+      type === 'failed'
+      || type === 'tool_start'
+      || type === 'tool_result'
+      || type === 'tool_error'
+    )));
+    assert.equal(executionCount, 0);
+    assert.equal(server.recordedRequests.length, 1);
   } finally {
     await runtime.dispose().catch(() => undefined);
     await server.close();
@@ -434,6 +683,14 @@ async function main() {
   console.log('custom-tool-without-executor=ok');
   await assertHostResumeUsesNormalToolMessage();
   console.log('message-resume=ok');
+  await assertExplicitApprovalCompletes();
+  console.log('explicit-approval=ok');
+  await assertApprovalCancellationStops();
+  console.log('approval-cancellation=ok');
+  await assertApprovalBatchCancellationIsAtomic();
+  console.log('approval-batch-atomicity=ok');
+  await assertStreamingApprovalCancellationHasOneTerminal();
+  console.log('streaming-approval-cancellation=ok');
   console.log('host-owned-tool-calls status: PASS');
 }
 

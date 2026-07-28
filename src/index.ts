@@ -15,6 +15,7 @@
  *   are intentionally not re-exported here. Import them from internal paths only when extending the package.
  *
  * Recent changes:
+ * - 2026-07-28: Exported fail-closed human-input and tool-approval cancellation contracts.
  * - 2026-05-29: Documented the Copilot-style completion contract for the public runtime facade.
  * - 2026-05-27: Reduced the public surface to `complete`, `streamComplete`, `generate`, `createRuntime`,
  *   and the minimum type set needed to use them. Internal helpers, turn-loop hooks, recovery prompts,
@@ -27,6 +28,12 @@ export {
   generate,
   streamComplete,
 } from './runtime.js';
+
+export {
+  createAskUserInputResult,
+  createHumanInputToolResult,
+  normalizeAskUserInputOutcome,
+} from './runtime-complete-contract.js';
 
 export type {
   BuiltInToolName,
@@ -43,6 +50,7 @@ export type {
   LLMRuntimeStreamCompleteEvent,
   LLMRuntimeStreamCompleteOptions,
   LLMRuntimeToolApprovalRequest,
+  LLMRuntimeToolApprovalCancelReason,
   LLMRuntimeToolApprovalResponse,
   LLMRuntimeToolHandlerRequest,
   LLMRuntimeToolHandlerResponse,
@@ -59,7 +67,16 @@ export type {
 } from './types.js';
 
 export type {
+  AskUserInputAnsweredOutcome,
+  AskUserInputCancellationReason,
+  AskUserInputCancelledOutcome,
+  AskUserInputOutcome,
+  AskUserInputRawResponse,
+  PendingHumanInput,
+  RuntimeCancellation,
   RuntimeCompleteResult,
   RuntimeCompleteStatus,
   RuntimeStreamCompleteEvent,
+  RuntimeToolApprovalCancellation,
+  RuntimeToolApprovalCancellationReason,
 } from './runtime-complete-contract.js';

@@ -16,6 +16,8 @@
  * - Built-in tool ownership and reserved-name validation stay inside the package.
  *
  * Recent changes:
+ * - 2026-07-28: Added fail-closed approval decisions, terminal cancellation,
+ *   and preflight approval for executable tool-call batches.
  * - 2026-05-29: Deferred streamed final-answer deltas behind evidence checks so rejected completions do not leak to hosts.
  * - 2026-05-28: Added explicit completionGate mutation evidence checks and made host-owned tool batches atomic.
  * - 2026-05-28: Stopped host-owned tool calls, including non-executable `ask_user_input`, as `tool_calls` results for host resume.
@@ -73,6 +75,10 @@ import {
 } from './prompt-contracts.js';
 import { createSkillRegistry } from './skills.js';
 import { createToolRegistry } from './tools.js';
+import type {
+  RuntimeCancellation,
+  RuntimeToolApprovalCancellationReason,
+} from './runtime-complete-contract.js';
 import type {
   BuiltInToolSelection,
   LLMChatMessage,
@@ -284,6 +290,7 @@ type RuntimeCompletionState = {
   messages: LLMChatMessage[];
   output?: string | null;
   toolCalls?: LLMToolCall[];
+  cancellation?: RuntimeCancellation;
   error?: string;
   raw?: unknown;
 };
@@ -334,6 +341,137 @@ function isToolExecutionFailureArtifact(value: unknown): value is LLMToolExecuti
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  const allowed = new Set(allowedKeys);
+  return Reflect.ownKeys(value).every((key) => (
+    typeof key === 'string' && allowed.has(key)
+  ));
+}
+
+function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) {
+      return false;
+    }
+
+    return Reflect.ownKeys(value).every((key) => {
+      if (typeof key !== 'string') {
+        return false;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return Boolean(
+        descriptor
+        && descriptor.enumerable
+        && 'value' in descriptor,
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+function deepFreezeJsonValue<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) {
+    return value;
+  }
+
+  for (const child of Object.values(value)) {
+    deepFreezeJsonValue(child);
+  }
+  return Object.freeze(value);
+}
+
+function createApprovedToolCallSnapshot(toolCall: LLMToolCall): LLMToolCall {
+  return Object.freeze({
+    id: toolCall.id,
+    type: 'function' as const,
+    ...(toolCall.synthetic !== undefined ? { synthetic: toolCall.synthetic } : {}),
+    function: Object.freeze({
+      name: toolCall.function.name,
+      arguments: toolCall.function.arguments,
+    }),
+  });
+}
+
+function createApprovalCancellation(params: {
+  toolCall: LLMToolCall;
+  reason: RuntimeToolApprovalCancellationReason;
+  message?: string;
+}): RuntimeCancellation {
+  return {
+    kind: 'tool_approval',
+    reason: params.reason,
+    toolCall: params.toolCall,
+    ...(params.message ? { message: params.message } : {}),
+  };
+}
+
+function normalizeApprovalDecision(
+  value: unknown,
+  toolCall: LLMToolCall,
+): RuntimeCancellation | null {
+  if (
+    !isPlainDataRecord(value)
+    || !Object.hasOwn(value, 'decision')
+    || typeof value.decision !== 'string'
+  ) {
+    return createApprovalCancellation({
+      toolCall,
+      reason: 'approval_invalid',
+      message: 'Tool approval callback returned an invalid decision.',
+    });
+  }
+
+  if (value.decision === 'approve') {
+    if (!hasOnlyKeys(value, ['decision'])) {
+      return createApprovalCancellation({
+        toolCall,
+        reason: 'approval_invalid',
+        message: 'Tool approval callback returned an invalid approve decision.',
+      });
+    }
+    return null;
+  }
+
+  if (
+    value.decision !== 'cancel'
+    || !hasOnlyKeys(value, ['decision', 'reason', 'message'])
+    || (
+      !Object.hasOwn(value, 'reason')
+      || value.reason !== 'rejected'
+      && value.reason !== 'dismissed'
+      && value.reason !== 'timeout'
+    )
+    || (
+      Object.hasOwn(value, 'message')
+      && typeof value.message !== 'string'
+    )
+  ) {
+    return createApprovalCancellation({
+      toolCall,
+      reason: 'approval_invalid',
+      message: 'Tool approval callback returned an invalid cancel decision.',
+    });
+  }
+
+  const reasonMap = {
+    rejected: 'approval_rejected',
+    dismissed: 'approval_dismissed',
+    timeout: 'approval_timeout',
+  } as const;
+  return createApprovalCancellation({
+    toolCall,
+    reason: reasonMap[value.reason],
+    ...(Object.hasOwn(value, 'message') && value.message
+      ? { message: value.message as string }
+      : {}),
+  });
 }
 
 function isMutatingEvidenceKind(evidenceKind: LLMToolDefinition['evidenceKind']): boolean {
@@ -589,6 +727,15 @@ function createRepeatedToolCallDiagnosticOutput(result: {
 }
 
 function adaptRuntimeCompleteResult(result: RunCompletionLoopResult<RuntimeCompletionState>): LLMRuntimeCompleteResult {
+  if (result.state.cancellation) {
+    return {
+      status: 'cancelled',
+      messages: result.state.messages,
+      cancellation: result.state.cancellation,
+      raw: result.state.raw ?? result.response ?? undefined,
+    };
+  }
+
   if (result.reason === 'tool_calls_response' && result.state.toolCalls?.length) {
     return {
       status: 'tool_calls',
@@ -1149,10 +1296,98 @@ async function runRuntimeCompletion(
         };
       }
 
+      const parsedBatch = toolCalls.map((toolCall) => ({
+        toolCall,
+        parsedArguments: parseToolCallArguments(toolCall),
+      }));
+      if (parsedBatch.some(({ parsedArguments }) => !parsedArguments.ok)) {
+        const toolMessages = [...nextMessages];
+        for (const { toolCall, parsedArguments } of parsedBatch) {
+          const toolResult = parsedArguments.ok
+            ? createToolExecutionFailureArtifact({
+              toolCall,
+              code: 'batch_preflight_failed',
+              message: 'Tool batch was not executed because another call failed argument preflight.',
+            })
+            : createToolExecutionFailureArtifact({
+              toolCall,
+              code: parsedArguments.code,
+              message: parsedArguments.message,
+            });
+          toolMessages.push(createToolResultMessage(toolCall, toolResult));
+          await emitEvent?.({
+            type: 'tool_error',
+            toolCall,
+            error: toolResult.message,
+            iteration,
+          });
+        }
+        return {
+          state: {
+            ...state,
+            messages: toolMessages,
+            raw: response,
+          },
+          next: { control: 'continue' },
+        };
+      }
+
+      const parsedExecutableBatch = parsedBatch.filter((
+        entry,
+      ): entry is {
+        toolCall: LLMToolCall;
+        parsedArguments: Extract<ParsedToolCallArgumentsResult, { ok: true }>;
+      } => entry.parsedArguments.ok);
+
+      const executableBatch = request.onToolApproval
+        ? parsedExecutableBatch.map(({ toolCall }) => {
+          const approvedToolCall = createApprovedToolCallSnapshot(toolCall);
+          const parsedArguments = parseToolCallArguments(approvedToolCall);
+          if (!parsedArguments.ok) {
+            throw new Error('Approved tool-call snapshot failed argument parsing after successful preflight.');
+          }
+          deepFreezeJsonValue(parsedArguments.args);
+          return {
+            toolCall: approvedToolCall,
+            parsedArguments,
+          };
+        })
+        : parsedExecutableBatch;
+
+      if (request.onToolApproval) {
+        for (const { toolCall, parsedArguments } of executableBatch) {
+          let cancellation: RuntimeCancellation | null;
+          try {
+            const decision = await request.onToolApproval({
+              toolCall,
+              toolName: toolCall.function.name,
+              parsedArguments: parsedArguments.args,
+            });
+            cancellation = normalizeApprovalDecision(decision, toolCall);
+          } catch (error) {
+            cancellation = createApprovalCancellation({
+              toolCall,
+              reason: 'approval_callback_error',
+              message: stringifyError(error),
+            });
+          }
+
+          if (cancellation) {
+            return {
+              state: {
+                ...state,
+                messages: nextMessages,
+                cancellation,
+                raw: response,
+              },
+            };
+          }
+        }
+      }
+
       const toolMessages = [...nextMessages];
-      for (const toolCall of toolCalls) {
-        const parsedArguments = parseToolCallArguments(toolCall);
-        const parsedArgs = parsedArguments.ok ? parsedArguments.args : {};
+      for (const { toolCall, parsedArguments } of executableBatch) {
+        const parsedArgs = parsedArguments.args;
         const executionContext: LLMToolExecutionContext = {
           ...(request.context ?? {}),
           messages: toolMessages.map((message) => ({ ...message })),
@@ -1166,17 +1401,6 @@ async function runRuntimeCompletion(
           args: parsedArguments.ok ? parsedArguments.args : undefined,
           iteration,
         });
-
-        if (toolResult === undefined && request.onToolApproval) {
-          const approval = await request.onToolApproval({ toolCall, toolName, parsedArguments: parsedArgs });
-          if (!approval.approved) {
-            toolResult = createToolExecutionFailureArtifact({
-              toolCall,
-              code: 'execution_failed',
-              message: approval.reason ?? `Tool execution rejected: ${toolName}`,
-            });
-          }
-        }
 
         if (toolResult === undefined && request.onToolCall) {
           const handled = await request.onToolCall({
@@ -1260,6 +1484,15 @@ async function runRuntimeCompletion(
   if (runtimeResult.status === 'completed') {
     await emitEvent?.({
       type: 'completed',
+      result: runtimeResult,
+      iteration: loopResult.iterations,
+    });
+    return runtimeResult;
+  }
+
+  if (runtimeResult.status === 'cancelled') {
+    await emitEvent?.({
+      type: 'cancelled',
       result: runtimeResult,
       iteration: loopResult.iterations,
     });
